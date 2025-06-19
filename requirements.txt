@@ -1,0 +1,21 @@
+# --- Core Application ---
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+pydantic-settings==2.2.1
+python-multipart==0.0.9
+
+# --- AI & Data Processing ---
+openai==1.28.1 # For OpenAI integration
+PyMuPDF==1.24.1 # For PDF processing
+
+# --- Cloud & Storage ---
+azure-storage-blob==12.19.1
+azure-core==1.30.1
+aiohttp==3.9.5
+
+# --- Development & Testing ---
+ruff==0.4.4      # Linter and formatter
+pytest==8.2.0    # Testing framework
+pytest-asyncio==0.23.6
+httpx==0.27.0    # For TestClient
