@@ -233,7 +233,135 @@ if __name__ == "__main__":
     logger.info("Starting development server...")
     uvicorn.run(
         "main:app", 
-        host=settings.HOST, 
+        host=settings.HOST, # main.py
+import logging
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+
+# Import internal services and routes
+from app.core.config import get_settings
+from app.services.storage_service import StorageService
+from app.services.pdf_service import PDFService
+from app.services.ai_service import AIService
+from app.services.session_service import SessionService
+from app.api.routes.blueprint_routes import blueprint_router
+from app.api.routes.document_routes import document_router
+from app.api.routes.annotation_routes import annotation_router
+
+# Initialize logging and settings
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("SmartBlueprintAPI")
+settings = get_settings()
+
+# --- LIFECYCLE MANAGEMENT ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Booting SmartBlueprint API...")
+    try:
+        app.state.storage_service = StorageService(settings)
+        await app.state.storage_service.verify_connection()
+        logger.info("✅ Azure Storage connected")
+
+        app.state.pdf_service = PDFService(settings)
+        logger.info("✅ PDF Service ready")
+
+        app.state.ai_service = AIService(settings)
+        logger.info("✅ OpenAI connected")
+
+        app.state.session_service = SessionService(settings)
+        logger.info("✅ Session tracking enabled")
+
+        await verify_system_health(app)
+        logger.info("✅ All services running smoothly")
+    except Exception as e:
+        logger.critical(f"❌ Startup failure: {e}")
+        raise
+
+    yield
+
+    logger.info("🛑 Shutting down gracefully...")
+
+
+async def verify_system_health(app: FastAPI):
+    try:
+        blobs_main = await app.state.storage_service.list_blobs(settings.AZURE_CONTAINER_NAME)
+        blobs_cache = await app.state.storage_service.list_blobs(settings.AZURE_CACHE_CONTAINER_NAME)
+        logger.info(f"Storage OK: {len(blobs_main)} main / {len(blobs_cache)} cache blobs")
+    except Exception as e:
+        logger.error(f"System health check failed: {e}")
+        raise
+
+
+# --- FASTAPI APP INIT ---
+app = FastAPI(
+    title="Smart Blueprint Chat API",
+    description="Collaborative document chat, annotation, and AI reasoning for construction blueprints.",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc):
+    logger.error(f"Unhandled Exception: {exc}")
+    return JSONResponse(status_code=500, content={
+        "error": "Server error",
+        "detail": str(exc),
+        "request": str(request.url)
+    })
+
+
+# --- ROUTES ---
+app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Chat"])
+app.include_router(document_router, prefix="/api/v1", tags=["Document Tools"])
+app.include_router(annotation_router, prefix="/api/v1", tags=["Annotations"])
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Smart Blueprint Chat API is live",
+        "docs": "/docs",
+        "version": "2.0.0"
+    }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+@app.get("/api/v1/system/info")
+async def system_info():
+    return {
+        "project": settings.PROJECT_NAME,
+        "version": "2.0.0",
+        "features": [
+            "Blueprint Uploads",
+            "AI Chat",
+            "Annotations",
+            "Blob Storage",
+            "Collaborative access"
+        ]
+    }
+
+
+# --- DEV LAUNCH ---
+if __name__ == "__main__":
+    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=True)
+
         port=settings.PORT, 
         reload=settings.DEBUG,
         log_level="info"
