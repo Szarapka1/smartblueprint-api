@@ -243,7 +243,7 @@ async def global_exception_handler(request: Request, exc: Exception):
             "error": "Server Error",
             "detail": error_detail,
             "url": str(request.url),
-            "timestamp": str(uvicorn.config.datetime.datetime.now())
+            "timestamp": str(datetime.datetime.now())
         }
     )
 
