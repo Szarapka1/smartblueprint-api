@@ -857,3 +857,169 @@ async def admin_get_system_stats(
     try:
         if not admin_token:
             raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        storage_service = request.app.state.storage_service
+        
+        # Get basic storage stats
+        main_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CONTAINER_NAME)
+        cache_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
+        
+        # Count document types
+        pdf_documents = len([b for b in main_blobs if b.endswith('.pdf')])
+        processed_documents = len([b for b in cache_blobs if b.endswith('_chunks.json')])
+        page_images = len([b for b in cache_blobs if '_page_' in b and b.endswith('.png')])
+        chat_histories = len([b for b in cache_blobs if '_chat_' in b and b.endswith('.json')])
+        annotations = len([b for b in cache_blobs if '_annotations' in b and b.endswith('.json')])
+        
+        # Calculate storage usage (approximate)
+        total_cache_files = len(cache_blobs)
+        total_main_files = len(main_blobs)
+        
+        return {
+            "system_stats": {
+                "total_pdf_documents": pdf_documents,
+                "processed_documents": processed_documents,
+                "total_page_images": page_images,
+                "total_chat_files": chat_histories,
+                "total_annotation_files": annotations,
+                "total_cache_files": total_cache_files,
+                "total_main_files": total_main_files,
+                "features_enabled": {
+                    "multi_page_search": True,
+                    "visual_analysis": True,
+                    "text_chunking": True,
+                    "annotations": True,
+                    "collaborative_chat": True
+                }
+            },
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
+
+@blueprint_router.get("/admin/documents/{document_id}/annotations")
+async def admin_get_all_annotations(
+    request: Request,
+    document_id: str,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """
+    ADMIN: Get all annotations for a document (private + public from all users).
+    Requires admin token in X-Admin-Token header.
+    """
+    try:
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        all_annotations = []
+        
+        # Get all annotation files for this document
+        blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
+        annotation_blobs = [blob for blob in blobs if blob.startswith(f"{clean_document_id}_annotations")]
+        
+        for blob_name in annotation_blobs:
+            try:
+                annotation_data = await storage_service.download_blob_as_text(
+                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=blob_name
+                )
+                annotations = json.loads(annotation_data)
+                
+                # Add source file info to each annotation
+                for annotation in annotations:
+                    annotation['source_file'] = blob_name
+                
+                all_annotations.extend(annotations)
+            except Exception as e:
+                logger.warning(f"Could not load annotation file {blob_name}: {e}")
+        
+        # Sort by timestamp
+        all_annotations.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        # Calculate stats
+        stats = {
+            "total_annotations": len(all_annotations),
+            "by_type": {},
+            "by_author": {},
+            "by_page": {}
+        }
+        
+        for annotation in all_annotations:
+            # Count by type
+            ann_type = annotation.get('annotation_type', 'unknown')
+            stats["by_type"][ann_type] = stats["by_type"].get(ann_type, 0) + 1
+            
+            # Count by author
+            author = annotation.get('author', 'unknown')
+            stats["by_author"][author] = stats["by_author"].get(author, 0) + 1
+            
+            # Count by page
+            page = annotation.get('page_number', 0)
+            stats["by_page"][str(page)] = stats["by_page"].get(str(page), 0) + 1
+        
+        return {
+            "document_id": clean_document_id,
+            "annotations": all_annotations,
+            "stats": stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
+
+# ================================
+# HEALTH CHECK AND STATUS ROUTES
+# ================================
+
+@blueprint_router.get("/system/status")
+async def get_system_status(request: Request):
+    """
+    Get basic system status for health monitoring.
+    """
+    try:
+        storage_service = request.app.state.storage_service
+        ai_service = request.app.state.ai_service
+        
+        # Test storage connectivity
+        storage_healthy = False
+        try:
+            await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
+            storage_healthy = True
+        except Exception:
+            pass
+        
+        # Test AI service
+        ai_healthy = bool(ai_service and ai_service.client)
+        
+        return {
+            "status": "healthy" if (storage_healthy and ai_healthy) else "degraded",
+            "components": {
+                "storage_service": "healthy" if storage_healthy else "error",
+                "ai_service": "healthy" if ai_healthy else "error"
+            },
+            "features": {
+                "document_upload": storage_healthy,
+                "ai_chat": storage_healthy and ai_healthy,
+                "visual_analysis": storage_healthy and ai_healthy,
+                "annotations": storage_healthy
+            },
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
