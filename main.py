@@ -243,7 +243,7 @@ async def global_exception_handler(request: Request, exc: Exception):
             "error": "Server Error",
             "detail": error_detail,
             "url": str(request.url),
-            "timestamp": str(datetime.datetime.now())
+            "timestamp": str(datetime.datetime.now())  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
         }
     )
 
@@ -282,7 +282,7 @@ async def health_check():
     
     return {
         "status": "healthy",
-        "timestamp": str(uvicorn.config.datetime.datetime.now()),
+        "timestamp": str(datetime.datetime.now()),  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
         "services": {
             "storage": storage_status,
             "ai": ai_status,
@@ -330,7 +330,7 @@ async def detailed_status():
         
         return {
             "overall_status": "operational",
-            "timestamp": str(uvicorn.config.datetime.datetime.now()),
+            "timestamp": str(datetime.datetime.now()),  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
             "version": "2.1.0",
             "health_checks": health_status,
             "configuration": {
@@ -345,7 +345,7 @@ async def detailed_status():
         return {
             "overall_status": "degraded",
             "error": str(e),
-            "timestamp": str(uvicorn.config.datetime.datetime.now())
+            "timestamp": str(datetime.datetime.now())  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
         }
 
 # --- Local development server ---
