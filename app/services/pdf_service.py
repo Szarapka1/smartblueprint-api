@@ -1,126 +1,156 @@
-# app/services/pdf_service.py
-import logging
-import fitz  # PyMuPDF library
-import json 
-from typing import List, Dict # <--- ADDED THIS LINE
-from app.core.config import AppSettings
-from app.services.storage_service import StorageService
-
-logger = logging.getLogger(__name__)
-
-class PDFService:
-    def __init__(self, settings: AppSettings):
-        self.settings = settings
-        logger.info("PDFService initialized.")
-
-    def _extract_text_from_pdf(self, pdf_bytes: bytes) -> str:
-        """Extracts all text from a PDF for general analysis."""
-        full_text = ""
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            for page in doc:
-                full_text += page.get_text() + "\n\n"
-        logger.info(f"Extracted {len(full_text)} characters of text from PDF.")
-        return full_text
-
-    def _extract_page_images(self, pdf_bytes: bytes) -> list[bytes]:
-        """Renders each page of a PDF into a list of PNG image bytes."""
-        images = []
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            for page_num, page in enumerate(doc):
-                pix = page.get_pixmap(dpi=self.settings.PDF_PREVIEW_RESOLUTION)
-                images.append(pix.tobytes("png"))
-        logger.info(f"Rendered {len(images)} page images from PDF.")
-        return images
-
-    def _chunk_document(self, text: str, chunk_size: int = 2500) -> List[Dict[str, str]]:
-        """
-        Break document into numbered chunks with previews for caching.
-        (Copied from ai_service.py to avoid circular dependency for this direct call)
-        """
-        logger.info(f"📑 Chunking document into sections of max {chunk_size} characters for PDFService")
+@blueprint_router.post("/documents/upload", status_code=201)
+async def upload_shared_document(
+    request: Request,
+    document_id: str,
+    file: UploadFile = File(...)
+):
+    """
+    Uploads a PDF blueprint as a shared document that everyone can access.
+    Uses a custom document_id instead of random session_id.
+    """
+    logger = logging.getLogger("blueprint_upload")
+    
+    try:
+        logger.info(f"🚀 Starting upload for document_id: '{document_id}'")
         
-        # Split by double newlines first (paragraphs)
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        
-        chunks = []
-        current_chunk = ""
-        chunk_id = 1
-        
-        for paragraph in paragraphs:
-            if len(current_chunk + paragraph) > chunk_size and current_chunk:
-                preview = current_chunk.strip()[:200]
-                if len(current_chunk) > 200:
-                    preview += "..."
-                
-                chunks.append({
-                    "chunk_id": chunk_id,
-                    "content": current_chunk.strip(),
-                    "preview": preview
-                })
-                
-                current_chunk = paragraph
-                chunk_id += 1
-            else:
-                if current_chunk:
-                    current_chunk += "\n\n" + paragraph
-                else:
-                    current_chunk = paragraph
-        
-        # Add the final chunk
-        if current_chunk.strip():
-            preview = current_chunk.strip()[:200]
-            if len(current_chunk) > 200:
-                preview += "..."
-                
-            chunks.append({
-                "chunk_id": chunk_id,
-                "content": current_chunk.strip(),
-                "preview": preview
-            })
-        
-        logger.info(f"📑 Document chunked into {len(chunks)} sections by PDFService")
-        return chunks
-
-
-    async def process_and_cache_pdf(
-        self,
-        session_id: str,
-        pdf_bytes: bytes,
-        storage_service: StorageService
-    ):
-        """
-        Orchestrates the processing of a PDF and saves its text, page images,
-        and generated text chunks to the Azure cache container.
-        """
-        # 1. Extract full text
-        full_text = self._extract_text_from_pdf(pdf_bytes)
-        text_blob_name = f"{session_id}_context.txt"
-        await storage_service.upload_file(
-            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=text_blob_name,
-            data=full_text.encode('utf-8')
-        )
-        logger.info(f"Uploaded full text context to '{text_blob_name}'.")
-
-
-        # 2. Extract and upload page images
-        page_images = self._extract_page_images(pdf_bytes)
-        for i, image_bytes in enumerate(page_images):
-            image_blob_name = f"{session_id}_page_{i + 1}.png"
-            await storage_service.upload_file(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=image_blob_name,
-                data=image_bytes
+        # Validate file type
+        if not file.content_type or file.content_type != "application/pdf":
+            logger.warning(f"❌ Invalid file type: {file.content_type}")
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid file type. Only PDF files are allowed."
             )
-        logger.info(f"Uploaded {len(page_images)} page images.")
 
-        # 3. Generate and cache chunks immediately
-        chunks = self._chunk_document(full_text)
-        chunks_blob_name = f"{session_id}_chunks.json"
-        chunks_json = json.dumps(chunks, indent=2, ensure_ascii=False)
+        # Validate file size (60MB limit)
+        max_size = int(os.getenv("MAX_FILE_SIZE_MB", "60")) * 1024 * 1024
+        pdf_bytes = await file.read()
+        if len(pdf_bytes) > max_size:
+            logger.warning(f"❌ File too large: {len(pdf_bytes)} bytes")
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {max_size // (1024*1024)}MB"
+            )
+
+        # Validate and clean the document ID
+        clean_document_id = validate_document_id(document_id)
+        logger.info(f"✅ Clean document ID: '{clean_document_id}'")
+        
+        # Check if required services are available
+        pdf_service = request.app.state.pdf_service
+        storage_service = request.app.state.storage_service
+        
+        logger.info(f"🔧 Service availability check:")
+        logger.info(f"   📁 Storage service: {'✅ Available' if storage_service else '❌ None'}")
+        logger.info(f"   📄 PDF service: {'✅ Available' if pdf_service else '❌ None'}")
+        
+        if not storage_service:
+            logger.error("❌ Storage service unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
+        if not pdf_service:
+            logger.error("❌ PDF service unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="PDF processing service unavailable. Please try again later."
+            )
+
+        # Check if document already exists
+        logger.info(f"🔍 Checking if document '{clean_document_id}' already exists...")
+        try:
+            existing_context = await storage_service.download_blob_as_text(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{clean_document_id}_context.txt"
+            )
+            logger.info(f"📄 Document '{clean_document_id}' already exists")
+            return {
+                "document_id": clean_document_id,
+                "filename": file.filename,
+                "status": "already_exists",
+                "message": f"Document '{clean_document_id}' already exists and is ready for use",
+                "file_size_mb": round(len(pdf_bytes) / (1024*1024), 2)
+            }
+        except:
+            # Document doesn't exist, proceed with upload
+            logger.info(f"📄 Document '{clean_document_id}' is new, proceeding with upload")
+            pass
+
+        # Upload original PDF to main container
+        logger.info(f"📤 Uploading original PDF to main container...")
         await storage_service.upload_file(
-            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=chunks_blob_name,
-            data=chunks_json.encode('utf-8')
+            container_name=settings.AZURE_CONTAINER_NAME,
+            blob_name=f"{clean_document_id}.pdf",
+            data=pdf_bytes
         )
-        logger.info(f"💾 ✅ Cached {len(chunks)} chunks to '{chunks_blob_name}' during PDF processing.")
+        logger.info(f"✅ Original PDF uploaded successfully")
+
+        # Process PDF for shared AI and chat use
+        logger.info(f"⚙️ Starting PDF processing and caching...")
+        try:
+            await pdf_service.process_and_cache_pdf(
+                session_id=clean_document_id,  # Use document_id as session_id for processing
+                pdf_bytes=pdf_bytes,
+                storage_service=storage_service
+            )
+            logger.info(f"✅ PDF processing completed successfully")
+        except Exception as processing_error:
+            logger.error(f"❌ PDF processing failed: {processing_error}")
+            # Clean up the uploaded PDF if processing failed
+            try:
+                await storage_service.delete_blob(
+                    container_name=settings.AZURE_CONTAINER_NAME,
+                    blob_name=f"{clean_document_id}.pdf"
+                )
+                logger.info(f"🧹 Cleaned up original PDF after processing failure")
+            except:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"PDF processing failed: {str(processing_error)}"
+            )
+
+        # Verify the document is ready for chat
+        logger.info(f"🔍 Verifying document is ready for chat...")
+        try:
+            # Check if all required files exist
+            context_exists = await storage_service.blob_exists(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{clean_document_id}_context.txt"
+            )
+            chunks_exists = await storage_service.blob_exists(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{clean_document_id}_chunks.json"
+            )
+            
+            logger.info(f"📋 Verification results:")
+            logger.info(f"   📄 Context file: {'✅ Exists' if context_exists else '❌ Missing'}")
+            logger.info(f"   📑 Chunks file: {'✅ Exists' if chunks_exists else '❌ Missing'}")
+            
+            if not context_exists or not chunks_exists:
+                raise Exception("Required processing files are missing")
+                
+        except Exception as verification_error:
+            logger.error(f"❌ Document verification failed: {verification_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Document processing verification failed: {str(verification_error)}"
+            )
+
+        logger.info(f"🎉 Upload and processing completed successfully for '{clean_document_id}'")
+        
+        return {
+            "document_id": clean_document_id,
+            "filename": file.filename,
+            "status": "processing_complete",
+            "message": f"Document '{clean_document_id}' uploaded and ready for collaborative use",
+            "file_size_mb": round(len(pdf_bytes) / (1024*1024), 2),
+            "ready_for_chat": True
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Upload failed for '{document_id}': {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
