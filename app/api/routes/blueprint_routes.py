@@ -16,7 +16,7 @@ settings = get_settings()
 class DocumentChatRequest(BaseModel):
     document_id: str = Field(..., min_length=3, max_length=50)
     prompt: str = Field(..., min_length=1, max_length=2000)
-    page_number: Optional[int] = Field(None, ge=1)
+    # page_number: Optional[int] = Field(None, ge=1) # <--- REMOVED THIS LINE
     author: str = Field(..., min_length=1, max_length=100)
 
 class DocumentChatResponse(BaseModel):
@@ -150,21 +150,8 @@ async def upload_shared_document(
         # Validate and clean the document ID
         clean_document_id = validate_document_id(document_id)
         
-        # Check if required services are available
         pdf_service = request.app.state.pdf_service
         storage_service = request.app.state.storage_service
-        
-        if not storage_service:
-            raise HTTPException(
-                status_code=503,
-                detail="Storage service unavailable. Please try again later."
-            )
-        
-        if not pdf_service:
-            raise HTTPException(
-                status_code=503,
-                detail="PDF processing service unavailable. Please try again later."
-            )
 
         # Check if document already exists
         try:
@@ -179,8 +166,8 @@ async def upload_shared_document(
                 "message": f"Document '{clean_document_id}' already exists and is ready for use",
                 "file_size_mb": round(len(pdf_bytes) / (1024*1024), 2)
             }
-        except:
-            # Document doesn't exist, proceed with upload
+        except Exception: # Catch all exceptions, not just ResourceNotFoundError for robustness
+            # Document doesn't exist or context missing, proceed with upload/processing
             pass
 
         # Upload original PDF to main container
@@ -210,13 +197,11 @@ async def upload_shared_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-# ... [rest of the routes remain the same] ...
-
 @blueprint_router.post("/documents/{document_id}/chat", response_model=DocumentChatResponse)
 async def chat_with_shared_document(
     request: Request,
     document_id: str,
-    chat: DocumentChatRequest
+    chat: DocumentChatRequest # page_number is no longer in this model
 ):
     """
     USER: Ask private questions about a shared document
@@ -254,18 +239,18 @@ async def chat_with_shared_document(
                 container_name=settings.AZURE_CACHE_CONTAINER_NAME,
                 blob_name=f"{clean_document_id}_context.txt"
             )
-        except:
+        except Exception: # Catch all exceptions for robustness
             raise HTTPException(
                 status_code=404,
                 detail=f"Document '{clean_document_id}' not found. Please upload it first."
             )
 
-        # Get AI response for shared document (uses shared cached chunks)
+        # Get AI response for shared document (AI will decide if it needs page_number via tool)
         ai_response_text = await ai_service.get_ai_response(
             prompt=chat.prompt.strip(),
             document_id=clean_document_id,
             storage_service=storage_service,
-            page_number=chat.page_number,
+            # page_number is no longer passed directly from frontend
             author=chat.author.strip()
         )
 
@@ -281,7 +266,7 @@ async def chat_with_shared_document(
             "timestamp": timestamp,
             "prompt": chat.prompt.strip(),
             "ai_response": ai_response_text,
-            "page_number": chat.page_number
+            "page_number": chat.page_number if hasattr(chat, 'page_number') else None # Keep for history, but always None if not in model
         }
         
         user_chat_history.append(chat_entry)
@@ -316,4 +301,237 @@ async def chat_with_shared_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI response failed: {str(e)}")
 
-# [Include all other routes from your original file...]
+@blueprint_router.get("/documents/{document_id}/my-chats")
+async def get_my_chat_history(
+    request: Request,
+    document_id: str,
+    author: str,  # Query parameter
+    limit: int = 20
+):
+    """
+    USER: Get their own private chat history
+    Each user only sees their own conversations
+    """
+    try:
+        clean_document_id = validate_document_id(document_id)
+        
+        if not author.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Author parameter is required"
+            )
+        
+        if limit < 1 or limit > 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Limit must be between 1 and 100"
+            )
+        
+        storage_service = request.app.state.storage_service
+        
+        # Load user's private chat history
+        chat_history = await load_user_chat_history(clean_document_id, author, storage_service)
+        
+        # Return most recent chats
+        recent_chats = chat_history[-limit:] if len(chat_history) > limit else chat_history
+        
+        return {
+            "document_id": clean_document_id,
+            "author": author,
+            "chat_history": list(reversed(recent_chats)),  # Most recent first
+            "total_conversations": len(chat_history),
+            "showing": len(recent_chats)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
+
+@blueprint_router.get("/documents/{document_id}/info")
+async def get_document_info(
+    request: Request,
+    document_id: str
+):
+    """
+    Get information about a shared document including processing status and stats.
+    """
+    try:
+        clean_document_id = validate_document_id(document_id)
+        
+        ai_service = request.app.state.ai_service
+        storage_service = request.app.state.storage_service
+
+        document_info = await ai_service.get_document_info(
+            document_id=clean_document_id,
+            storage_service=storage_service
+        )
+
+        return document_info
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get document info: {str(e)}")
+
+@blueprint_router.get("/documents")
+async def list_shared_documents(request: Request):
+    """
+    List all available shared documents in the system.
+    """
+    try:
+        storage_service = request.app.state.storage_service
+        
+        # List all cached chunks files to find available documents
+        blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
+        
+        documents = []
+        for blob_name in blobs:
+            if blob_name.endswith('_chunks.json'):
+                # Extract document_id from blob name
+                document_id = blob_name.replace('_chunks.json', '')
+                
+                try:
+                    # Get document info
+                    ai_service = request.app.state.ai_service
+                    doc_info = await ai_service.get_document_info(document_id, storage_service)
+                    documents.append(doc_info)
+                except Exception: # Catch all to continue listing other docs
+                    # If we can't get info, still list the document as available but with a warning
+                    documents.append({
+                        "document_id": document_id,
+                        "status": "available",
+                        "warning": "Could not retrieve full info"
+                    })
+        
+        return {
+            "documents": documents,
+            "total_count": len(documents)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+# SERVICE ADMIN ENDPOINTS - Protected by environment variable
+
+@blueprint_router.get("/admin/documents/{document_id}/all-chats")
+async def admin_get_all_chats(
+    request: Request,
+    document_id: str,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """
+    SERVICE ADMIN: Get ALL chat conversations from ALL users
+    Use this for analytics, understanding usage patterns, etc.
+    """
+    try:
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        # SERVICE: Get ALL chats from ALL users
+        activity_blob_name = f"{clean_document_id}_all_chats.json"
+        try:
+            activity_data = await storage_service.download_blob_as_text(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=activity_blob_name
+            )
+            all_chats = json.loads(activity_data)
+        except Exception: # Robustly handle missing file
+            all_chats = []
+        
+        # Analytics
+        analytics = {
+            "total_conversations": len(all_chats),
+            "unique_users": len(set(chat.get("author") for chat in all_chats)),
+            "avg_prompt_length": sum(chat.get("prompt_length", 0) for chat in all_chats) / len(all_chats) if all_chats else 0,
+            "avg_response_length": sum(chat.get("response_length", 0) for chat in all_chats) / len(all_chats) if all_chats else 0
+        }
+        
+        return {
+            "document_id": clean_document_id,
+            "all_chats": all_chats,  # Everything from everyone
+            "analytics": analytics
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
+
+@blueprint_router.get("/admin/documents/{document_id}/user-chat/{author}")
+async def admin_get_user_chat(
+    request: Request,
+    document_id: str,
+    author: str,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """
+    SERVICE ADMIN: Get specific user's complete chat history
+    """
+    try:
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        # Get specific user's chat history
+        user_chats = await load_user_chat_history(clean_document_id, author, storage_service)
+        
+        return {
+            "document_id": clean_document_id,
+            "author": author,
+            "chat_history": user_chats,
+            "total_conversations": len(user_chats)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
+
+@blueprint_router.get("/admin/system/stats")
+async def admin_get_system_stats(
+    request: Request,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """
+    SERVICE ADMIN: Get overall system statistics
+    """
+    try:
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        storage_service = request.app.state.storage_service
+        
+        # Get basic storage stats
+        main_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CONTAINER_NAME)
+        cache_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
+        
+        # Count document types
+        pdf_documents = len([b for b in main_blobs if b.endswith('.pdf')])
+        processed_documents = len([b for b in cache_blobs if b.endswith('_chunks.json')])
+        
+        return {
+            "system_stats": {
+                "total_pdf_documents": pdf_documents,
+                "processed_documents": processed_documents,
+                "total_cache_files": len(cache_blobs),
+                "total_main_files": len(main_blobs)
+            },
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
