@@ -22,68 +22,19 @@ class AIService:
             logger.critical(f"❌ Failed to initialize OpenAI client: {e}")
             raise
 
-    def _chunk_document(self, text: str, chunk_size: int = 2500) -> List[Dict[str, str]]:
-        """
-        Break document into numbered chunks with previews for caching.
-        """
-        logger.info(f"📑 Chunking document into sections of max {chunk_size} characters")
-        
-        # Split by double newlines first (paragraphs)
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        
-        chunks = []
-        current_chunk = ""
-        chunk_id = 1
-        
-        for paragraph in paragraphs:
-            # If adding this paragraph would exceed chunk size, save current chunk
-            if len(current_chunk + paragraph) > chunk_size and current_chunk:
-                preview = current_chunk.strip()[:200]
-                if len(current_chunk) > 200:
-                    preview += "..."
-                
-                chunks.append({
-                    "chunk_id": chunk_id,
-                    "content": current_chunk.strip(),
-                    "preview": preview
-                })
-                
-                current_chunk = paragraph
-                chunk_id += 1
-            else:
-                if current_chunk:
-                    current_chunk += "\n\n" + paragraph
-                else:
-                    current_chunk = paragraph
-        
-        # Add the final chunk
-        if current_chunk.strip():
-            preview = current_chunk.strip()[:200]
-            if len(current_chunk) > 200:
-                preview += "..."
-                
-            chunks.append({
-                "chunk_id": chunk_id,
-                "content": current_chunk.strip(),
-                "preview": preview
-            })
-        
-        logger.info(f"📑 Document chunked into {len(chunks)} sections")
-        for chunk in chunks:
-            logger.info(f"  - Section {chunk['chunk_id']}: {len(chunk['content'])} chars")
-        
-        return chunks
+    # Removed _chunk_document from here as it's now in pdf_service.py
+    # and called during initial processing for consistency.
+    # The _load_or_create_chunks will now strictly load, not create.
 
-    async def _load_or_create_chunks(self, document_id: str, storage_service: StorageService) -> List[Dict[str, str]]:
+    async def _load_chunks(self, document_id: str, storage_service: StorageService) -> List[Dict[str, str]]:
         """
-        Load cached chunks from blob storage, or create and cache them if they don't exist.
-        Uses document_id instead of session_id for shared access.
+        Load cached chunks from blob storage. Assumes chunks are already created during PDF processing.
         """
         chunks_blob_name = f"{document_id}_chunks.json"
         
         try:
             # Try to load existing cached chunks
-            logger.info(f"🔍 Looking for cached chunks: {chunks_blob_name}")
+            logger.info(f"🔍 Loading cached chunks: {chunks_blob_name}")
             chunks_data = await storage_service.download_blob_as_text(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                 blob_name=chunks_blob_name
@@ -93,34 +44,8 @@ class AIService:
             return chunks
             
         except Exception as e:
-            logger.info(f"📝 No cached chunks found for document '{document_id}', creating new ones: {str(e)[:100]}...")
-            
-            try:
-                # Load full text and create chunks
-                full_text = await storage_service.download_blob_as_text(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{document_id}_context.txt"
-                )
-                
-                logger.info(f"📄 Loaded full document text ({len(full_text)} characters)")
-                
-                # Create chunks
-                chunks = self._chunk_document(full_text)
-                
-                # Cache the chunks for future use by anyone
-                chunks_json = json.dumps(chunks, indent=2, ensure_ascii=False)
-                await storage_service.upload_file(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=chunks_blob_name,
-                    data=chunks_json.encode('utf-8')
-                )
-                logger.info(f"💾 ✅ Cached {len(chunks)} chunks for shared document '{document_id}'")
-                
-                return chunks
-                
-            except Exception as create_error:
-                logger.error(f"❌ Failed to create chunks for document '{document_id}': {create_error}")
-                raise
+            logger.error(f"❌ Failed to load chunks for document '{document_id}'. They might not have been created during upload or there's a storage issue: {e}")
+            raise # Re-raise if chunks are essential and not found/loaded
 
     async def get_ai_response(
         self,
@@ -137,8 +62,8 @@ class AIService:
         logger.info("📋 Using SHARED CACHED TWO-PASS approach")
 
         try:
-            # Step 1: Load cached chunks for this shared document
-            chunks = await self._load_or_create_chunks(document_id, storage_service)
+            # Step 1: Load cached chunks for this shared document (they should already exist from PDFService)
+            chunks = await self._load_chunks(document_id, storage_service)
             
             # Step 2: PASS 1 - AI identifies relevant sections using cached previews
             logger.info("🔍 PASS 1: AI identifying relevant sections from shared cached data")
