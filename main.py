@@ -74,7 +74,6 @@ except Exception as e:
         DEBUG = False
         HOST = "0.0.0.0"
         PORT = 8000
-        CORS_ORIGINS = ["*"]
         AZURE_STORAGE_CONNECTION_STRING = None
         AZURE_CONTAINER_NAME = "blueprints"
         AZURE_CACHE_CONTAINER_NAME = "blueprints-cache"
@@ -218,14 +217,36 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# --- CORS Middleware ---
-cors_origins = getattr(settings, 'CORS_ORIGINS', ["*"])
+# --- CORS Middleware (FIXED) ---
+# Explicitly allow localhost origins for development
+cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000", 
+    "https://localhost:3000",
+    "http://localhost:3001",  # In case you use a different port
+    "http://localhost:8080",  # Common alternative port
+]
+
+# Add any additional origins from settings
+if hasattr(settings, 'CORS_ORIGINS') and settings.CORS_ORIGINS:
+    if isinstance(settings.CORS_ORIGINS, str):
+        # Handle comma-separated string from environment variables
+        additional_origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(',')]
+        cors_origins.extend(additional_origins)
+    elif isinstance(settings.CORS_ORIGINS, list):
+        cors_origins.extend(settings.CORS_ORIGINS)
+
+# Remove duplicates while preserving order
+cors_origins = list(dict.fromkeys(cors_origins))
+
+logger.info(f"🌐 CORS enabled for origins: {cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*"],
 )
 
 # --- Robust exception handler ---
@@ -235,7 +256,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.debug(f"Traceback: {traceback.format_exc()}")
     
     # Don't expose internal errors in production
-    error_detail = str(exc) if settings.DEBUG else "Internal server error"
+    error_detail = str(exc) if getattr(settings, 'DEBUG', False) else "Internal server error"
     
     return JSONResponse(
         status_code=500,
@@ -243,7 +264,7 @@ async def global_exception_handler(request: Request, exc: Exception):
             "error": "Server Error",
             "detail": error_detail,
             "url": str(request.url),
-            "timestamp": str(datetime.datetime.now())  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
+            "timestamp": datetime.datetime.now().isoformat()
         }
     )
 
@@ -282,7 +303,7 @@ async def health_check():
     
     return {
         "status": "healthy",
-        "timestamp": str(datetime.datetime.now()),  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
+        "timestamp": datetime.datetime.now().isoformat(),
         "services": {
             "storage": storage_status,
             "ai": ai_status,
@@ -295,7 +316,7 @@ async def health_check():
 @app.get("/api/v1/system/info", tags=["General"])
 async def system_info():
     """System information and capabilities"""
-    features = ["Basic API", "Error Handling", "Health Monitoring"]
+    features = ["Basic API", "Error Handling", "Health Monitoring", "CORS Support"]
     
     if hasattr(app.state, 'storage_service') and app.state.storage_service:
         features.extend(["Blueprint Uploads", "File Storage", "Blob Integration"])
@@ -312,8 +333,9 @@ async def system_info():
     return {
         "project": getattr(settings, 'PROJECT_NAME', 'Smart Blueprint Chat API'),
         "version": "2.1.0",
-        "environment": "development" if settings.DEBUG else "production",
+        "environment": "development" if getattr(settings, 'DEBUG', False) else "production",
         "features": features,
+        "cors_origins": cors_origins,
         "endpoints": {
             "docs": "/docs",
             "health": "/health",
@@ -330,12 +352,13 @@ async def detailed_status():
         
         return {
             "overall_status": "operational",
-            "timestamp": str(datetime.datetime.now()),  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
+            "timestamp": datetime.datetime.now().isoformat(),
             "version": "2.1.0",
             "health_checks": health_status,
             "configuration": {
-                "debug_mode": settings.DEBUG,
-                "cors_enabled": bool(cors_origins),
+                "debug_mode": getattr(settings, 'DEBUG', False),
+                "cors_enabled": True,
+                "cors_origins_count": len(cors_origins),
                 "storage_configured": bool(getattr(settings, 'AZURE_STORAGE_CONNECTION_STRING', None)),
                 "ai_configured": bool(getattr(settings, 'OPENAI_API_KEY', None))
             }
@@ -345,8 +368,17 @@ async def detailed_status():
         return {
             "overall_status": "degraded",
             "error": str(e),
-            "timestamp": str(datetime.datetime.now())  # ✅ FIXED: Use datetime.datetime instead of uvicorn.config.datetime
+            "timestamp": datetime.datetime.now().isoformat()
         }
+
+# --- CORS preflight handler ---
+@app.options("/{path:path}")
+async def handle_cors_preflight(path: str):
+    """Handle CORS preflight requests"""
+    return JSONResponse(
+        status_code=200,
+        content={"message": "CORS preflight successful"}
+    )
 
 # --- Local development server ---
 if __name__ == "__main__":
