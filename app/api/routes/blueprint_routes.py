@@ -150,8 +150,21 @@ async def upload_shared_document(
         # Validate and clean the document ID
         clean_document_id = validate_document_id(document_id)
         
+        # ✅ Check if required services are available
         pdf_service = request.app.state.pdf_service
         storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
+        if not pdf_service:
+            raise HTTPException(
+                status_code=503,
+                detail="PDF processing service unavailable. Please try again later."
+            )
 
         # Check if document already exists
         try:
@@ -230,8 +243,21 @@ async def chat_with_shared_document(
                 detail="Author name cannot be empty"
             )
         
+        # ✅ Check if required services are available
         ai_service = request.app.state.ai_service
         storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
+        if not ai_service:
+            raise HTTPException(
+                status_code=503,
+                detail="AI service unavailable. Please try again later."
+            )
 
         # Verify document exists
         try:
@@ -329,6 +355,12 @@ async def get_my_chat_history(
         
         storage_service = request.app.state.storage_service
         
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
         # Load user's private chat history
         chat_history = await load_user_chat_history(clean_document_id, author, storage_service)
         
@@ -361,6 +393,18 @@ async def get_document_info(
         
         ai_service = request.app.state.ai_service
         storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
+        if not ai_service:
+            raise HTTPException(
+                status_code=503,
+                detail="AI service unavailable. Please try again later."
+            )
 
         document_info = await ai_service.get_document_info(
             document_id=clean_document_id,
@@ -382,6 +426,12 @@ async def list_shared_documents(request: Request):
     try:
         storage_service = request.app.state.storage_service
         
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
         # List all cached chunks files to find available documents
         blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
         
@@ -394,8 +444,15 @@ async def list_shared_documents(request: Request):
                 try:
                     # Get document info
                     ai_service = request.app.state.ai_service
-                    doc_info = await ai_service.get_document_info(document_id, storage_service)
-                    documents.append(doc_info)
+                    if ai_service:
+                        doc_info = await ai_service.get_document_info(document_id, storage_service)
+                        documents.append(doc_info)
+                    else:
+                        # If AI service unavailable, still list the document
+                        documents.append({
+                            "document_id": document_id,
+                            "status": "available"
+                        })
                 except:
                     # If we can't get info, still list the document
                     documents.append({
@@ -431,6 +488,12 @@ async def admin_get_all_chats(
         
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
         
         # SERVICE: Get ALL chats from ALL users
         activity_blob_name = f"{clean_document_id}_all_chats.json"
@@ -481,6 +544,12 @@ async def admin_get_user_chat(
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
         
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
+        
         # Get specific user's chat history
         user_chats = await load_user_chat_history(clean_document_id, author, storage_service)
         
@@ -511,6 +580,12 @@ async def admin_get_system_stats(
         validate_admin_access(admin_token)
         
         storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Storage service unavailable. Please try again later."
+            )
         
         # Get basic storage stats
         main_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CONTAINER_NAME)
