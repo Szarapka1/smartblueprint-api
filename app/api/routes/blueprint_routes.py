@@ -36,7 +36,7 @@ class CreateAnnotationRequest(BaseModel):
     x: float = Field(..., ge=0)
     y: float = Field(..., ge=0)
     text: str = Field(..., min_length=1, max_length=1000)
-    annotation_type: str = Field(..., regex="^(note|highlight|pen)$")
+    annotation_type: str = Field(..., pattern="^(note|highlight|pen)$")
     author: str = Field(..., min_length=1, max_length=100)
     is_private: bool = Field(default=True)
 
