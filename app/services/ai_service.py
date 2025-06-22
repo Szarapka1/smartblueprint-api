@@ -6,7 +6,7 @@ import re
 import json
 from typing import Optional, List, Dict
 from openai import OpenAI, APIError
-
+from openai.types.chat import ChatCompletionToolParam # Import for tool definition
 from app.core.config import AppSettings
 from app.services.storage_service import StorageService
 
@@ -22,19 +22,68 @@ class AIService:
             logger.critical(f"❌ Failed to initialize OpenAI client: {e}")
             raise
 
-    # Removed _chunk_document from here as it's now in pdf_service.py
-    # and called during initial processing for consistency.
-    # The _load_or_create_chunks will now strictly load, not create.
-
-    async def _load_chunks(self, document_id: str, storage_service: StorageService) -> List[Dict[str, str]]:
+    def _chunk_document(self, text: str, chunk_size: int = 2500) -> List[Dict[str, str]]:
         """
-        Load cached chunks from blob storage. Assumes chunks are already created during PDF processing.
+        Break document into numbered chunks with previews for caching.
+        """
+        logger.info(f"📑 Chunking document into sections of max {chunk_size} characters")
+        
+        # Split by double newlines first (paragraphs)
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        
+        chunks = []
+        current_chunk = ""
+        chunk_id = 1
+        
+        for paragraph in paragraphs:
+            # If adding this paragraph would exceed chunk size, save current chunk
+            if len(current_chunk + paragraph) > chunk_size and current_chunk:
+                preview = current_chunk.strip()[:200]
+                if len(current_chunk) > 200:
+                    preview += "..."
+                
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "content": current_chunk.strip(),
+                    "preview": preview
+                })
+                
+                current_chunk = paragraph
+                chunk_id += 1
+            else:
+                if current_chunk:
+                    current_chunk += "\n\n" + paragraph
+                else:
+                    current_chunk = paragraph
+        
+        # Add the final chunk
+        if current_chunk.strip():
+            preview = current_chunk.strip()[:200]
+            if len(current_chunk) > 200:
+                preview += "..."
+                
+            chunks.append({
+                "chunk_id": chunk_id,
+                "content": current_chunk.strip(),
+                "preview": preview
+            })
+        
+        logger.info(f"📑 Document chunked into {len(chunks)} sections")
+        for chunk in chunks:
+            logger.info(f"  - Section {chunk['chunk_id']}: {len(chunk['content'])} chars")
+        
+        return chunks
+
+    async def _load_or_create_chunks(self, document_id: str, storage_service: StorageService) -> List[Dict[str, str]]:
+        """
+        Load cached chunks from blob storage, or create and cache them if they don't exist.
+        Uses document_id instead of session_id for shared access.
         """
         chunks_blob_name = f"{document_id}_chunks.json"
         
         try:
             # Try to load existing cached chunks
-            logger.info(f"🔍 Loading cached chunks: {chunks_blob_name}")
+            logger.info(f"🔍 Looking for cached chunks: {chunks_blob_name}")
             chunks_data = await storage_service.download_blob_as_text(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                 blob_name=chunks_blob_name
@@ -44,229 +93,198 @@ class AIService:
             return chunks
             
         except Exception as e:
-            logger.error(f"❌ Failed to load chunks for document '{document_id}'. They might not have been created during upload or there's a storage issue: {e}")
-            raise # Re-raise if chunks are essential and not found/loaded
+            logger.info(f"📝 No cached chunks found for document '{document_id}', creating new ones: {str(e)[:100]}...")
+            
+            try:
+                # Load full text and create chunks
+                full_text = await storage_service.download_blob_as_text(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=f"{document_id}_context.txt"
+                )
+                
+                logger.info(f"📄 Loaded full document text ({len(full_text)} characters)")
+                
+                # Create chunks
+                chunks = self._chunk_document(full_text)
+                
+                # Cache the chunks for future use by anyone
+                chunks_json = json.dumps(chunks, indent=2, ensure_ascii=False)
+                await storage_service.upload_file(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=chunks_blob_name,
+                    data=chunks_json.encode('utf-8')
+                )
+                logger.info(f"💾 ✅ Cached {len(chunks)} chunks for shared document '{document_id}'")
+                
+                return chunks
+                
+            except Exception as create_error:
+                logger.error(f"❌ Failed to create chunks for document '{document_id}': {create_error}")
+                raise
+
+    # Define the tool for getting page images
+    _TOOLS = [
+        ChatCompletionToolParam(
+            type="function",
+            function={
+                "name": "get_page_image",
+                "description": (
+                    "Retrieves the image of a specific page from the blueprint document to answer visual questions. "
+                    "Use this tool when the user asks about visual elements, layouts, specific symbols, or something "
+                    "that requires looking at the actual blueprint drawing (e.g., 'What does the symbol for fire alarms look like on page 5?', "
+                    "'Show me the layout of page 2', 'Where is the main entrance on this page?')."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page_number": {
+                            "type": "integer",
+                            "description": "The 1-based page number of the document to retrieve the image for.",
+                            "minimum": 1
+                        }
+                    },
+                    "required": ["page_number"]
+                },
+            }
+        )
+    ]
 
     async def get_ai_response(
         self,
         prompt: str,
         document_id: str,
         storage_service: StorageService,
-        page_number: Optional[int] = None,
+        # page_number: Optional[int] = None, # No longer directly passed for AI decision
         author: Optional[str] = None
     ) -> str:
         """
         Generate AI response for a shared document that everyone can access.
+        The AI can now decide to use tools (like getting page images).
         """
         logger.info(f"🧠 Generating AI response for shared document '{document_id}'" + (f" by {author}" if author else ""))
-        logger.info("📋 Using SHARED CACHED TWO-PASS approach")
+        logger.info("📋 Using SHARED CACHED TWO-PASS approach with potential Tool Calling")
 
         try:
-            # Step 1: Load cached chunks for this shared document (they should already exist from PDFService)
-            chunks = await self._load_chunks(document_id, storage_service)
+            # Step 1: Load cached chunks for this shared document
+            chunks = await self._load_or_create_chunks(document_id, storage_service)
             
             # Step 2: PASS 1 - AI identifies relevant sections using cached previews
             logger.info("🔍 PASS 1: AI identifying relevant sections from shared cached data")
             relevant_chunk_ids = await self._identify_relevant_sections(prompt, chunks, document_id)
             
-            # Step 3: PASS 2 - AI answers using focused sections
-            logger.info(f"🎯 PASS 2: AI answering using shared cached sections {relevant_chunk_ids}")
-            return await self._get_focused_response(
-                prompt, chunks, relevant_chunk_ids, storage_service, document_id, page_number, author
-            )
+            # Step 3: Prepare system message and relevant content for AI
+            relevant_sections_text = self._format_relevant_sections(chunks, relevant_chunk_ids)
 
-        except Exception as e:
-            logger.error(f"❌ Error in shared document AI response for '{document_id}': {e}")
-            return f"An error occurred while analyzing the shared document: {str(e)}"
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an experienced construction superintendent who reads blueprint documents. "
+                        "Read the document sections provided and answer questions with specific facts and numbers. "
+                        "Give direct answers like you're looking right at the plans - no hedging or analysis."
+                        "If the user asks a visual question (e.g., about a symbol, layout, or something on 'this page'), "
+                        "you MUST use the `get_page_image` tool to retrieve the relevant page's image. "
+                        "When using the tool, ensure the page number is valid for the document."
+                        "\n\nDOCUMENT SECTIONS:\n" + relevant_sections_text
+                    )
+                },
+                {"role": "user", "content": prompt}
+            ]
 
-    async def _identify_relevant_sections(self, prompt: str, chunks: List[Dict[str, str]], document_id: str) -> List[int]:
-        """
-        PASS 1: AI reads cached chunk previews and identifies which sections are most relevant.
-        """
-        logger.info(f"🔍 Analyzing {len(chunks)} cached sections for document '{document_id}' to find relevance")
-        
-        # Create section summaries from cached previews
-        chunk_summaries = []
-        for chunk in chunks:
-            chunk_summaries.append(f"SECTION {chunk['chunk_id']}: {chunk['preview']}")
-        
-        all_summaries = "\n\n".join(chunk_summaries)
-        
-        try:
+            # Step 4: Initial AI call - AI decides if it needs a tool
+            logger.info("🤖 Making initial AI call (tool-enabled)...")
             response = self.client.chat.completions.create(
                 model=self.settings.OPENAI_MODEL,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": (
-                            "You are a construction document analyst. Your job is to identify which sections "
-                            "of a blueprint document are most relevant to answer a specific question.\n\n"
-                            "You will be shown previews of all document sections. Identify the 3-5 most "
-                            "relevant section numbers that would help answer the user's question.\n\n"
-                            "Respond with ONLY the section numbers, separated by commas. For example: 2,7,12,15\n"
-                            "If you're unsure, include a few extra sections rather than missing important ones."
-                        )
-                    },
-                    {
-                        "role": "user", 
-                        "content": (
-                            f"QUESTION TO ANSWER: {prompt}\n\n"
-                            f"DOCUMENT SECTION PREVIEWS:\n{all_summaries}\n\n"
-                            f"Which section numbers (3-5 max) are most relevant to answer this question?"
-                        )
-                    }
-                ],
-                temperature=0.0,
-                max_tokens=100
-            )
-            
-            # Parse the AI response to extract section numbers
-            ai_response = response.choices[0].message.content.strip()
-            logger.info(f"🔍 AI section analysis result for '{document_id}': '{ai_response}'")
-            
-            # Extract numbers from the response
-            section_numbers = []
-            for num_str in re.findall(r'\d+', ai_response):
-                section_num = int(num_str)
-                if 1 <= section_num <= len(chunks):
-                    section_numbers.append(section_num)
-            
-            # Ensure we have reasonable number of sections
-            if not section_numbers:
-                logger.warning(f"⚠️ No valid sections identified for '{document_id}', using default sections 1-3")
-                section_numbers = [1, 2, 3]
-            elif len(section_numbers) > 5:
-                logger.info(f"📊 Too many sections identified ({len(section_numbers)}) for '{document_id}', limiting to first 5")
-                section_numbers = section_numbers[:5]
-            
-            logger.info(f"✅ Selected sections for '{document_id}': {section_numbers}")
-            return section_numbers
-            
-        except APIError as e:
-            logger.error(f"🚫 OpenAI API error in section identification for '{document_id}': {e}")
-            return [1, 2, 3]  # Fallback
-        except Exception as e:
-            logger.error(f"❌ Error in section identification for '{document_id}': {e}")
-            return [1, 2, 3]  # Fallback
-
-    async def _get_focused_response(
-        self,
-        prompt: str,
-        chunks: List[Dict[str, str]],
-        relevant_chunk_ids: List[int],
-        storage_service: StorageService,
-        document_id: str,
-        page_number: Optional[int] = None,
-        author: Optional[str] = None
-    ) -> str:
-        """
-        PASS 2: AI answers the question using only the identified relevant sections from shared cache.
-        """
-        logger.info(f"🎯 Building focused response for '{document_id}' using sections: {relevant_chunk_ids}")
-        
-        # Gather the relevant sections from cached chunks
-        relevant_sections = []
-        total_focused_chars = 0
-        
-        for chunk_id in relevant_chunk_ids:
-            # Find the chunk with this ID
-            for chunk in chunks:
-                if chunk['chunk_id'] == chunk_id:
-                    section_content = f"=== SECTION {chunk_id} ===\n{chunk['content']}"
-                    relevant_sections.append(section_content)
-                    total_focused_chars += len(chunk['content'])
-                    logger.info(f"📄 Including Section {chunk_id}: {len(chunk['content'])} chars")
-                    break
-        
-        # Combine all relevant sections
-        focused_content = "\n\n".join(relevant_sections)
-        
-        # Calculate token savings for logging
-        total_document_chars = sum(len(chunk['content']) for chunk in chunks)
-        token_savings_percent = ((total_document_chars - total_focused_chars) / total_document_chars) * 100
-        estimated_tokens = total_focused_chars // 4  # Rough token estimation
-        
-        logger.info(f"📊 Token optimization summary for '{document_id}':")
-        logger.info(f"   - Full document: {total_document_chars} chars (~{total_document_chars//4} tokens)")
-        logger.info(f"   - Focused content: {total_focused_chars} chars (~{estimated_tokens} tokens)")
-        logger.info(f"   - Savings: {token_savings_percent:.1f}% token reduction")
-        
-        # Build the user message content
-        user_content = [
-            {
-                "type": "text",
-                "text": (
-                    "You are an experienced construction superintendent reading blueprint documents. "
-                    "Answer questions directly using the specific information provided in the document sections.\n\n"
-                    f"DOCUMENT SECTIONS:\n\n{focused_content}\n\n"
-                    f"QUESTION: {prompt}\n\n"
-                    "INSTRUCTIONS:\n"
-                    "- Give direct, specific answers using the exact information from the sections above\n"
-                    "- Quote specific measurements, materials, quantities, and specifications when available\n"
-                    "- If you see window schedules, door schedules, or quantity lists - state the exact numbers\n"
-                    "- Don't hedge or say 'not specified' unless truly missing\n"
-                    "- Be concise and factual - no unnecessary analysis or recommendations\n"
-                    "- Answer like you're reading directly from the plans"
-                )
-            }
-        ]
-
-        # Add page image if provided
-        if page_number is not None:
-            image_blob_name = f"{document_id}_page_{page_number}.png"
-            try:
-                image_bytes = await storage_service.download_blob_as_bytes(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=image_blob_name
-                )
-                base64_image = base64.b64encode(image_bytes).decode("utf-8")
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{base64_image}",
-                        "detail": "high"
-                    }
-                })
-                logger.info(f"🖼️ Enhanced response with image from page {page_number} of '{document_id}'")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not load image for page {page_number} of '{document_id}': {e}")
-
-        try:
-            # Call OpenAI with the focused content
-            response = self.client.chat.completions.create(
-                model=self.settings.OPENAI_MODEL,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": (
-                            "You are an experienced construction superintendent who reads blueprints daily. "
-                            "Read the document sections provided and answer questions with specific facts and numbers. "
-                            "Give direct answers like you're looking right at the plans - no hedging or analysis."
-                        )
-                    },
-                    {
-                        "role": "user", 
-                        "content": user_content
-                    }
-                ],
+                messages=messages,
+                tools=self._TOOLS, # Pass the defined tools
+                tool_choice="auto", # Allow AI to choose a tool
                 temperature=self.settings.OPENAI_TEMPERATURE,
                 max_tokens=self.settings.OPENAI_MAX_TOKENS
             )
 
-            ai_message = response.choices[0].message.content
-            logger.info(f"✅ Focused AI response received for shared document '{document_id}'" + (f" (requested by {author})" if author else ""))
-            
-            if ai_message:
-                return ai_message.strip()
+            response_message = response.choices[0].message
+            tool_calls = response_message.tool_calls
+
+            if tool_calls:
+                # Step 5: AI wants to use a tool (e.g., get_page_image)
+                logger.info(f"🔧 AI requested tool call: {tool_calls[0].function.name}")
+                if tool_calls[0].function.name == "get_page_image":
+                    try:
+                        arguments = json.loads(tool_calls[0].function.arguments)
+                        page_number_for_tool = arguments.get("page_number")
+                        
+                        if page_number_for_tool is None:
+                            logger.error("❌ Tool call missing page_number argument.")
+                            return "I needed a page number to answer that visual question, but it wasn't specified."
+
+                        # Retrieve and encode image
+                        image_blob_name = f"{document_id}_page_{page_number_for_tool}.png"
+                        image_bytes = await storage_service.download_blob_as_bytes(
+                            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                            blob_name=image_blob_name
+                        )
+                        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                        
+                        logger.info(f"🖼️ Retrieved image for page {page_number_for_tool}.")
+
+                        # Add image to messages for a follow-up AI call
+                        messages.append(response_message) # The AI's tool call response
+                        messages.append(
+                            {
+                                "tool_call_id": tool_calls[0].id,
+                                "role": "tool",
+                                "name": tool_calls[0].function.name,
+                                "content": json.dumps({"status": "success", "page_number": page_number_for_tool}) # Tool output confirmation
+                            }
+                        )
+                        
+                        # Add image content for the final AI call
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt}, # Original prompt
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}", "detail": "high"}}
+                            ]
+                        })
+                        logger.info("🔄 Making follow-up AI call with image context...")
+                        second_response = self.client.chat.completions.create(
+                            model=self.settings.OPENAI_MODEL,
+                            messages=messages,
+                            temperature=self.settings.OPENAI_TEMPERATURE,
+                            max_tokens=self.settings.OPENAI_MAX_TOKENS
+                        )
+                        return second_response.choices[0].message.content.strip()
+
+                    except Exception as tool_error:
+                        logger.error(f"❌ Error processing tool call for '{document_id}': {tool_error}")
+                        return f"I tried to get a page image but encountered an error: {str(tool_error)}. Please try again or rephrase."
+                else:
+                    return f"The AI requested an unsupported tool: {tool_calls[0].function.name}."
             else:
-                return "The AI returned an empty response. Please try rephrasing your question."
+                # Step 5: AI responded directly (no tool needed)
+                logger.info("💬 AI responded directly (no tool call).")
+                ai_message = response_message.content
+                if ai_message:
+                    return ai_message.strip()
+                else:
+                    return "The AI returned an empty response. Please try rephrasing your question."
 
         except APIError as e:
-            logger.error(f"🚫 OpenAI API error in focused response for '{document_id}': {e}")
+            logger.error(f"🚫 OpenAI API error: {e}")
             return f"OpenAI API error: {e}"
         except Exception as e:
-            logger.error(f"❌ Unexpected error in focused response for '{document_id}': {e}")
+            logger.error(f"❌ Unexpected error in AI response for '{document_id}': {e}")
             return f"An error occurred while generating your answer: {str(e)}"
+
+    def _format_relevant_sections(self, chunks: List[Dict[str, str]], relevant_chunk_ids: List[int]) -> str:
+        """Helper to format relevant sections into a single string for the AI."""
+        relevant_sections = []
+        for chunk_id in relevant_chunk_ids:
+            for chunk in chunks:
+                if chunk['chunk_id'] == chunk_id:
+                    relevant_sections.append(f"=== SECTION {chunk_id} ===\n{chunk['content']}")
+                    break
+        return "\n\n".join(relevant_sections)
 
     async def get_document_info(self, document_id: str, storage_service: StorageService) -> Dict[str, any]:
         """
