@@ -1233,3 +1233,26 @@ async def publish_annotation(
         storage_service = request.app.state.storage_service
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service not available")
+        
+        all_annotations = await load_document_annotations(clean_document_id, storage_service)
+        
+        updated = False
+        for annotation in all_annotations:
+            if annotation.get("annotation_id") == clean_annotation_id and annotation.get("author") == clean_author:
+                annotation["is_public"] = True
+                updated = True
+                break
+        
+        if not updated:
+            raise HTTPException(status_code=404, detail="Annotation not found or not owned by you")
+        
+        await save_annotations(clean_document_id, all_annotations, storage_service)
+        
+        logger.info(f"Published annotation {clean_annotation_id} by {clean_author}")
+        return {"status": "published", "annotation_id": clean_annotation_id}
+    
+    except HTTPException:
+        raise  # Re-raise expected HTTP errors
+    except Exception as e:
+        logger.error(f"Failed to publish annotation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to publish annotation: {str(e)}")
