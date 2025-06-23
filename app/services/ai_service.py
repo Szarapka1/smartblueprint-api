@@ -1,23 +1,42 @@
-# app/services/ai_service.py - ULTIMATE PROFESSIONAL VERSION
+# app/services/ai_service.py - ULTIMATE PROFESSIONAL VERSION (with DEBUG logging)
 
-import logging
-import base64
-import re
-import json
-from typing import Optional, List, Dict, Any, Tuple, Union
-from dataclasses import dataclass
-from enum import Enum
-from openai import OpenAI, APIError
-from openai.types.chat import ChatCompletionToolParam
-import math
-from datetime import datetime, timedelta
 import asyncio
+import base64
+import json
+import logging
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from app.core.config import get_settings, AppSettings
+# Set up logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Safety check for OpenAI import
+try:
+    from openai import OpenAI, APIError
+    from openai.types.chat import ChatCompletionToolParam
+    logger.info("✅ OpenAI SDK imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Failed to import OpenAI SDK: {e}")
+    raise
+
+# Internal config and services
+from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
 
-logger = logging.getLogger(__name__)
+# Initialize OpenAI client
+try:
+    settings: AppSettings = get_settings()
+    openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    logger.info("🚀 OpenAI client initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+    raise
 
 # Professional data structures for enhanced type safety and validation
 class OccupancyType(Enum):
