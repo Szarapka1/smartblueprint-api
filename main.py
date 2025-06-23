@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
     app.state.ai_service = None
     if AIService and settings and settings.OPENAI_API_KEY:
         try:
-            # FIX: Initialize the new AIService by passing the entire settings object
+            # Initialize the new AIService by passing the entire settings object
             app.state.ai_service = AIService(settings=settings)
             logger.info("✅ AI Service initialized")
         except Exception as e:
@@ -90,22 +90,30 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️ AI Service disabled: class not available or OPENAI_API_KEY missing.")
 
     app.state.pdf_service = None
-    if PDFService:
+    if PDFService and settings:
         try:
-            # Assuming PDFService has a simple constructor
-            app.state.pdf_service = PDFService()
+            # FIX: Pass the settings object to the PDFService constructor.
+            app.state.pdf_service = PDFService(settings=settings)
             logger.info("✅ PDF Service initialized")
         except Exception as e:
             logger.error(f"❌ PDF Service initialization failed: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+    else:
+         logger.warning("⚠️ PDF Service disabled: class not available or settings missing.")
+
 
     app.state.session_service = None
-    if SessionService:
+    if SessionService and settings:
         try:
-            # Assuming SessionService has a simple constructor
-            app.state.session_service = SessionService()
+            # FIX: Pass the settings object to the SessionService constructor.
+            app.state.session_service = SessionService(settings=settings)
             logger.info("✅ Session Service initialized")
         except Exception as e:
             logger.error(f"❌ Session Service initialization failed: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+    else:
+        logger.warning("⚠️ Session Service disabled: class not available or settings missing.")
+
 
     # --- Log final status ---
     active_services = [
@@ -121,8 +129,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("🛑 Shutting down gracefully...")
-    if hasattr(app.state, 'ai_service') and app.state.ai_service:
-        # Gracefully shutdown the AI service's thread pool
+    if hasattr(app.state, 'ai_service') and app.state.ai_service and hasattr(app.state.ai_service, '__aexit__'):
         await app.state.ai_service.__aexit__(None, None, None)
         logger.info("🤖 AI Service shutdown complete.")
 
@@ -202,8 +209,8 @@ async def health_check(request: Request):
         "services": {
             "storage": "connected" if hasattr(app_state, 'storage_service') and app_state.storage_service else "disabled",
             "ai": "connected" if hasattr(app_state, 'ai_service') and app_state.ai_service else "disabled",
-            "pdf": "available" if hasattr(app_state, 'pdf_service') and app_state.pdf_service else "disabled",
-            "sessions": "active" if hasattr(app_state, 'session_service') and app_state.session_service else "disabled"
+            "pdf": "available" if hasattr(app_state, 'pdf_service') and app.state.pdf_service else "disabled",
+            "sessions": "active" if hasattr(app_state, 'session_service') and app.state.session_service else "disabled"
         },
         "version": "2.1.0"
     }
