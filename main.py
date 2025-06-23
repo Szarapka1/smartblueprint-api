@@ -77,10 +77,10 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️ Storage Service disabled: class not available or connection string missing.")
 
     app.state.ai_service = None
-if ProfessionalAIService and settings and settings.OPENAI_API_KEY:
-    try:
-        # Initialize the ProfessionalAIService by passing the entire settings object
-        app.state.ai_service = ProfessionalAIService(settings=settings)
+    if ProfessionalAIService and settings and settings.OPENAI_API_KEY:
+        try:
+            # Initialize the ProfessionalAIService by passing the entire settings object
+            app.state.ai_service = ProfessionalAIService(settings=settings)
             logger.info("✅ AI Service initialized")
         except Exception as e:
             logger.error(f"❌ AI Service initialization failed: {e}")
@@ -100,7 +100,6 @@ if ProfessionalAIService and settings and settings.OPENAI_API_KEY:
     else:
          logger.warning("⚠️ PDF Service disabled: class not available or settings missing.")
 
-
     app.state.session_service = None
     if SessionService and settings:
         try:
@@ -112,7 +111,6 @@ if ProfessionalAIService and settings and settings.OPENAI_API_KEY:
             logger.debug(f"Traceback: {traceback.format_exc()}")
     else:
         logger.warning("⚠️ Session Service disabled: class not available or settings missing.")
-
 
     # --- Log final status ---
     active_services = [
@@ -131,7 +129,6 @@ if ProfessionalAIService and settings and settings.OPENAI_API_KEY:
     if hasattr(app.state, 'ai_service') and app.state.ai_service and hasattr(app.state.ai_service, '__aexit__'):
         await app.state.ai_service.__aexit__(None, None, None)
         logger.info("🤖 AI Service shutdown complete.")
-
 
 # --- Create FastAPI app ---
 app = FastAPI(
@@ -167,7 +164,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # --- Robust exception handler ---
 @app.exception_handler(Exception)
