@@ -1,4 +1,4 @@
-# app/services/ai_service.py - COMPREHENSIVE MULTI-TRADE AI WITH DEEP UNDERSTANDING
+# app/services/ai_service.py - COMPREHENSIVE BLUEPRINT ANALYSIS AI WITH HUMAN-LIKE UNDERSTANDING
 
 import asyncio
 import base64
@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union, Set
+import numpy as np
+from collections import defaultdict
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -39,276 +41,276 @@ except Exception as e:
     raise
 
 
-class UniversalBuildingKnowledge:
-    """Comprehensive knowledge base for ALL building trades and codes"""
+class UniversalBlueprintKnowledge:
+    """Complete knowledge base for ALL construction disciplines and calculations"""
     
-    # ARCHITECTURAL KNOWLEDGE
-    SPACE_TYPES = {
-        "office": {"load_factor": 150, "min_ceiling": 9, "lighting_fc": 50},
-        "conference": {"load_factor": 15, "min_ceiling": 9, "lighting_fc": 30},
-        "restroom": {"load_factor": 50, "min_ceiling": 8, "lighting_fc": 20},
-        "corridor": {"load_factor": 100, "min_ceiling": 8, "lighting_fc": 10},
-        "storage": {"load_factor": 300, "min_ceiling": 8, "lighting_fc": 10},
-        "mechanical": {"load_factor": 300, "min_ceiling": 8, "lighting_fc": 30},
-        "retail": {"load_factor": 30, "min_ceiling": 10, "lighting_fc": 50},
-        "restaurant": {"load_factor": 15, "min_ceiling": 10, "lighting_fc": 50},
-        "kitchen": {"load_factor": 100, "min_ceiling": 10, "lighting_fc": 70},
-        "lobby": {"load_factor": 40, "min_ceiling": 12, "lighting_fc": 20}
+    # ============ DRAWING RECOGNITION ============
+    DRAWING_PATTERNS = {
+        # Architectural
+        "floor_plan": ["FLOOR PLAN", "LEVEL", "PLAN VIEW", "BUILDING PLAN"],
+        "reflected_ceiling": ["RCP", "REFLECTED CEILING", "CEILING PLAN"],
+        "elevation": ["ELEVATION", "BUILDING ELEVATION", "EXTERIOR VIEW"],
+        "section": ["SECTION", "BUILDING SECTION", "CROSS SECTION"],
+        "detail": ["DETAIL", "TYPICAL", "ENLARGED", "CONNECTION"],
+        "schedule": ["SCHEDULE", "ROOM FINISH", "DOOR", "WINDOW", "PARTITION"],
+        
+        # Structural
+        "foundation": ["FOUNDATION", "FOOTING", "PILE", "GRADE BEAM"],
+        "framing": ["FRAMING", "BEAM", "JOIST", "DECK", "SLAB"],
+        "reinforcement": ["REBAR", "REINFORCEMENT", "REINFORCING", "BARS"],
+        
+        # MEP
+        "hvac": ["HVAC", "MECHANICAL", "DUCTWORK", "AIR HANDLING"],
+        "plumbing": ["PLUMBING", "PIPING", "DRAINAGE", "WATER", "WASTE"],
+        "electrical": ["ELECTRICAL", "POWER", "LIGHTING", "PANEL"],
+        "fire_protection": ["SPRINKLER", "FIRE PROTECTION", "FP", "STANDPIPE"],
+        
+        # Civil
+        "site": ["SITE PLAN", "PLOT PLAN", "SURVEY"],
+        "grading": ["GRADING", "CONTOURS", "ELEVATIONS", "EARTHWORK"],
+        "utility": ["UTILITY", "UNDERGROUND", "STORM", "SEWER"],
+        
+        # Specialty
+        "kitchen": ["KITCHEN", "FOOD SERVICE", "EQUIPMENT"],
+        "millwork": ["MILLWORK", "CASEWORK", "CABINET"],
+        "landscape": ["LANDSCAPE", "PLANTING", "IRRIGATION"]
     }
     
-    # STRUCTURAL KNOWLEDGE
-    STRUCTURAL_SYSTEMS = {
-        "steel_frame": {
-            "typical_bay": "25-30 ft",
-            "max_bay": "45 ft",
-            "floor_depth": "24-36 in",
-            "fireproofing": "1-3 hour rating"
+    # ============ VISUAL PATTERN RECOGNITION ============
+    VISUAL_SYMBOLS = {
+        # Fire Protection
+        "sprinkler_pendant": "○ with stem down",
+        "sprinkler_upright": "○ with stem up", 
+        "sprinkler_sidewall": "○ with stem to side",
+        "fire_extinguisher": "FE in triangle",
+        "fire_alarm_pull": "F with arrow",
+        "smoke_detector": "S in circle",
+        "horn_strobe": "H/S in box",
+        
+        # Plumbing
+        "floor_drain": "FD in square",
+        "catch_basin": "CB in square",
+        "cleanout": "CO in circle",
+        "water_closet": "elongated oval",
+        "lavatory": "rectangle with bowl",
+        "shower": "square with X",
+        "water_heater": "WH in circle",
+        
+        # Electrical
+        "duplex_outlet": "⊕ or circle with 2 lines",
+        "switch": "S with line",
+        "light_fixture": "○ or ⊗",
+        "panel": "rectangle with lines",
+        "junction_box": "J in square",
+        "data_outlet": "D in square",
+        
+        # HVAC
+        "supply_diffuser": "square with X pattern",
+        "return_grille": "rectangle with lines",
+        "exhaust_fan": "EF in circle",
+        "thermostat": "T in square",
+        "VAV_box": "rectangle labeled VAV",
+        
+        # Structural
+        "column": "solid square/circle with grid",
+        "beam": "dashed lines between columns",
+        "shear_wall": "thick solid line",
+        "brace": "diagonal line with notation"
+    }
+    
+    # ============ SCHEDULING KNOWLEDGE ============
+    SCHEDULE_TYPES = {
+        "door_schedule": {
+            "columns": ["Mark", "Width", "Height", "Type", "Material", "Fire Rating", "Hardware"],
+            "calculations": ["count_by_type", "total_doors", "fire_rated_count"]
         },
-        "concrete_frame": {
-            "typical_bay": "20-25 ft",
-            "max_bay": "35 ft",
-            "slab_thickness": "8-12 in",
-            "column_size": "18-36 in"
+        "window_schedule": {
+            "columns": ["Mark", "Width", "Height", "Type", "Glazing", "Frame"],
+            "calculations": ["total_glazing_area", "count_by_type"]
         },
-        "wood_frame": {
-            "typical_span": "12-16 ft",
-            "max_span": "24 ft",
-            "joist_spacing": "16-24 in oc",
-            "load_capacity": "40-50 psf"
+        "room_finish_schedule": {
+            "columns": ["Room #", "Room Name", "Floor", "Base", "Walls", "Ceiling", "Height"],
+            "calculations": ["area_by_finish", "paint_quantity", "flooring_quantity"]
         },
-        "masonry": {
-            "wall_thickness": "8-16 in",
-            "max_height": "35 ft",
-            "reinforcement": "#5 @ 32 in oc",
-            "grouting": "partial or full"
+        "equipment_schedule": {
+            "columns": ["Tag", "Description", "Model", "Power", "Weight", "Mounting"],
+            "calculations": ["total_load", "total_weight", "breaker_sizing"]
+        },
+        "beam_schedule": {
+            "columns": ["Mark", "Size", "Length", "Camber", "Connection", "Paint"],
+            "calculations": ["total_tonnage", "paint_area", "bolt_count"]
+        },
+        "column_schedule": {
+            "columns": ["Mark", "Size", "Height", "Base Plate", "Fireproofing"],
+            "calculations": ["total_tonnage", "fireproofing_area"]
+        },
+        "lighting_fixture_schedule": {
+            "columns": ["Type", "Description", "Lamp", "Voltage", "Mounting"],
+            "calculations": ["total_wattage", "circuit_count", "control_zones"]
         }
     }
     
-    # MECHANICAL (HVAC) KNOWLEDGE
-    HVAC_REQUIREMENTS = {
-        "office": {
-            "cfm_per_person": 20,
-            "cfm_per_sqft": 0.06,
-            "tons_per_sqft": 350,  # 1 ton per 350 sqft
-            "duct_velocity": 1000,  # fpm
-            "vav_min": 0.3  # 30% minimum
+    # ============ ADVANCED CALCULATIONS ============
+    
+    # Structural Calculations
+    STRUCTURAL_CALCS = {
+        "steel_weight": {
+            "W_shapes": lambda d, bf, tw, tf, L: 3.4 * (d * tw + 2 * bf * tf) * L / 144,
+            "HSS_rect": lambda H, B, t, L: 3.4 * 2 * t * (H + B - 2 * t) * L / 144,
+            "HSS_round": lambda D, t, L: 3.4 * math.pi * (D - t) * t * L / 144
         },
-        "retail": {
-            "cfm_per_person": 15,
-            "cfm_per_sqft": 0.12,
-            "tons_per_sqft": 250,
-            "duct_velocity": 1200,
-            "exhaust_cfm": 0.5  # per sqft for general
+        "concrete_volume": {
+            "slab": lambda L, W, t: L * W * t / 27,  # cubic yards
+            "beam": lambda b, h, L: b * h * L / 1728 / 27,
+            "column": lambda b, h, H: b * h * H / 1728 / 27,
+            "footing": lambda L, W, h: L * W * h / 27
         },
-        "restaurant": {
-            "cfm_per_person": 20,
-            "cfm_per_sqft": 0.18,
-            "tons_per_sqft": 200,
-            "kitchen_exhaust": 100,  # cfm per linear ft of hood
-            "makeup_air": 0.8  # 80% of exhaust
-        },
-        "restroom": {
-            "exhaust_cfm": 75,  # per toilet/urinal
-            "ach": 10,  # air changes per hour
-            "negative_pressure": 0.05  # inches w.c.
+        "rebar_weight": {
+            "#3": 0.376, "#4": 0.668, "#5": 1.043, "#6": 1.502,
+            "#7": 2.044, "#8": 2.670, "#9": 3.400, "#10": 4.303,
+            "#11": 5.313, "#14": 7.650, "#18": 13.600  # lbs per foot
         }
     }
     
-    # ELECTRICAL KNOWLEDGE
-    ELECTRICAL_LOADS = {
-        "lighting": {
-            "office": 1.3,  # watts/sqft
-            "retail": 1.5,
-            "warehouse": 0.6,
-            "parking": 0.2,
-            "emergency": 0.2  # additional
-        },
-        "receptacles": {
-            "office": 1.5,  # watts/sqft
-            "retail": 1.0,
-            "industrial": 2.0,
-            "spacing": 12,  # feet max
-            "kitchen": 3.0
-        },
-        "equipment": {
-            "elevator": "30-50 HP",
-            "escalator": "15-25 HP",
-            "hvac_rtu": "varies",
-            "fire_pump": "50-150 HP"
-        },
-        "panel_sizing": {
-            "standard": [100, 200, 400, 600, 800, 1200, 1600, 2000],
-            "voltage": [120, 208, 277, 480],
-            "phases": [1, 3]
-        }
-    }
-    
-    # PLUMBING KNOWLEDGE
-    PLUMBING_FIXTURES = {
-        "water_closets": {
-            "office": 1.25,  # per 1000 sqft
-            "retail": 0.5,
-            "restaurant": 2.0,
-            "assembly": 3.0,
-            "gpf": 1.6  # gallons per flush
-        },
-        "lavatories": {
-            "ratio_to_wc": 1.0,  # 1:1 with water closets
-            "gpm": 0.5,  # gallons per minute
-            "ada_height": 34  # inches
-        },
-        "drinking_fountains": {
-            "per_floor": 1,
-            "per_1000_sqft": 0.1,
-            "ada_dual": True  # high/low required
-        },
-        "hot_water": {
-            "office": 1.0,  # gallons per person per day
-            "restaurant": 2.5,
-            "recovery": 4.0,  # gallons per hour per fixture
-            "temp": 120  # degrees F
-        },
-        "drainage": {
-            "slope": 0.25,  # inches per foot min
-            "vent_distance": 6,  # feet max
-            "stack_size": "varies",
-            "roof_drain": 1.5  # per 1000 sqft roof
-        }
-    }
-    
-    # FIRE PROTECTION KNOWLEDGE
-    FIRE_PROTECTION = {
-        "sprinklers": {
-            "light_hazard": {"spacing": 225, "density": 0.1},
-            "ordinary_1": {"spacing": 130, "density": 0.15},
-            "ordinary_2": {"spacing": 130, "density": 0.2},
-            "extra_hazard": {"spacing": 100, "density": 0.3}
-        },
-        "fire_alarm": {
-            "smoke_detector": 30,  # feet spacing
-            "pull_station": 200,  # feet travel
-            "horn_strobe": 15,  # candela
-            "battery_backup": 24  # hours
-        },
-        "extinguishers": {
-            "class_a": 75,  # feet travel
-            "class_b": 50,
-            "class_c": 75,
-            "class_k": 30,  # kitchen
-            "size": "2A:10BC"  # typical
-        },
-        "fire_ratings": {
-            "corridors": 1,  # hour
-            "stairwells": 2,
-            "electrical_rooms": 2,
-            "mechanical_rooms": 1,
-            "exterior_walls": "varies"
-        }
-    }
-    
-    # SITE/CIVIL KNOWLEDGE
-    SITE_REQUIREMENTS = {
-        "parking": {
-            "standard": {"width": 9, "length": 18},
-            "compact": {"width": 8, "length": 16},
-            "ada": {"width": 8, "aisle": 5},
-            "ratio": {
-                "office": 4.0,  # per 1000 sqft
-                "retail": 5.0,
-                "restaurant": 10.0
-            },
-            "ada_count": {
-                1: 1, 25: 1, 50: 2, 75: 3, 100: 4,
-                150: 5, 200: 6, 300: 7, 400: 8, 500: 9
+    # MEP Calculations
+    MEP_CALCULATIONS = {
+        "duct_sizing": {
+            "velocity_method": lambda CFM, V: math.sqrt(CFM / V * 144 / math.pi) * 2,
+            "friction_method": lambda CFM: 1.3 * math.pow(CFM, 0.625),
+            "aspect_ratio": lambda area: {
+                "options": [(w, area/w) for w in range(6, 97, 2) if area/w <= 96]
             }
         },
-        "stormwater": {
-            "retention": 1.0,  # inches typical
-            "bio_swale": 0.5,  # cfs per acre
-            "pervious": 0.3,  # ratio target
-            "pipe_slope": 0.5  # percent min
-        },
-        "utilities": {
-            "water": {"depth": 48, "pressure": "40-80 psi"},
-            "sewer": {"depth": 60, "slope": 1.0},
-            "gas": {"depth": 36, "pressure": "varies"},
-            "electric": {"depth": 36, "primary": 480},
-            "telecom": {"depth": 24, "conduits": 4}
-        }
-    }
-    
-    # ENERGY/SUSTAINABILITY
-    ENERGY_REQUIREMENTS = {
-        "envelope": {
-            "wall_r": {"climate_1": 13, "climate_4": 19, "climate_6": 25},
-            "roof_r": {"climate_1": 25, "climate_4": 30, "climate_6": 38},
-            "window_u": {"climate_1": 0.50, "climate_4": 0.40, "climate_6": 0.35},
-            "shgc": {"climate_1": 0.25, "climate_4": 0.40, "climate_6": 0.45}
-        },
-        "lighting_power": {
-            "lpd": {  # watts per sqft
-                "office": 0.82,
-                "retail": 1.26,
-                "warehouse": 0.66,
-                "parking": 0.15
+        "pipe_sizing": {
+            "water_velocity": lambda GPM, D: 0.408 * GPM / (D * D),
+            "drainage_capacity": {  # Horizontal drain at 1/4" per foot
+                "2": 21, "2.5": 44, "3": 75, "4": 180, "5": 311,
+                "6": 538, "8": 1117, "10": 1942, "12": 3088
             },
-            "controls": ["occupancy", "daylight", "dimming", "scheduling"]
+            "fixture_units": {
+                "water_closet": 4, "lavatory": 1, "shower": 2,
+                "kitchen_sink": 2, "drinking_fountain": 1, "urinal": 4
+            }
         },
-        "renewable": {
-            "solar_pv": 5.0,  # watts per sqft roof
-            "solar_thermal": 0.75,  # efficiency
-            "geothermal": 4.0  # COP
+        "electrical_load": {
+            "voltage_drop": lambda I, L, V: (2 * I * L * 0.866) / (1000 * V) * 100,
+            "breaker_size": lambda load: next(b for b in [15,20,25,30,35,40,45,50,60,70,80,90,100,125,150,175,200,225,250,300,350,400] if b >= load * 1.25),
+            "conduit_fill": {
+                "THHN": {"14": 0.0097, "12": 0.0133, "10": 0.0211, "8": 0.0366, "6": 0.0507, "4": 0.0824, "2": 0.1158, "1": 0.1562, "1/0": 0.1855}
+            }
         }
     }
     
-    # ACCESSIBILITY (ADA)
-    ADA_REQUIREMENTS = {
-        "general": {
-            "clear_width": 36,  # inches
-            "door_width": 32,
-            "turning_radius": 60,
-            "reach_height": {"min": 15, "max": 48},
-            "counter_height": 36
+    # Fire Protection Calculations  
+    FIRE_PROTECTION_CALCS = {
+        "sprinkler_density": {
+            "light_hazard": {"density": 0.10, "area": 3000, "hose": 100},
+            "ordinary_1": {"density": 0.15, "area": 3000, "hose": 250},
+            "ordinary_2": {"density": 0.20, "area": 3000, "hose": 250},
+            "extra_1": {"density": 0.30, "area": 2500, "hose": 500},
+            "extra_2": {"density": 0.40, "area": 2500, "hose": 1000}
         },
-        "ramps": {
-            "slope": 8.33,  # percent (1:12)
-            "landing": 60,  # inches
-            "handrail": {"min": 34, "max": 38},
-            "width": 36
+        "hydraulic_calculation": {
+            "k_factor": lambda Q, P: Q / math.sqrt(P),
+            "pressure": lambda Q, K: math.pow(Q / K, 2),
+            "friction_loss": lambda C, Q, D, L: 4.52 * math.pow(Q, 1.85) * L / (math.pow(C, 1.85) * math.pow(D, 4.87))
         },
-        "parking": {
-            "width": 96,  # inches (8 feet)
-            "aisle": 60,  # access aisle
-            "van_aisle": 96,
-            "slope": 2.0  # percent max
+        "water_supply": {
+            "storage_tank": lambda area, density, duration: area * density * duration * 1.2,
+            "pump_size": lambda Q, H: Q * H * 0.0632 / 0.7  # HP
+        }
+    }
+    
+    # ============ CODE REQUIREMENTS ============
+    CODE_REQUIREMENTS = {
+        "egress": {
+            "corridor_width": {"min": 44, "accessible": 48, "hospital": 96},
+            "stair_width": {"min": 44, "floor_occupant_load": {
+                "0-50": 44, "51-100": 56, "101-200": 68, "201+": 80
+            }},
+            "door_width": {"min": 32, "accessible": 36, "pair": 48},
+            "travel_distance": {
+                "sprinklered": {"business": 300, "assembly": 250, "residential": 250},
+                "non_sprinklered": {"business": 200, "assembly": 150, "residential": 200}
+            }
         },
-        "restroom": {
-            "stall": {"width": 60, "depth": 59},
-            "grab_bars": {"side": 42, "rear": 36},
-            "lavatory": {"height": 34, "knee": 27},
-            "accessories": {"height": 48, "reach": 40}
+        "accessibility": {
+            "parking": {
+                "ratio": {1: 1, 25: 1, 50: 2, 75: 3, 100: 4, 150: 5, 200: 6, 300: 7, 400: 8, 500: 9, 1000: 20},
+                "van_accessible": lambda total_accessible: max(1, total_accessible // 6)
+            },
+            "restroom": {
+                "clearances": {"front": 48, "side": 18, "rear": 36},
+                "grab_bars": {"side": 42, "rear": 36},
+                "fixture_height": {"wc": [17, 19], "lav": [29, 34], "urinal": 17}
+            },
+            "ramp": {
+                "max_slope": 8.33,  # 1:12
+                "max_rise": 30,
+                "landing": {"length": 60, "width": "ramp_width"}
+            }
+        },
+        "fire_ratings": {
+            "occupancy_separation": {
+                "B_to_B": 0, "B_to_M": 2, "B_to_R": 1, "B_to_S": 2,
+                "R_to_R": 0, "R_to_S": 3, "A_to_B": 2, "A_to_R": 2
+            },
+            "shaft_enclosures": {"1-3_stories": 1, "4+_stories": 2},
+            "exit_enclosures": 2,
+            "corridor_walls": {"I-2": 1, "others": 0.5}
+        }
+    }
+    
+    # ============ QUANTITY TAKEOFF PATTERNS ============
+    TAKEOFF_PATTERNS = {
+        "count_items": {
+            "doors": ["D[0-9]+", "DR-", "DOOR"],
+            "windows": ["W[0-9]+", "WIN-", "WINDOW"],
+            "fixtures": ["P[0-9]+", "EF-", "WC", "LAV", "UR"],
+            "equipment": ["EQ-", "UNIT-", "AHU", "RTU", "FCU"]
+        },
+        "measure_linear": {
+            "walls": "sum of wall lengths",
+            "piping": "centerline lengths",
+            "conduit": "point to point + fittings",
+            "base": "perimeter - door openings"
+        },
+        "measure_area": {
+            "flooring": "room area",
+            "painting": "wall area - openings",
+            "insulation": "wall/ceiling area",
+            "roofing": "roof area + parapet"
+        },
+        "measure_volume": {
+            "concrete": "slab + beams + columns",
+            "excavation": "footprint + overexcavation",
+            "hvac": "room volume for air changes"
         }
     }
 
 
-class ComprehensiveDocumentAnalyzer:
-    """Analyzes any construction document with deep multi-trade understanding"""
+class HumanLikeBlueprintAnalyzer:
+    """Analyzes blueprints with human-like visual understanding and reasoning"""
     
     def __init__(self):
-        self.knowledge = UniversalBuildingKnowledge()
-        self.understanding = {
-            "document_type": None,
-            "identified_elements": {},
-            "measurements": {},
-            "systems": set(),
-            "spaces": [],
-            "trade_specific_items": {},
-            "code_items": []
+        self.knowledge = UniversalBlueprintKnowledge()
+        self.visual_memory = {}
+        self.current_drawing = {
+            "type": None,
+            "scale": None,
+            "title_block": {},
+            "grid_system": {},
+            "elements_found": defaultdict(list),
+            "measurements": defaultdict(dict),
+            "schedules": {},
+            "notes": [],
+            "symbols_legend": {},
+            "cross_references": []
         }
     
-    async def deep_visual_analysis(self, image_url: str) -> Dict[str, Any]:
-        """Comprehensive visual analysis for ANY trade or system"""
-        logger.debug("🔍 Performing deep multi-trade visual analysis")
+    async def analyze_like_human(self, image_url: str) -> Dict[str, Any]:
+        """Analyze blueprint with human-like visual processing"""
+        logger.debug("👁️ Performing human-like visual analysis")
         
         try:
             response = await asyncio.get_event_loop().run_in_executor(
@@ -318,83 +320,65 @@ class ComprehensiveDocumentAnalyzer:
                     messages=[
                         {
                             "role": "system",
-                            "content": """You are analyzing a construction document. Extract EVERYTHING you see, including:
+                            "content": """You are looking at a blueprint EXACTLY as a human expert would. Follow this visual scanning pattern:
 
-PROJECT INFORMATION (LOOK IN TITLE BLOCK):
-- Project name and number
-- PROJECT ADDRESS / LOCATION
-- Owner/Client name
-- Architect/Engineer names and license numbers
-- Contractor information
-- Drawing date, revision dates
-- Sheet number and title
-- Scale
-- North arrow orientation
+STEP 1 - ORIENT YOURSELF (Like opening a physical drawing):
+- Look at bottom right corner for title block
+- Read: Project name, drawing title, number, scale, date
+- Check revision clouds and deltas for latest changes
+- Note the drawing orientation (north arrow if present)
 
-GENERAL:
-- Document type (architectural, structural, etc.)
-- Overall dimensions and areas
-- All rooms/spaces with names and dimensions
+STEP 2 - UNDERSTAND THE DRAWING TYPE:
+- What am I looking at? (plan, section, elevation, detail, schedule?)
+- What discipline? (architectural, structural, MEP, etc.)
+- What's the scale? This affects EVERYTHING
 
-ARCHITECTURAL:
-- Doors (count, sizes, types, swings)
-- Windows (count, sizes, types)
-- Walls (types, thickness)
-- Finishes (floor, ceiling, wall)
-- Furniture, fixtures, equipment
-- Stairs, elevators, ramps
+STEP 3 - SCAN THE DRAWING SYSTEMATICALLY:
+Like reading a book, go left to right, top to bottom:
+- Find the grid lines (1,2,3... and A,B,C...)
+- Identify major elements (walls, columns, equipment)
+- Look for dimension strings
+- Find the legend/keynotes
+- Spot any schedules or tables
 
-STRUCTURAL:
-- Columns (size, spacing, grid)
-- Beams (size, type)
-- Slabs (thickness, type)
-- Foundations (type, size)
-- Reinforcement callouts
-- Load information
+STEP 4 - READ ALL TEXT AND ANNOTATIONS:
+- General notes (usually left side or bottom)
+- Specific callouts and labels
+- Reference bubbles (detail/section marks)
+- Equipment tags and room numbers
 
-MECHANICAL (HVAC):
-- Ductwork (sizes, CFM)
-- Diffusers/grilles (count, sizes)
-- Equipment (RTUs, VAVs, fans)
-- Piping (if shown)
-- Thermostat locations
+STEP 5 - COUNT AND MEASURE:
+- Count repeated elements (doors, windows, fixtures, etc.)
+- Note dimensions between grids
+- Calculate areas from dimensions
+- Identify typical vs. special conditions
 
-ELECTRICAL:
-- Panels (location, size)
-- Circuits (home runs)
-- Receptacles (count, type)
-- Lighting (fixtures, switches)
-- Special systems (data, fire alarm)
-- Conduit runs
+STEP 6 - UNDERSTAND RELATIONSHIPS:
+- How do elements connect?
+- What references other drawings?
+- What's typical vs. unique?
+- Where are the critical dimensions?
 
-PLUMBING:
-- Fixtures (count, type)
-- Piping (sizes, materials)
-- Drains (floor, roof)
-- Water heaters
-- Cleanouts, vents
+STEP 7 - EXTRACT SCHEDULING INFO:
+If schedules are present:
+- Read column headers
+- Count entries
+- Note sizes, types, quantities
+- Calculate totals where applicable
 
-FIRE PROTECTION:
-- Sprinkler heads (count, type)
-- Fire alarm devices
-- Extinguisher locations
-- Exit signs
-- Fire ratings
+CRITICAL: Read the drawing like you're standing at a plan table:
+- Start with the big picture
+- Zoom in on details
+- Cross-reference between areas
+- Build a mental 3D model
 
-SITE/CIVIL:
-- Parking (spaces, dimensions)
-- Utilities (water, sewer, gas, electric)
-- Grading/drainage
-- Landscaping
-- Sidewalks/paving
-
-Count EVERYTHING. Note ALL text, dimensions, and callouts. Be extremely thorough."""
+Output EVERYTHING you see with specific locations using grid references."""
                         },
                         {
                             "role": "user",
                             "content": [
                                 {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
-                                {"type": "text", "text": "Extract all information from this construction document."}
+                                {"type": "text", "text": "Analyze this blueprint as a human expert would, describing your visual scan pattern and findings."}
                             ]
                         }
                     ],
@@ -403,9 +387,19 @@ Count EVERYTHING. Note ALL text, dimensions, and callouts. Be extremely thorough
                 )
             )
             
+            visual_analysis = response.choices[0].message.content
+            
+            # Process the visual understanding
+            structured_data = self._process_visual_understanding(visual_analysis)
+            
             return {
                 "success": True,
-                "extracted_data": response.choices[0].message.content,
+                "visual_understanding": visual_analysis,
+                "structured_data": structured_data,
+                "drawing_type": structured_data.get("drawing_type"),
+                "elements_counted": structured_data.get("counts"),
+                "measurements_found": structured_data.get("measurements"),
+                "schedules_extracted": structured_data.get("schedules"),
                 "timestamp": datetime.now().isoformat()
             }
             
@@ -413,400 +407,672 @@ Count EVERYTHING. Note ALL text, dimensions, and callouts. Be extremely thorough
             logger.error(f"Visual analysis error: {e}")
             return {"success": False, "error": str(e)}
     
-    def extract_all_measurements(self, text: str) -> Dict[str, Any]:
-        """Extract measurements for ALL trades"""
-        patterns = {
-            # Project Information
-            'address': r'(?:address|location|site)[\s:]*([^\n]+)',
-            'project_name': r'(?:project|job)[\s:]*([^\n]+)',
-            'owner': r'(?:owner|client)[\s:]*([^\n]+)',
-            'architect': r'(?:architect|designer)[\s:]*([^\n]+)',
-            'date': r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-            
-            # Dimensions
-            'room_dims': r'(\d+)[\'\-\s]*(\d+)?"?\s*[xX×]\s*(\d+)[\'\-\s]*(\d+)?"?',
-            'linear_dims': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:LF|lf|linear)',
-            'area_sqft': r'(\d+[\d,]*\.?\d*)\s*(?:SF|sq\.?\s*ft\.?|square feet)',
-            'height': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:AFF|aff|high|height|clg)',
-            
-            # Structural
-            'beam_size': r'([WwSsCc]\d+[xX×]\d+(?:\.\d+)?)',
-            'column_size': r'(\d+)"\s*[xX×]\s*(\d+)"\s*(?:COL|col|column)',
-            'slab_thick': r'(\d+)"\s*(?:SLAB|slab|thick)',
-            'rebar': r'#(\d+)\s*@\s*(\d+)"\s*(?:OC|oc|o\.c\.)',
-            
-            # Mechanical
-            'cfm': r'(\d+)\s*(?:CFM|cfm)',
-            'duct_size': r'(\d+)"\s*[xX×]\s*(\d+)"\s*(?:DUCT|duct|supply|return)',
-            'tons': r'(\d+\.?\d*)\s*(?:TON|ton|tons)',
-            'pipe_size': r'(\d+\.?\d*)"\s*(?:PIPE|pipe|dia\.?)',
-            
-            # Electrical
-            'voltage': r'(\d+)\s*(?:V|volt|volts)',
-            'amperage': r'(\d+)\s*(?:A|amp|amps|ampere)',
-            'kw': r'(\d+\.?\d*)\s*(?:KW|kw|kilowatt)',
-            'circuit': r'(\d+)\s*(?:CKT|ckt|circuit)',
-            'conduit': r'(\d+\.?\d*)"\s*(?:C|EMT|RGS|conduit)',
-            
-            # Plumbing
-            'gpm': r'(\d+\.?\d*)\s*(?:GPM|gpm)',
-            'fixture_units': r'(\d+\.?\d*)\s*(?:FU|fu|fixture units)',
-            'drain_size': r'(\d+)"\s*(?:DRAIN|drain|waste)',
-            
-            # Fire Protection
-            'sprinkler_spacing': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:OC|oc|o\.c\.)\s*(?:SPKLR|sprinkler)',
-            'fire_rating': r'(\d+\.?\d*)\s*(?:HR|hr|hour)\s*(?:RATED|rated|rating)',
-            
-            # Counts
-            'door_count': r'(?:DOOR|door|DR|dr)[\s\-]*(\d+)',
-            'fixture_count': r'(\d+)\s*(?:WC|LAV|UR|DF|wc|lav)',
-            'device_count': r'(\d+)\s*(?:devices?|heads?|units?)'
+    def _process_visual_understanding(self, analysis_text: str) -> Dict[str, Any]:
+        """Process human-like visual analysis into structured data"""
+        structured = {
+            "drawing_type": None,
+            "project_info": {},
+            "scale": None,
+            "grid_system": {},
+            "counts": defaultdict(int),
+            "measurements": defaultdict(dict),
+            "schedules": {},
+            "areas": {},
+            "notes": []
         }
         
-        results = {}
-        for pattern_name, pattern in patterns.items():
-            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+        # Extract title block info
+        title_patterns = {
+            "project": r"(?:project|job)[\s:]+([^\n]+)",
+            "drawing_title": r"(?:drawing title|sheet title)[\s:]+([^\n]+)",
+            "sheet_number": r"(?:sheet|drawing)[\s#:]+([A-Z0-9\-\.]+)",
+            "scale": r"(?:scale)[\s:]+([^\n,]+)",
+            "date": r"(?:date)[\s:]+([^\n]+)"
+        }
+        
+        for key, pattern in title_patterns.items():
+            match = re.search(pattern, analysis_text, re.IGNORECASE)
+            if match:
+                structured["project_info"][key] = match.group(1).strip()
+        
+        # Identify drawing type
+        for dtype, keywords in self.knowledge.DRAWING_PATTERNS.items():
+            if any(keyword in analysis_text.upper() for keyword in keywords):
+                structured["drawing_type"] = dtype
+                break
+        
+        # Extract grid references
+        grid_pattern = r"(?:grid|column line)s?\s+([A-Z0-9,\s\-]+)"
+        grid_matches = re.findall(grid_pattern, analysis_text, re.IGNORECASE)
+        if grid_matches:
+            structured["grid_system"]["references"] = grid_matches
+        
+        # Extract counts of elements
+        count_patterns = [
+            (r"(\d+)\s*(?:sprinkler|head)", "sprinklers"),
+            (r"(\d+)\s*(?:door)", "doors"),
+            (r"(\d+)\s*(?:window)", "windows"),
+            (r"(\d+)\s*(?:parking|stall|space)", "parking_spaces"),
+            (r"(\d+)\s*(?:column)", "columns"),
+            (r"(\d+)\s*(?:beam)", "beams"),
+            (r"(\d+)\s*(?:light|fixture)", "light_fixtures"),
+            (r"(\d+)\s*(?:outlet|receptacle)", "outlets"),
+            (r"(\d+)\s*(?:diffuser|grille)", "air_devices"),
+            (r"(\d+)\s*(?:plumbing fixture|WC|lav)", "plumbing_fixtures")
+        ]
+        
+        for pattern, item_type in count_patterns:
+            matches = re.findall(pattern, analysis_text, re.IGNORECASE)
             if matches:
-                results[pattern_name] = matches
+                structured["counts"][item_type] = sum(int(m) for m in matches)
         
-        return results
+        # Extract areas
+        area_patterns = [
+            (r"(\d+[,\d]*\.?\d*)\s*(?:sq\.?\s*ft|square feet|SF)", "sqft"),
+            (r"(\d+[,\d]*\.?\d*)\s*(?:sq\.?\s*m|square meters|m²|SQ\.?\s*MTS?)", "sqm")
+        ]
+        
+        for pattern, unit in area_patterns:
+            matches = re.findall(pattern, analysis_text, re.IGNORECASE)
+            if matches:
+                areas = [float(m.replace(',', '')) for m in matches]
+                structured["areas"][unit] = {
+                    "values": areas,
+                    "total": max(areas) if areas else 0  # Largest is usually total
+                }
+        
+        # Extract dimensions
+        dim_pattern = r"(\d+)[\'\-\s]*(\d+)?(?:\s*(\d+\/\d+))?\"?"
+        dim_matches = re.findall(dim_pattern, analysis_text)
+        if dim_matches:
+            structured["measurements"]["dimensions_found"] = len(dim_matches)
+        
+        # Look for schedules
+        schedule_keywords = ["SCHEDULE", "TABLE", "LEGEND"]
+        for keyword in schedule_keywords:
+            if keyword in analysis_text.upper():
+                # Try to extract schedule data
+                table_pattern = r"(?:" + keyword + r")[^\n]+\n([^\n]+(?:\n[^\n]+)*)"
+                table_match = re.search(table_pattern, analysis_text, re.IGNORECASE)
+                if table_match:
+                    structured["schedules"][keyword.lower()] = table_match.group(1)
+        
+        return structured
     
-    def analyze_any_system(self, system_type: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze ANY building system with appropriate calculations"""
+    def perform_calculation(self, calc_type: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Perform specific engineering calculations"""
         
-        if system_type == "hvac_sizing":
-            return self._calculate_hvac_requirements(parameters)
-        elif system_type == "electrical_load":
-            return self._calculate_electrical_loads(parameters)
-        elif system_type == "plumbing_fixtures":
-            return self._calculate_plumbing_requirements(parameters)
-        elif system_type == "structural_loads":
-            return self._calculate_structural_requirements(parameters)
-        elif system_type == "parking":
-            return self._calculate_parking_requirements(parameters)
-        elif system_type == "egress":
-            return self._calculate_egress_requirements(parameters)
-        elif system_type == "fire_protection":
-            return self._calculate_fire_protection(parameters)
-        elif system_type == "accessibility":
-            return self._check_ada_compliance(parameters)
-        elif system_type == "energy":
-            return self._calculate_energy_requirements(parameters)
+        if calc_type == "sprinkler_hydraulics":
+            return self._calculate_sprinkler_hydraulics(parameters)
+        elif calc_type == "structural_loads":
+            return self._calculate_structural_loads(parameters)
+        elif calc_type == "electrical_demand":
+            return self._calculate_electrical_demand(parameters)
+        elif calc_type == "hvac_loads":
+            return self._calculate_hvac_loads(parameters)
+        elif calc_type == "plumbing_demand":
+            return self._calculate_plumbing_demand(parameters)
+        elif calc_type == "quantity_takeoff":
+            return self._perform_quantity_takeoff(parameters)
+        elif calc_type == "code_compliance":
+            return self._check_code_compliance(parameters)
         else:
-            return self._general_code_check(system_type, parameters)
+            return {"error": f"Unknown calculation type: {calc_type}"}
     
-    def _calculate_hvac_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate HVAC requirements for any space"""
-        space_type = params.get("space_type", "office")
-        area = params.get("area", 0)
-        occupants = params.get("occupants", 0)
+    def _calculate_sprinkler_hydraulics(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Detailed sprinkler hydraulic calculations"""
+        area = params.get("area_sqft", 0)
+        occupancy = params.get("occupancy", "ordinary_1")
+        height = params.get("ceiling_height", 10)
         
-        reqs = self.knowledge.HVAC_REQUIREMENTS.get(space_type, self.knowledge.HVAC_REQUIREMENTS["office"])
+        # Get hazard classification
+        hazard_data = self.knowledge.FIRE_PROTECTION_CALCS["sprinkler_density"].get(
+            occupancy, 
+            self.knowledge.FIRE_PROTECTION_CALCS["sprinkler_density"]["ordinary_1"]
+        )
         
-        # Ventilation calculations
-        cfm_people = occupants * reqs["cfm_per_person"]
-        cfm_area = area * reqs["cfm_per_sqft"]
-        total_cfm = cfm_people + cfm_area
+        # Design area (most remote)
+        design_area = min(area, hazard_data["area"])
         
-        # Cooling calculations
-        tons_required = area / reqs["tons_per_sqft"]
+        # Calculate flow
+        density = hazard_data["density"]
+        sprinkler_flow = design_area * density
+        hose_stream = hazard_data["hose"]
+        total_flow = sprinkler_flow + hose_stream
         
-        # Duct sizing (simplified)
-        main_duct_area = total_cfm / reqs["duct_velocity"]
+        # Estimate pressure (simplified)
+        # Starting pressure at sprinkler
+        min_pressure = 7  # psi minimum
+        
+        # Friction loss estimate (very simplified)
+        pipe_length = math.sqrt(design_area) * 2  # Rough estimate
+        friction_loss = self.knowledge.FIRE_PROTECTION_CALCS["hydraulic_calculation"]["friction_loss"](
+            120,  # C factor
+            sprinkler_flow / 10,  # Flow per line
+            4,    # Pipe diameter
+            pipe_length
+        )
+        
+        # Elevation pressure
+        elevation_pressure = height * 0.433
+        
+        # Total pressure
+        total_pressure = min_pressure + friction_loss + elevation_pressure + 10  # Safety factor
+        
+        # Pump sizing
+        pump_hp = self.knowledge.FIRE_PROTECTION_CALCS["water_supply"]["pump_size"](
+            total_flow, total_pressure
+        )
         
         return {
-            "space_type": space_type,
-            "area": area,
-            "ventilation": {
-                "cfm_per_person": reqs["cfm_per_person"],
-                "cfm_per_area": reqs["cfm_per_sqft"],
-                "people_cfm": cfm_people,
-                "area_cfm": cfm_area,
-                "total_cfm": total_cfm,
-                "code_ref": "ASHRAE 62.1"
+            "hazard_classification": occupancy,
+            "design_density": density,
+            "design_area": design_area,
+            "calculations": {
+                "sprinkler_flow_gpm": round(sprinkler_flow),
+                "hose_stream_gpm": hose_stream,
+                "total_flow_gpm": round(total_flow),
+                "min_pressure_psi": round(total_pressure, 1),
+                "pump_size_hp": round(pump_hp, 1)
             },
-            "cooling": {
-                "tons_required": round(tons_required, 1),
-                "btuh": tons_required * 12000,
-                "rule_of_thumb": f"{reqs['tons_per_sqft']} sqft/ton"
+            "pipe_sizing": {
+                "mains": "6-8 inch",
+                "cross_mains": "4-6 inch", 
+                "branch_lines": "1.5-2.5 inch",
+                "note": "Final sizes require hydraulic calculation software"
             },
-            "duct_sizing": {
-                "velocity_fpm": reqs["duct_velocity"],
-                "main_duct_area_sqin": round(main_duct_area * 144),
-                "typical_size": self._suggest_duct_size(main_duct_area)
+            "water_supply_requirements": {
+                "flow": f"{round(total_flow)} gpm @ {round(total_pressure)} psi",
+                "duration": "60-120 minutes depending on occupancy",
+                "storage": f"{round(total_flow * 90)} gallons minimum"
+            }
+        }
+    
+    def _calculate_structural_loads(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate structural loads and member sizes"""
+        span = params.get("span_ft", 30)
+        spacing = params.get("spacing_ft", 10)
+        occupancy = params.get("occupancy", "office")
+        
+        # Load determination
+        dead_loads = {
+            "steel_deck": 3,
+            "concrete_on_deck": 47,  # 3.5" normal weight
+            "mep": 5,
+            "ceiling": 3,
+            "misc": 2
+        }
+        total_dead = sum(dead_loads.values())
+        
+        # Live loads by occupancy
+        live_loads = {
+            "office": 50,
+            "corridor": 100,
+            "retail": 100,
+            "parking": 40,
+            "roof": 20
+        }
+        live_load = live_loads.get(occupancy, 50)
+        
+        # Total load
+        total_load = total_dead + live_load
+        
+        # Beam sizing (simplified)
+        tributary_width = spacing
+        w = total_load * tributary_width / 1000  # kips/ft
+        M = w * span * span / 8  # kip-ft
+        
+        # Required section modulus (A992 steel, Fy=50ksi)
+        Fb = 0.66 * 50  # Allowable stress
+        S_req = M * 12 / Fb  # in³
+        
+        # Select beam size (simplified table)
+        beam_sizes = [
+            ("W12x26", 33.4), ("W14x30", 42.0), ("W16x36", 56.5),
+            ("W18x40", 68.4), ("W21x44", 81.6), ("W24x55", 114.0),
+            ("W27x84", 213.0), ("W30x90", 245.0), ("W33x118", 359.0)
+        ]
+        
+        selected_beam = next((size for size, S in beam_sizes if S >= S_req), beam_sizes[-1])
+        
+        # Column load
+        column_load = total_load * spacing * span / 2000  # kips
+        
+        return {
+            "loads_psf": {
+                "dead": total_dead,
+                "live": live_load, 
+                "total": total_load
             },
+            "beam_design": {
+                "span": span,
+                "spacing": spacing,
+                "uniform_load": round(w, 2),
+                "moment": round(M),
+                "required_S": round(S_req, 1),
+                "selected_size": selected_beam[0]
+            },
+            "column_load_kips": round(column_load),
+            "deflection_limit": f"L/{360 if occupancy != 'parking' else 240}",
             "notes": [
-                "Final design requires heat load calculations",
-                "Consider diversity factors for VAV systems",
-                "Account for building envelope and orientation"
+                "Preliminary sizing only",
+                "Consider lateral loads",
+                "Check local buckling and deflections",
+                "Verify with structural analysis software"
             ]
         }
     
-    def _calculate_electrical_loads(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate electrical loads for any space"""
-        space_type = params.get("space_type", "office")
-        area = params.get("area", 0)
+    def _calculate_electrical_demand(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate electrical loads per NEC"""
+        area_sqft = params.get("area_sqft", 10000)
+        occupancy = params.get("occupancy", "office")
         
-        lighting = self.knowledge.ELECTRICAL_LOADS["lighting"].get(space_type, 1.3)
-        receptacle = self.knowledge.ELECTRICAL_LOADS["receptacles"].get(space_type, 1.5)
+        # Lighting loads per NEC Table 220.12
+        lighting_loads = {
+            "office": 1.3,
+            "retail": 1.5,
+            "warehouse": 0.25,
+            "parking": 0.2,
+            "restaurant": 2.0,
+            "school": 1.5
+        }
         
-        lighting_load = area * lighting
-        receptacle_load = area * receptacle
-        total_load = lighting_load + receptacle_load
+        lighting_wpersqft = lighting_loads.get(occupancy, 1.3)
+        lighting_load = area_sqft * lighting_wpersqft
         
-        # Add demand factors per NEC
-        lighting_demand = lighting_load * 1.0  # 100% for first 3000W
-        receptacle_demand = receptacle_load * 0.5  # 50% for receptacles
+        # Receptacle loads
+        receptacle_load = area_sqft * 1.0  # 1W/sqft general
         
-        total_demand = lighting_demand + receptacle_demand
+        # HVAC estimate
+        hvac_tons = area_sqft / 400  # Rule of thumb
+        hvac_load = hvac_tons * 3517  # Watts per ton
         
-        # Size panel
-        voltage = 208  # typical commercial
+        # Apply demand factors
+        lighting_demand = lighting_load  # 100% continuous
+        receptacle_demand = 10000 + (receptacle_load - 10000) * 0.5  # NEC 220.44
+        hvac_demand = hvac_load  # 100%
+        
+        # Total demand
+        total_demand = lighting_demand + receptacle_demand + hvac_demand
+        
+        # Service sizing
+        voltage = 480  # Commercial
         phases = 3
-        amps = total_demand / (voltage * 1.732)  # 1.732 for 3-phase
+        current = total_demand / (voltage * math.sqrt(3))
         
-        panel_size = next((size for size in self.knowledge.ELECTRICAL_LOADS["panel_sizing"]["standard"] 
-                          if size >= amps * 1.25), 400)
+        # Panel sizing
+        panel_size = next(s for s in [400, 600, 800, 1000, 1200, 1600, 2000, 2500, 3000] 
+                         if s >= current * 1.25)
+        
+        # Transformer sizing
+        transformer_kva = total_demand / 1000 / 0.9  # 90% PF
+        std_transformer = next(s for s in [75, 112.5, 150, 225, 300, 500, 750, 1000, 1500]
+                              if s >= transformer_kva)
         
         return {
-            "space_type": space_type,
-            "area": area,
-            "lighting": {
-                "watts_per_sqft": lighting,
-                "total_watts": lighting_load,
-                "demand_watts": lighting_demand
+            "area_sqft": area_sqft,
+            "load_summary_watts": {
+                "lighting": round(lighting_load),
+                "receptacles": round(receptacle_load),
+                "hvac": round(hvac_load),
+                "total_connected": round(lighting_load + receptacle_load + hvac_load)
             },
-            "receptacles": {
-                "watts_per_sqft": receptacle,
-                "total_watts": receptacle_load,
-                "demand_watts": receptacle_demand
+            "demand_loads_watts": {
+                "lighting": round(lighting_demand),
+                "receptacles": round(receptacle_demand),
+                "hvac": round(hvac_demand),
+                "total_demand": round(total_demand)
             },
-            "total": {
-                "connected_load": total_load,
-                "demand_load": total_demand,
-                "amps": round(amps, 1),
-                "panel_size": panel_size
+            "service_requirements": {
+                "voltage": f"{voltage}V, 3-phase",
+                "current_amps": round(current),
+                "panel_size_amps": panel_size,
+                "transformer_kva": std_transformer
+            },
+            "circuit_quantities": {
+                "20A_lighting": math.ceil(lighting_demand / (277 * 16)),
+                "20A_receptacle": math.ceil(receptacle_demand / (120 * 16)),
+                "hvac_circuits": "As required per equipment"
             },
             "code_references": [
                 "NEC Article 220 - Load Calculations",
                 "NEC Table 220.12 - Lighting Load Demand",
-                "NEC Section 220.44 - Receptacle Loads"
+                "NEC 220.44 - Receptacle Loads"
             ]
         }
     
-    def _calculate_plumbing_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate plumbing fixture requirements"""
-        space_type = params.get("space_type", "office")
-        area = params.get("area", 0)
-        occupants = params.get("occupants", 0)
+    def _calculate_hvac_loads(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate HVAC loads using simplified methods"""
+        area_sqft = params.get("area_sqft", 10000)
+        occupancy = params.get("occupancy", "office")
+        occupants = params.get("occupants", area_sqft / 150)
+        location = params.get("location", "moderate")
         
-        fixtures = self.knowledge.PLUMBING_FIXTURES
+        # Rules of thumb by occupancy
+        cooling_factors = {
+            "office": 300,      # sqft/ton
+            "retail": 250,
+            "restaurant": 200,
+            "data_center": 100,
+            "warehouse": 500
+        }
         
-        # Calculate required fixtures
-        wc_per_1000 = fixtures["water_closets"].get(space_type, 1.25)
-        required_wc = max(2, math.ceil(area * wc_per_1000 / 1000))
-        required_lav = required_wc  # 1:1 ratio typical
+        heating_factors = {  # BTU/sqft
+            "office": 35,
+            "retail": 40,
+            "restaurant": 50,
+            "warehouse": 30
+        }
         
-        # Drinking fountains
-        df_required = max(1, math.ceil(area * fixtures["drinking_fountains"]["per_1000_sqft"] / 1000))
+        # Cooling load
+        tons_required = area_sqft / cooling_factors.get(occupancy, 300)
+        cooling_btuh = tons_required * 12000
+        
+        # Heating load
+        heating_btuh = area_sqft * heating_factors.get(occupancy, 35)
+        
+        # Ventilation per ASHRAE 62.1
+        cfm_per_person = 5
+        cfm_per_sqft = 0.06
+        ventilation_cfm = (occupants * cfm_per_person) + (area_sqft * cfm_per_sqft)
+        
+        # Supply air (simplified)
+        supply_cfm = max(ventilation_cfm, cooling_btuh / (1.08 * 20))  # 20°F delta T
+        
+        # Duct sizing (main)
+        main_duct_area = supply_cfm / 1200  # 1200 fpm velocity
+        
+        return {
+            "load_summary": {
+                "cooling_tons": round(tons_required, 1),
+                "cooling_btuh": round(cooling_btuh),
+                "heating_btuh": round(heating_btuh),
+                "sensible_heat_ratio": 0.75
+            },
+            "airflow_requirements": {
+                "ventilation_cfm": round(ventilation_cfm),
+                "supply_air_cfm": round(supply_cfm),
+                "return_air_cfm": round(supply_cfm * 0.9),
+                "exhaust_cfm": round(ventilation_cfm)
+            },
+            "equipment_selection": {
+                "rooftop_units": math.ceil(tons_required / 25),
+                "unit_size_tons": 25,
+                "heating_type": "Gas furnace",
+                "efficiency": "16 SEER, 95% AFUE"
+            },
+            "duct_sizing": {
+                "main_duct_sqft": round(main_duct_area, 1),
+                "typical_size": f"{int(math.sqrt(main_duct_area) * 12)} x {int(math.sqrt(main_duct_area) * 12)}",
+                "velocity_fpm": 1200,
+                "static_pressure": "2.5 inches w.c."
+            },
+            "controls": {
+                "zones": math.ceil(area_sqft / 5000),
+                "thermostats": math.ceil(area_sqft / 2500),
+                "type": "DDC with BMS integration"
+            }
+        }
+    
+    def _calculate_plumbing_demand(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate plumbing fixture requirements and demands"""
+        area_sqft = params.get("area_sqft", 10000)
+        occupancy = params.get("occupancy", "office")
+        occupants = params.get("occupants", 50)
+        
+        # Fixture calculations per IPC
+        fixture_ratios = {
+            "office": {
+                "water_closet": {"male": 1/50, "female": 1/50},
+                "lavatory": {"ratio": 1/40},
+                "drinking_fountain": {"ratio": 1/100}
+            },
+            "retail": {
+                "water_closet": {"male": 1/500, "female": 1/500},
+                "lavatory": {"ratio": 1/750},
+                "drinking_fountain": {"ratio": 1/1000}
+            },
+            "restaurant": {
+                "water_closet": {"male": 1/75, "female": 1/75},
+                "lavatory": {"ratio": 1/75},
+                "drinking_fountain": {"ratio": 1/100}
+            }
+        }
+        
+        ratios = fixture_ratios.get(occupancy, fixture_ratios["office"])
+        
+        # Calculate fixtures
+        male_occupants = occupants * 0.5
+        female_occupants = occupants * 0.5
+        
+        fixtures = {
+            "water_closets_male": max(1, math.ceil(male_occupants * ratios["water_closet"]["male"])),
+            "water_closets_female": max(1, math.ceil(female_occupants * ratios["water_closet"]["female"])),
+            "urinals": max(0, math.ceil(male_occupants * ratios["water_closet"]["male"] * 0.5)),
+            "lavatories": max(2, math.ceil(occupants * ratios["lavatory"]["ratio"])),
+            "drinking_fountains": max(1, math.ceil(occupants * ratios["drinking_fountain"]["ratio"]))
+        }
+        
+        # Calculate fixture units
+        fu_values = self.knowledge.MEP_CALCULATIONS["pipe_sizing"]["fixture_units"]
+        total_wfu = (fixtures["water_closets_male"] * fu_values["water_closet"] +
+                    fixtures["water_closets_female"] * fu_values["water_closet"] +
+                    fixtures["urinals"] * fu_values["urinal"] +
+                    fixtures["lavatories"] * fu_values["lavatory"])
+        
+        total_dfu = total_wfu  # Simplified - same for drainage
+        
+        # Water demand
+        gpm_demand = 0.25 * math.sqrt(total_wfu) * 30  # Hunter's curve approximation
         
         # Hot water
-        hot_water_gpd = occupants * fixtures["hot_water"].get(space_type, 1.0)
+        hot_water_demand = occupants * 2  # gallons per person per day
+        heater_size = hot_water_demand * 1.25  # 25% safety factor
         
         return {
-            "fixtures_required": {
-                "water_closets": required_wc,
-                "lavatories": required_lav,
-                "drinking_fountains": df_required,
-                "calculation": f"Based on {area} sqft and {space_type} use"
+            "fixture_counts": fixtures,
+            "fixture_units": {
+                "water_supply": total_wfu,
+                "drainage": total_dfu
+            },
+            "water_demand": {
+                "peak_flow_gpm": round(gpm_demand),
+                "daily_usage_gallons": round(occupants * 20),
+                "meter_size": "2 inch minimum"
             },
             "hot_water": {
-                "gallons_per_day": hot_water_gpd,
-                "recovery_gph": required_wc * fixtures["hot_water"]["recovery"],
-                "temperature": fixtures["hot_water"]["temp"]
+                "daily_demand_gallons": hot_water_demand,
+                "heater_size_gallons": round(heater_size),
+                "recovery_gph": round(heater_size / 4)
+            },
+            "pipe_sizing": {
+                "cold_water_main": "2 inch",
+                "hot_water_main": "1.5 inch",
+                "branch_sizing": "Per fixture requirements"
             },
             "drainage": {
-                "min_slope": f"{fixtures['drainage']['slope']} in/ft",
-                "roof_drains": math.ceil(area * fixtures["drainage"]["roof_drain"] / 1000)
+                "building_drain": "4 inch minimum",
+                "vent_stack": "3 inch minimum",
+                "slope": "1/4 inch per foot"
             },
-            "code_references": [
-                "IPC Table 403.1 - Minimum Fixtures",
-                "IPC Section 604 - Water Distribution",
-                "IPC Section 704 - Drainage Piping"
-            ]
+            "code_reference": "IPC Table 403.1"
         }
     
-    def _suggest_duct_size(self, area_sqft: float) -> str:
-        """Suggest rectangular duct size based on area"""
-        area_sqin = area_sqft * 144
+    def _perform_quantity_takeoff(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Perform quantity takeoff from drawing data"""
+        drawing_type = params.get("drawing_type", "unknown")
+        elements = params.get("elements", {})
+        scale = params.get("scale", "1/8\" = 1'-0\"")
         
-        # Common aspect ratios
-        if area_sqin < 144:
-            return "12x12"
-        elif area_sqin < 288:
-            return "24x12"
-        elif area_sqin < 432:
-            return "24x18"
-        elif area_sqin < 576:
-            return "24x24"
+        takeoff = {
+            "quantities": {},
+            "measurements": {},
+            "areas": {},
+            "notes": []
+        }
+        
+        # Scale factor
+        scale_factor = self.knowledge.COMMON_SCALES.get(scale, 96)
+        
+        # Process by element type
+        for element_type, count in elements.items():
+            if element_type == "doors":
+                takeoff["quantities"]["doors"] = {
+                    "count": count,
+                    "types": "Refer to door schedule",
+                    "hardware_sets": count,
+                    "frames": count
+                }
+            elif element_type == "walls":
+                # Estimate from perimeter
+                if "perimeter" in params:
+                    wall_length = params["perimeter"]
+                    wall_height = params.get("height", 10)
+                    takeoff["measurements"]["walls"] = {
+                        "length_lf": wall_length,
+                        "area_sqft": wall_length * wall_height,
+                        "studs_required": math.ceil(wall_length / 1.33),  # 16" OC
+                        "gwb_sheets": math.ceil(wall_length * wall_height / 32)  # 4x8 sheets
+                    }
+            elif element_type == "concrete":
+                if "slab_area" in params:
+                    slab_area = params["slab_area"]
+                    slab_thickness = params.get("thickness", 4) / 12  # inches to feet
+                    takeoff["quantities"]["concrete"] = {
+                        "slab_sqft": slab_area,
+                        "volume_cy": round(slab_area * slab_thickness / 27, 1),
+                        "rebar_tons": round(slab_area * 0.003, 2),  # Estimate
+                        "vapor_barrier_sqft": slab_area * 1.1
+                    }
+        
+        return takeoff
+    
+    def _check_code_compliance(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Check code compliance for various requirements"""
+        check_type = params.get("check_type", "general")
+        
+        if check_type == "egress":
+            return self._check_egress_compliance(params)
+        elif check_type == "accessibility":
+            return self._check_ada_compliance(params)
+        elif check_type == "fire_separation":
+            return self._check_fire_separation(params)
         else:
-            return "30x24 or larger"
+            return {"error": "Unknown compliance check type"}
     
-    def _calculate_structural_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Basic structural calculations"""
-        return {
-            "loads": {
-                "dead_load": "15-25 psf typical",
-                "live_load": "50-100 psf (office/retail)",
-                "total": "65-125 psf"
-            },
-            "note": "Requires structural engineer for final design"
-        }
-    
-    def _calculate_parking_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate parking requirements"""
-        space_type = params.get("space_type", "office")
-        area = params.get("area", 0)
-        
-        parking = self.knowledge.SITE_REQUIREMENTS["parking"]
-        ratio = parking["ratio"].get(space_type, 4.0)
-        required_spaces = math.ceil(area * ratio / 1000)
-        
-        # ADA spaces
-        ada_required = 0
-        for threshold, count in parking["ada_count"].items():
-            if required_spaces >= threshold:
-                ada_required = count
-        
-        return {
-            "required_spaces": required_spaces,
-            "ada_spaces": ada_required,
-            "van_accessible": max(1, ada_required // 8),
-            "calculation": f"{ratio} spaces per 1000 sqft",
-            "dimensions": parking["standard"]
-        }
-    
-    def _calculate_egress_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate egress requirements - already comprehensive"""
-        space_type = params.get("space_type", "office")
-        area = params.get("area", 0)
-        
-        # Get occupant load factor
-        load_factor = self.knowledge.SPACE_TYPES.get(space_type, {"load_factor": 150})["load_factor"]
-        occupant_load = math.ceil(area / load_factor)
+    def _check_egress_compliance(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Check egress code compliance"""
+        occupant_load = params.get("occupant_load", 100)
+        travel_distance = params.get("travel_distance", 200)
+        exits_provided = params.get("exits", 2)
+        sprinklered = params.get("sprinklered", True)
+        occupancy = params.get("occupancy", "business")
         
         # Required exits
         if occupant_load <= 49:
             required_exits = 1
         elif occupant_load <= 500:
             required_exits = 2
-        else:
+        elif occupant_load <= 1000:
             required_exits = 3
-        
-        return {
-            "occupant_load": occupant_load,
-            "load_factor": load_factor,
-            "required_exits": required_exits,
-            "exit_width": occupant_load * 0.2,  # inches
-            "travel_distance": "See IBC Table 1017.2"
-        }
-    
-    def _calculate_fire_protection(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate fire protection requirements"""
-        space_type = params.get("space_type", "office")
-        area = params.get("area", 0)
-        
-        # Determine hazard
-        if space_type in ["office", "residential"]:
-            hazard = "light_hazard"
         else:
-            hazard = "ordinary_1"
+            required_exits = 4
         
-        sprinkler = self.knowledge.FIRE_PROTECTION["sprinklers"][hazard]
-        heads_required = math.ceil(area / sprinkler["spacing"])
+        # Exit width
+        stair_width_per_person = 0.3  # inches
+        door_width_per_person = 0.2
+        required_stair_width = occupant_load * stair_width_per_person
+        required_door_width = occupant_load * door_width_per_person
         
-        # Fire alarm
-        smoke_detectors = math.ceil(area / (30 * 30))  # 30ft spacing
-        pull_stations = math.ceil(math.sqrt(area) * 4 / 200)  # perimeter / 200
+        # Travel distance
+        max_travel = self.knowledge.CODE_REQUIREMENTS["egress"]["travel_distance"][
+            "sprinklered" if sprinklered else "non_sprinklered"
+        ].get(occupancy, 250)
         
-        return {
-            "sprinklers": {
-                "hazard": hazard,
-                "heads_required": heads_required,
-                "spacing": sprinkler["spacing"],
-                "density": sprinkler["density"]
+        compliance = {
+            "exits": {
+                "required": required_exits,
+                "provided": exits_provided,
+                "compliant": exits_provided >= required_exits
             },
-            "fire_alarm": {
-                "smoke_detectors": smoke_detectors,
-                "pull_stations": max(2, pull_stations),
-                "notification": "horn/strobes per NFPA 72"
+            "width": {
+                "stair_width_required": round(required_stair_width),
+                "door_width_required": round(required_door_width),
+                "min_stair_width": 44,
+                "min_door_width": 32
             },
-            "extinguishers": math.ceil(area / (75 * 75))  # 75ft travel
-        }
-    
-    def _check_ada_compliance(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Check ADA compliance for various elements"""
-        element = params.get("element", "general")
-        
-        ada = self.knowledge.ADA_REQUIREMENTS
-        
-        if element == "door":
-            return {
-                "min_clear_width": ada["general"]["clear_width"],
-                "threshold": "1/2 inch max",
-                "maneuvering_clearance": "18 inches pull side",
-                "hardware_height": "34-48 inches AFF"
-            }
-        elif element == "ramp":
-            return ada["ramps"]
-        elif element == "parking":
-            return ada["parking"]
-        elif element == "restroom":
-            return ada["restroom"]
-        else:
-            return ada["general"]
-    
-    def _calculate_energy_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate energy code requirements"""
-        climate_zone = params.get("climate_zone", 4)
-        area = params.get("area", 0)
-        space_type = params.get("space_type", "office")
-        
-        energy = self.knowledge.ENERGY_REQUIREMENTS
-        
-        return {
-            "envelope": {
-                "wall_r_value": energy["envelope"]["wall_r"][f"climate_{climate_zone}"],
-                "roof_r_value": energy["envelope"]["roof_r"][f"climate_{climate_zone}"],
-                "window_u_factor": energy["envelope"]["window_u"][f"climate_{climate_zone}"]
+            "travel_distance": {
+                "maximum_allowed": max_travel,
+                "provided": travel_distance,
+                "compliant": travel_distance <= max_travel
             },
-            "lighting": {
-                "max_lpd": energy["lighting_power"]["lpd"].get(space_type, 1.0),
-                "total_watts": area * energy["lighting_power"]["lpd"].get(space_type, 1.0),
-                "controls_required": energy["lighting_power"]["controls"]
+            "common_path": {
+                "maximum": 75 if sprinklered else 75,
+                "note": "Varies by occupancy"
             },
-            "code": "IECC/ASHRAE 90.1"
-        }
-    
-    def _general_code_check(self, system: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """General code compliance check for any system"""
-        return {
-            "system": system,
-            "parameters": params,
-            "note": "Consult applicable codes for specific requirements",
-            "common_codes": [
-                "IBC - International Building Code",
-                "NEC - National Electrical Code", 
-                "IPC - International Plumbing Code",
-                "IMC - International Mechanical Code",
-                "NFPA - Fire Protection Standards",
-                "ADA - Accessibility Guidelines"
+            "dead_end": {
+                "maximum": 50 if sprinklered else 20
+            },
+            "references": [
+                "IBC Chapter 10 - Means of Egress",
+                "IBC Table 1006.2.1 - Exit Width",
+                "IBC Table 1017.2 - Travel Distance"
             ]
         }
+        
+        return compliance
+    
+    def process_schedule_data(self, schedule_type: str, raw_data: str) -> Dict[str, Any]:
+        """Process schedule data into structured format"""
+        schedule_info = self.knowledge.SCHEDULE_TYPES.get(schedule_type, {})
+        
+        result = {
+            "type": schedule_type,
+            "entries": [],
+            "totals": {},
+            "calculations": {}
+        }
+        
+        # Parse the raw schedule data
+        lines = raw_data.strip().split('\n')
+        if not lines:
+            return result
+        
+        # Assume first line is headers
+        headers = [h.strip() for h in lines[0].split('\t')]
+        
+        # Parse entries
+        for line in lines[1:]:
+            if line.strip():
+                values = [v.strip() for v in line.split('\t')]
+                entry = dict(zip(headers, values))
+                result["entries"].append(entry)
+        
+        # Perform calculations based on schedule type
+        if schedule_type == "door_schedule" and result["entries"]:
+            result["totals"]["total_doors"] = len(result["entries"])
+            result["totals"]["fire_rated"] = sum(1 for e in result["entries"] 
+                                               if "RATED" in e.get("Fire Rating", "").upper())
+        
+        elif schedule_type == "beam_schedule" and result["entries"]:
+            # Calculate steel tonnage
+            total_weight = 0
+            for entry in result["entries"]:
+                if "Size" in entry and "Length" in entry:
+                    # Extract weight per foot from size (e.g., W24x55 = 55 lb/ft)
+                    size_match = re.search(r"W\d+x(\d+)", entry["Size"])
+                    if size_match:
+                        weight_per_ft = float(size_match.group(1))
+                        length = float(re.search(r"(\d+)", entry["Length"]).group(1))
+                        total_weight += weight_per_ft * length
+            
+            result["calculations"]["total_tonnage"] = round(total_weight / 2000, 2)
+        
+        return result
 
 
-class EnhancedAIService:
-    """AI Service with comprehensive multi-trade understanding"""
+class ExpertBlueprintAI:
+    """Main AI service with human-like blueprint understanding"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -818,25 +1084,25 @@ class EnhancedAIService:
         
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ AI client initialized with comprehensive capabilities")
+            logger.info("✅ Human-like Blueprint AI initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
         
-        self.analyzer = ComprehensiveDocumentAnalyzer()
+        self.analyzer = HumanLikeBlueprintAnalyzer()
         self.executor = ThreadPoolExecutor(max_workers=4)
         
-        # Comprehensive tool definitions for ALL trades
+        # Advanced analysis tools
         self.tools = [
             {
                 "type": "function",
                 "function": {
-                    "name": "analyze_document_visually",
-                    "description": "Comprehensive visual analysis of construction document for ALL trades",
+                    "name": "analyze_blueprint_visually",
+                    "description": "Analyze blueprint with human-like visual understanding",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "image_url": {"type": "string", "description": "Document image URL"}
+                            "image_url": {"type": "string", "description": "Blueprint image URL"}
                         },
                         "required": ["image_url"]
                     }
@@ -845,38 +1111,44 @@ class EnhancedAIService:
             {
                 "type": "function",
                 "function": {
-                    "name": "extract_measurements",
-                    "description": "Extract all measurements and quantities from text",
+                    "name": "perform_engineering_calculation",
+                    "description": "Perform any engineering calculation (structural, MEP, fire, etc.)",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "text": {"type": "string", "description": "Text to analyze"}
+                            "calc_type": {
+                                "type": "string",
+                                "enum": ["sprinkler_hydraulics", "structural_loads", "electrical_demand", 
+                                        "hvac_loads", "plumbing_demand", "quantity_takeoff", "code_compliance"],
+                                "description": "Type of calculation"
+                            },
+                            "parameters": {
+                                "type": "object",
+                                "description": "Calculation parameters"
+                            }
                         },
-                        "required": ["text"]
+                        "required": ["calc_type", "parameters"]
                     }
                 }
             },
             {
                 "type": "function",
                 "function": {
-                    "name": "analyze_building_system",
-                    "description": "Analyze any building system (HVAC, electrical, plumbing, structural, etc.)",
+                    "name": "process_schedule",
+                    "description": "Process and analyze schedule data from drawings",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "system_type": {
+                            "schedule_type": {
                                 "type": "string",
-                                "enum": ["hvac_sizing", "electrical_load", "plumbing_fixtures", 
-                                        "structural_loads", "parking", "egress", "fire_protection",
-                                        "accessibility", "energy", "general"],
-                                "description": "Type of system to analyze"
+                                "description": "Type of schedule (door, window, beam, etc.)"
                             },
-                            "parameters": {
-                                "type": "object",
-                                "description": "System-specific parameters"
+                            "raw_data": {
+                                "type": "string",
+                                "description": "Raw schedule data"
                             }
                         },
-                        "required": ["system_type", "parameters"]
+                        "required": ["schedule_type", "raw_data"]
                     }
                 }
             }
@@ -884,9 +1156,9 @@ class EnhancedAIService:
     
     async def get_ai_response(self, prompt: str, document_id: str, 
                               storage_service: StorageService, author: str = None) -> str:
-        """Process ANY construction-related query with deep understanding"""
+        """Process blueprint queries with human-like understanding"""
         try:
-            logger.info(f"🤖 Processing comprehensive query for document {document_id}")
+            logger.info(f"👁️ Processing blueprint query with human understanding for {document_id}")
             
             # Load document
             document_text = ""
@@ -912,10 +1184,10 @@ class EnhancedAIService:
                     
             except Exception as e:
                 logger.error(f"Document loading error: {e}")
-                return "I'm having trouble accessing the document. Please ensure it's been properly uploaded."
+                return "I need to see the blueprint to provide accurate analysis. Please ensure the document is properly uploaded."
             
-            # Process with comprehensive understanding
-            result = await self._process_with_deep_understanding(
+            # Process with human-like understanding
+            result = await self._process_like_human_expert(
                 prompt=prompt,
                 document_text=document_text,
                 image_url=image_url,
@@ -926,79 +1198,57 @@ class EnhancedAIService:
             
         except Exception as e:
             logger.error(f"Response error: {e}")
-            return "I encountered an error. Please try rephrasing your question."
+            return "I encountered an error analyzing the blueprint. Please try again."
     
-    async def _process_with_deep_understanding(self, prompt: str, document_text: str, 
-                                               image_url: str = None, document_id: str = None) -> str:
-        """Process with comprehensive multi-trade understanding"""
+    async def _process_like_human_expert(self, prompt: str, document_text: str, 
+                                         image_url: str = None, document_id: str = None) -> str:
+        """Process queries with human-like expertise"""
         try:
-            # Comprehensive system message
+            # Expert system message
             system_message = {
                 "role": "system",
-                "content": """You are an AI assistant with deep construction knowledge. You understand how to read intent and provide appropriate responses.
+                "content": """You are a master blueprint reader with 30+ years of experience. You read blueprints EXACTLY as a human expert would:
 
-RESPONSE STRATEGIES:
-1. GENERAL QUESTIONS (e.g., "tell me about this document", "what is this?"):
-   - Provide a clear, high-level overview
-   - Identify document type and purpose
-   - Mention key spaces or systems shown
-   - Note the project scope
-   - Keep it conversational and accessible
-   - DON'T list every measurement or count every item
+VISUAL PROCESSING:
+1. First, always identify what drawing you're looking at (title block)
+2. Note the scale - this is CRITICAL for all measurements
+3. Scan for the big picture before details
+4. Build a mental 3D model as you read
 
-2. SPECIFIC QUESTIONS (e.g., "how many doors?", "calculate the electrical load"):
-   - Use detailed analysis tools
-   - Provide precise calculations
-   - Reference relevant codes
-   - Show your work when helpful
+EXPERT KNOWLEDGE:
+- You know every symbol, abbreviation, and convention
+- You understand how different drawings relate (architectural to structural to MEP)
+- You can perform any calculation in your head or show the work
+- You know all relevant codes (IBC, NFPA, NEC, etc.)
 
-3. SIMPLE INFORMATION (e.g., "what's the address?", "who's the architect?"):
-   - Answer directly and concisely
-   - Don't over-explain
+RESPONSE STYLE:
+- Start with what drawing you're analyzing
+- Be specific with numbers, counts, and measurements
+- Show calculations when asked
+- Reference grid lines and specific locations
+- Acknowledge what's shown vs. what's required by code
+- Point out what information would be on other drawings
 
-BASIC CAPABILITIES:
-- Read and understand any construction document
-- Identify project information (addresses, names, dates)
-- Recognize drawing types and purposes
-- Extract any visible information
+CRITICAL BEHAVIORS:
+- If it's a parking garage, use Ordinary Hazard Group 1 (130 sqft/sprinkler)
+- If it's an office, use Light Hazard (200 sqft/sprinkler)
+- Count actual symbols shown, don't guess
+- Read dimensions and areas directly from the drawing
+- Identify schedules and extract data from them
+- Notice revision clouds and check revision block
 
-TRADES & DISCIPLINES:
-- Architecture & Space Planning
-- Structural Engineering (steel, concrete, wood, masonry)
-- Mechanical/HVAC (sizing, ductwork, equipment)
-- Electrical (loads, panels, circuits, lighting)
-- Plumbing (fixtures, piping, drainage)
-- Fire Protection (sprinklers, alarms, ratings)
-- Civil/Site (parking, utilities, drainage)
-- Energy & Sustainability
-- Accessibility (ADA compliance)
+Example response:
+"Looking at this Level P3 parking garage floor plan (Sheet AW-1.05, Scale: 1/8" = 1'-0"), I can see this is part of the South Yards Phase 1B project in Burnaby, BC.
 
-CODES & STANDARDS:
-- IBC (International Building Code) - all chapters
-- NEC (National Electrical Code)
-- IPC (International Plumbing Code)
-- IMC (International Mechanical Code)
-- NFPA (all relevant standards)
-- ADA/ANSI accessibility standards
-- ASHRAE standards
-- Local codes and amendments
+The drawing shows a total area of 2,720.2 square meters (29,277 sq ft) as marked on the plan. For sprinkler requirements in a parking garage (Ordinary Hazard Group 1 per NFPA 13):
 
-CAPABILITIES:
-- Read and interpret ANY construction drawing
-- Perform calculations for ANY building system
-- Count/quantify ANY element accurately
-- Apply appropriate codes for ANY situation
-- Provide practical construction guidance
-- Identify potential issues or conflicts
+- Maximum coverage: 130 sq ft per sprinkler
+- Required sprinklers: 29,277 ÷ 130 = 225 heads minimum
+- Maximum spacing: 15 feet between heads
 
-APPROACH:
-1. First, understand the INTENT - is this a general overview, specific technical question, or simple information request?
-2. For GENERAL OVERVIEWS: Describe what you see, the document's purpose, and key features without overwhelming detail
-3. For SPECIFIC QUESTIONS: Use appropriate tools and provide detailed analysis
-4. For SIMPLE REQUESTS: Give direct answers
-5. Always be ready to dive deeper if asked follow-up questions
+I can see sprinkler symbols ('sp' in circles) distributed throughout the parking areas. There are also water curtain sprinklers ('wc') shown at specific locations..."
 
-Match your response depth to the question. Be helpful and conversational."""
+Be this thorough and specific in every response."""
             }
             
             messages = [system_message]
@@ -1012,19 +1262,12 @@ Match your response depth to the question. Be helpful and conversational."""
                     "image_url": {"url": image_url, "detail": "high"}
                 })
             
-            # Context with query
-            context = f"""Document: {document_id}
-Text from document:
-{document_text[:3000]}...
+            # Add context
+            context = f"""Blueprint: {document_id}
 
 Question: {prompt}
 
-IMPORTANT: Match your response to the question type:
-- If they're asking for a general overview (e.g., "tell me about this document"), provide a clear summary without diving into every detail
-- If they're asking something specific (e.g., "how many sprinklers"), provide precise analysis
-- If they're asking for simple info (e.g., "what's the address"), just answer directly
-
-Be conversational and helpful."""
+Remember: Read this like you're standing at a plan table, using your decades of experience."""
             
             user_message["content"].append({"type": "text", "text": context})
             messages.append(user_message)
@@ -1037,8 +1280,8 @@ Be conversational and helpful."""
                     messages=messages,
                     tools=self.tools,
                     tool_choice="auto",
-                    max_tokens=2500,
-                    temperature=0.3
+                    max_tokens=3000,
+                    temperature=0.2
                 )
             )
             
@@ -1049,21 +1292,21 @@ Be conversational and helpful."""
                 messages.append(assistant_message)
                 
                 for tool_call in assistant_message.tool_calls:
-                    result = await self._execute_tool(tool_call)
+                    result = await self._execute_expert_tool(tool_call)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": json.dumps(result)
                     })
                 
-                # Final response
+                # Get final response
                 final_response = await asyncio.get_event_loop().run_in_executor(
                     self.executor,
                     lambda: self.client.chat.completions.create(
                         model="gpt-4o",
                         messages=messages,
-                        max_tokens=2500,
-                        temperature=0.3
+                        max_tokens=3000,
+                        temperature=0.2
                     )
                 )
                 
@@ -1072,29 +1315,35 @@ Be conversational and helpful."""
                 return assistant_message.content
                 
         except Exception as e:
-            logger.error(f"Processing error: {e}")
-            return f"Processing error: {str(e)}"
+            logger.error(f"Expert analysis error: {e}")
+            return f"Analysis error: {str(e)}"
     
-    async def _execute_tool(self, tool_call) -> Dict[str, Any]:
-        """Execute tool calls for any trade or system"""
+    async def _execute_expert_tool(self, tool_call) -> Dict[str, Any]:
+        """Execute expert analysis tools"""
         try:
             function_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
             
-            if function_name == "analyze_document_visually":
-                return await self.analyzer.deep_visual_analysis(arguments["image_url"])
-            elif function_name == "extract_measurements":
-                return self.analyzer.extract_all_measurements(arguments["text"])
-            elif function_name == "analyze_building_system":
-                return self.analyzer.analyze_any_system(
-                    arguments["system_type"],
+            if function_name == "analyze_blueprint_visually":
+                return await self.analyzer.analyze_like_human(arguments["image_url"])
+            
+            elif function_name == "perform_engineering_calculation":
+                return self.analyzer.perform_calculation(
+                    arguments["calc_type"],
                     arguments["parameters"]
                 )
+            
+            elif function_name == "process_schedule":
+                return self.analyzer.process_schedule_data(
+                    arguments["schedule_type"],
+                    arguments["raw_data"]
+                )
+            
             else:
                 return {"error": f"Unknown function: {function_name}"}
                 
         except Exception as e:
-            logger.error(f"Tool error: {e}")
+            logger.error(f"Tool execution error: {e}")
             return {"error": str(e)}
     
     async def __aenter__(self):
@@ -1105,6 +1354,7 @@ Be conversational and helpful."""
             self.executor.shutdown(wait=True)
 
 
-# Backward compatibility
-AIService = EnhancedAIService
-ProfessionalAIService = EnhancedAIService
+# Export the comprehensive AI service
+EnhancedAIService = ExpertBlueprintAI
+AIService = ExpertBlueprintAI
+ProfessionalAIService = ExpertBlueprintAI
