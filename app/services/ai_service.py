@@ -1,18 +1,21 @@
-"""
-Universal Construction AI Service with Comprehensive Analysis Tools
-Provides AI with mathematical and analytical capabilities for ANY construction document across ALL trades
-"""
+# app/services/ai_service.py
 
-import openai
-import json
 import logging
-from typing import Dict, List, Any, Optional, Tuple
+import base64
 import re
-import math
-from datetime import datetime
+import json
+from typing import Optional, List, Dict, Any, Tuple # Added Any, Tuple for tool outputs
+from openai import OpenAI, APIError
+from openai.types.chat import ChatCompletionToolParam # Import for tool definition
+import math # Added for UniversalConstructionAnalyzer's math functions
+from datetime import datetime # Added for UniversalConstructionAnalyzer's usage if needed
+
+from app.core.config import AppSettings
+from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
+# --- UniversalConstructionAnalyzer (copied directly from your provided code) ---
 class UniversalConstructionAnalyzer:
     """Universal calculation and analysis tools for ALL construction trades and document types"""
     
