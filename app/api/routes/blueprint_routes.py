@@ -13,22 +13,9 @@ from app.core.config import get_settings
 blueprint_router = APIRouter()
 settings = get_settings()
 
-# Maximum file size (60MB)
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE_MB", "60")) * 1024 * 1024
-
-class DocumentUploadResponse(BaseModel):
-    document_id: str
-    filename: str
-    status: str
-    file_size: int
-    page_count: int = 0
-    text_length: int = 0
-    image_count: int = 0
-
 class DocumentChatRequest(BaseModel):
     document_id: str = Field(..., min_length=3, max_length=50)
     prompt: str = Field(..., min_length=1, max_length=2000)
-    page_number: Optional[int] = Field(None, ge=1)
     author: str = Field(..., min_length=1, max_length=100)
 
 class DocumentChatResponse(BaseModel):
@@ -39,36 +26,14 @@ class DocumentChatResponse(BaseModel):
     timestamp: str
     source_pages: List[int] = []
 
-class CreateAnnotationRequest(BaseModel):
-    document_id: str = Field(..., min_length=3, max_length=50)
-    page_number: int = Field(..., ge=1)
-    x: float = Field(..., ge=0)
-    y: float = Field(..., ge=0)
-    text: str = Field(..., min_length=1, max_length=1000)
-    annotation_type: str = Field(..., pattern="^(note|highlight|pen)$")
-    author: str = Field(..., min_length=1, max_length=100)
-    is_private: bool = Field(default=True)
-
-class AnnotationResponse(BaseModel):
-    annotation_id: str
-    document_id: str
-    page_number: int
-    x: float
-    y: float
-    text: str
-    annotation_type: str
-    author: str
-    timestamp: str
-    is_private: bool
-
-def generate_document_id() -> str:
-    """Generate a unique document ID"""
-    return f"DOC-{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:5].upper()}"
-
 def validate_document_id(document_id: str) -> str:
-    """Validate and sanitize document ID for shared use"""
+    """Validate and sanitize document ID for shared use, ensuring no trailing underscores."""
+    # Replace non-allowed characters with underscores
     clean_id = re.sub(r'[^a-zA-Z0-9_-]', '_', document_id.strip())
     
+    # NEW: Remove any trailing underscores that might result from sanitization or initial input
+    clean_id = clean_id.strip('_') 
+
     if not clean_id or len(clean_id) < 3:
         raise HTTPException(
             status_code=400, 
@@ -130,7 +95,7 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str, ai_r
             blob_name=activity_blob_name
         )
         all_chats = json.loads(activity_data)
-    except:
+    except Exception: # Robustly handle missing file
         all_chats = []
     
     chat_entry = {
@@ -158,92 +123,10 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str, ai_r
         data=activity_json.encode('utf-8')
     )
 
-# === UPLOAD ROUTES ===
-
-@blueprint_router.post("/upload", response_model=DocumentUploadResponse)
-async def upload_blueprint(
-    file: UploadFile = File(...),
-    request: Request = None
-):
-    """Upload and process a new blueprint document with auto-generated ID"""
-    try:
-        # Validate file
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
-        
-        # Read file data
-        file_data = await file.read()
-        if len(file_data) > MAX_FILE_SIZE:
-            raise HTTPException(status_code=413, detail=f"File too large. Max size: {MAX_FILE_SIZE // (1024*1024)}MB")
-        
-        # Generate document ID
-        document_id = generate_document_id()
-        
-        # Get services
-        storage_service = request.app.state.storage_service
-        pdf_service = request.app.state.pdf_service
-        
-        if not storage_service or not pdf_service:
-            raise HTTPException(status_code=503, detail="Required services not available")
-        
-        # Save original file
-        await storage_service.upload_file(
-            container_name=settings.AZURE_CONTAINER_NAME,
-            blob_name=f"{document_id}.pdf",
-            data=file_data
-        )
-        
-        # Process PDF using existing method
-        await pdf_service.process_and_cache_pdf(
-            session_id=document_id,
-            pdf_bytes=file_data,
-            storage_service=storage_service
-        )
-        
-        # Get processing results for response
-        try:
-            # Get full text to calculate length
-            context_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=f"{document_id}_context.txt"
-            )
-            text_length = len(context_data)
-            
-            # Get chunks to estimate page count
-            chunks_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=f"{document_id}_chunks.json"
-            )
-            chunks = json.loads(chunks_data)
-            
-            # Estimate page count and image count from blob storage
-            all_blobs = await storage_service.list_blobs(settings.AZURE_CACHE_CONTAINER_NAME)
-            page_images = [blob for blob in all_blobs if blob.startswith(f"{document_id}_page_") and blob.endswith('.png')]
-            
-        except Exception as e:
-            # If we can't get detailed info, provide basic response
-            text_length = 0
-            page_images = []
-        
-        return DocumentUploadResponse(
-            document_id=document_id,
-            filename=file.filename,
-            status="success",
-            file_size=len(file_data),
-            page_count=len(page_images),
-            text_length=text_length,
-            image_count=len(page_images)
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
 @blueprint_router.post("/documents/upload", status_code=201)
 async def upload_shared_document(
     request: Request,
-    document_id: str,
+    document_id: str, # This ID will be validated and cleaned by validate_document_id
     file: UploadFile = File(...)
 ):
     """
@@ -258,32 +141,20 @@ async def upload_shared_document(
                 detail="Invalid file type. Only PDF files are allowed."
             )
 
-        # Validate file size
+        # Validate file size (60MB limit)
+        max_size = int(os.getenv("MAX_FILE_SIZE_MB", "60")) * 1024 * 1024
         pdf_bytes = await file.read()
-        if len(pdf_bytes) > MAX_FILE_SIZE:
+        if len(pdf_bytes) > max_size:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB"
+                detail=f"File too large. Maximum size is {max_size // (1024*1024)}MB"
             )
 
-        # Validate and clean the document ID
+        # Validate and clean the document ID immediately
         clean_document_id = validate_document_id(document_id)
         
-        # Check if required services are available
         pdf_service = request.app.state.pdf_service
         storage_service = request.app.state.storage_service
-        
-        if not storage_service:
-            raise HTTPException(
-                status_code=503,
-                detail="Storage service unavailable. Please try again later."
-            )
-        
-        if not pdf_service:
-            raise HTTPException(
-                status_code=503,
-                detail="PDF processing service unavailable. Please try again later."
-            )
 
         # Check if document already exists
         try:
@@ -292,14 +163,13 @@ async def upload_shared_document(
                 blob_name=f"{clean_document_id}_context.txt"
             )
             return {
-                "document_id": clean_document_id,
+                "document_id": clean_document_id, # Return the cleaned ID
                 "filename": file.filename,
                 "status": "already_exists",
                 "message": f"Document '{clean_document_id}' already exists and is ready for use",
                 "file_size_mb": round(len(pdf_bytes) / (1024*1024), 2)
             }
-        except:
-            # Document doesn't exist, proceed with upload
+        except Exception: 
             pass
 
         # Upload original PDF to main container
@@ -311,13 +181,13 @@ async def upload_shared_document(
 
         # Process PDF for shared AI and chat use
         await pdf_service.process_and_cache_pdf(
-            session_id=clean_document_id,
+            session_id=clean_document_id, 
             pdf_bytes=pdf_bytes,
             storage_service=storage_service
         )
 
         return {
-            "document_id": clean_document_id,
+            "document_id": clean_document_id, # Return the cleaned ID
             "filename": file.filename,
             "status": "processing_complete",
             "message": f"Document '{clean_document_id}' uploaded and ready for collaborative use",
@@ -329,13 +199,11 @@ async def upload_shared_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-# === CHAT ROUTES ===
-
 @blueprint_router.post("/documents/{document_id}/chat", response_model=DocumentChatResponse)
 async def chat_with_shared_document(
     request: Request,
-    document_id: str,
-    chat: DocumentChatRequest
+    document_id: str, # This ID will be validated and cleaned by validate_document_id
+    chat: DocumentChatRequest 
 ):
     """
     USER: Ask private questions about a shared document
@@ -343,13 +211,18 @@ async def chat_with_shared_document(
     """
     try:
         # Validate document ID matches the one in the body
-        if document_id != chat.document_id:
+        # Ensure consistency by cleaning both the path and body IDs
+        clean_path_document_id = validate_document_id(document_id)
+        clean_chat_body_document_id = validate_document_id(chat.document_id)
+
+        if clean_path_document_id != clean_chat_body_document_id:
             raise HTTPException(
                 status_code=400, 
-                detail="Document ID in URL must match document ID in request body"
+                detail="Cleaned Document ID in URL must match cleaned Document ID in request body"
             )
         
-        clean_document_id = validate_document_id(document_id)
+        # Use the cleaned document ID for all subsequent operations
+        final_document_id = clean_path_document_id 
         
         # Validate input
         if not chat.prompt.strip():
@@ -367,24 +240,23 @@ async def chat_with_shared_document(
         ai_service = request.app.state.ai_service
         storage_service = request.app.state.storage_service
 
-        # Verify document exists
+        # Verify document exists using the cleaned ID
         try:
             await storage_service.download_blob_as_text(
                 container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=f"{clean_document_id}_context.txt"
+                blob_name=f"{final_document_id}_context.txt"
             )
-        except:
+        except Exception: 
             raise HTTPException(
                 status_code=404,
-                detail=f"Document '{clean_document_id}' not found. Please upload it first."
+                detail=f"Document '{final_document_id}' not found. Please upload it first."
             )
 
-        # Get AI response for shared document (uses shared cached chunks)
+        # Get AI response for shared document (AI will decide if it needs page_number via tool)
         ai_response_text = await ai_service.get_ai_response(
             prompt=chat.prompt.strip(),
-            document_id=clean_document_id,
+            document_id=final_document_id, # Use cleaned ID
             storage_service=storage_service,
-            page_number=chat.page_number,
             author=chat.author.strip()
         )
 
@@ -393,14 +265,14 @@ async def chat_with_shared_document(
         timestamp = datetime.utcnow().isoformat() + "Z"
 
         # USER: Save to their private chat history
-        user_chat_history = await load_user_chat_history(clean_document_id, chat.author, storage_service)
+        user_chat_history = await load_user_chat_history(final_document_id, chat.author, storage_service) # Use cleaned ID
         
         chat_entry = {
             "chat_id": chat_id,
             "timestamp": timestamp,
             "prompt": chat.prompt.strip(),
             "ai_response": ai_response_text,
-            "page_number": chat.page_number
+            "page_number": None # page_number is not sent from frontend, AI determines it
         }
         
         user_chat_history.append(chat_entry)
@@ -410,11 +282,11 @@ async def chat_with_shared_document(
         if len(user_chat_history) > max_user_chats:
             user_chat_history = user_chat_history[-max_user_chats:]
         
-        await save_user_chat_history(clean_document_id, chat.author, user_chat_history, storage_service)
+        await save_user_chat_history(final_document_id, chat.author, user_chat_history, storage_service) # Use cleaned ID
 
         # SERVICE: Log everything for analytics (you get all data)
         await log_all_chat_activity(
-            document_id=clean_document_id,
+            document_id=final_document_id, # Use cleaned ID
             author=chat.author,
             prompt=chat.prompt.strip(),
             ai_response=ai_response_text,
@@ -422,12 +294,12 @@ async def chat_with_shared_document(
         )
 
         return DocumentChatResponse(
-            document_id=clean_document_id,
+            document_id=final_document_id, # Return cleaned ID
             ai_response=ai_response_text,
             author=chat.author,
             chat_id=chat_id,
             timestamp=timestamp,
-            source_pages=[]  # Can be enhanced later with specific page references
+            source_pages=[] 
         )
 
     except HTTPException:
@@ -435,239 +307,142 @@ async def chat_with_shared_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI response failed: {str(e)}")
 
-# === ANNOTATION ROUTES ===
-
-@blueprint_router.post("/documents/{document_id}/annotations", response_model=AnnotationResponse)
-async def create_annotation(
+@blueprint_router.get("/documents/{document_id}/my-chats")
+async def get_my_chat_history(
     request: Request,
-    document_id: str,
-    annotation: CreateAnnotationRequest
+    document_id: str, # This ID will be validated and cleaned by validate_document_id
+    author: str,  # Query parameter
+    limit: int = 20
 ):
-    """Create a new annotation on a document"""
+    """
+    USER: Get their own private chat history
+    Each user only sees their own conversations
+    """
     try:
-        # Validate document ID matches
-        if document_id != annotation.document_id:
+        clean_document_id = validate_document_id(document_id) # Ensure incoming ID is validated and cleaned
+        
+        if not author.strip():
             raise HTTPException(
                 status_code=400,
-                detail="Document ID in URL must match document ID in request body"
+                detail="Author parameter is required"
             )
         
-        clean_document_id = validate_document_id(document_id)
-        storage_service = request.app.state.storage_service
-        
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
-        
-        # Verify document exists
-        try:
-            await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=f"{clean_document_id}_context.txt"
-            )
-        except:
+        if limit < 1 or limit > 100:
             raise HTTPException(
-                status_code=404,
-                detail=f"Document '{clean_document_id}' not found"
+                status_code=400,
+                detail="Limit must be between 1 and 100"
             )
         
-        # Generate annotation ID
-        annotation_id = str(uuid.uuid4())[:8]
-        timestamp = datetime.utcnow().isoformat() + "Z"
-        
-        # Create annotation data
-        annotation_data = {
-            "annotation_id": annotation_id,
-            "document_id": clean_document_id,
-            "page_number": annotation.page_number,
-            "x": annotation.x,
-            "y": annotation.y,
-            "text": annotation.text,
-            "annotation_type": annotation.annotation_type,
-            "author": annotation.author,
-            "timestamp": timestamp,
-            "is_private": annotation.is_private
-        }
-        
-        # Load existing annotations
-        annotations_blob_name = f"{clean_document_id}_annotations.json"
-        try:
-            annotations_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=annotations_blob_name
-            )
-            annotations = json.loads(annotations_data)
-        except:
-            annotations = []
-        
-        # Add new annotation
-        annotations.append(annotation_data)
-        
-        # Save updated annotations
-        annotations_json = json.dumps(annotations, indent=2, ensure_ascii=False)
-        await storage_service.upload_file(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=annotations_blob_name,
-            data=annotations_json.encode('utf-8')
-        )
-        
-        return AnnotationResponse(**annotation_data)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create annotation: {str(e)}")
-
-@blueprint_router.get("/documents/{document_id}/annotations")
-async def get_annotations(
-    request: Request,
-    document_id: str,
-    page_number: Optional[int] = None,
-    author: Optional[str] = None
-):
-    """Get annotations for a document, optionally filtered by page or author"""
-    try:
-        clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
         
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
+        # Load user's private chat history using the cleaned ID
+        chat_history = await load_user_chat_history(clean_document_id, author, storage_service)
         
-        # Load annotations
-        annotations_blob_name = f"{clean_document_id}_annotations.json"
-        try:
-            annotations_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=annotations_blob_name
-            )
-            annotations = json.loads(annotations_data)
-        except:
-            annotations = []
-        
-        # Filter annotations
-        filtered_annotations = annotations
-        
-        if page_number is not None:
-            filtered_annotations = [ann for ann in filtered_annotations if ann["page_number"] == page_number]
-        
-        if author is not None:
-            filtered_annotations = [ann for ann in filtered_annotations if ann["author"] == author]
+        # Return most recent chats
+        recent_chats = chat_history[-limit:] if len(chat_history) > limit else chat_history
         
         return {
             "document_id": clean_document_id,
-            "annotations": filtered_annotations,
-            "total_count": len(filtered_annotations),
-            "filters": {
-                "page_number": page_number,
-                "author": author
-            }
+            "author": author,
+            "chat_history": list(reversed(recent_chats)),  # Most recent first
+            "total_conversations": len(chat_history),
+            "showing": len(recent_chats)
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get annotations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
 
-# === DOCUMENT INFO ROUTES ===
-
-@blueprint_router.get("/documents/{document_id}")
-async def get_document_info(request: Request, document_id: str):
-    """Get information about a document"""
+@blueprint_router.get("/documents/{document_id}/info")
+async def get_document_info(
+    request: Request,
+    document_id: str
+):
+    """
+    Get information about a shared document including processing status and stats.
+    """
     try:
-        clean_document_id = validate_document_id(document_id)
-        storage_service = request.app.state.storage_service
+        clean_document_id = validate_document_id(document_id) # Ensure incoming ID is validated and cleaned
+        
         ai_service = request.app.state.ai_service
-        
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
-        
-        # Get document info from AI service
-        if ai_service:
-            doc_info = await ai_service.get_document_info(clean_document_id, storage_service)
-            return doc_info
-        else:
-            # Basic info without AI service
-            try:
-                context_data = await storage_service.download_blob_as_text(
-                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{clean_document_id}_context.txt"
-                )
-                return {
-                    "document_id": clean_document_id,
-                    "status": "ready",
-                    "total_characters": len(context_data),
-                    "ai_service": "unavailable"
-                }
-            except:
-                raise HTTPException(status_code=404, detail="Document not found")
-        
+        storage_service = request.app.state.storage_service
+
+        document_info = await ai_service.get_document_info(
+            document_id=clean_document_id, # Use cleaned ID
+            storage_service=storage_service
+        )
+
+        return document_info
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get document info: {str(e)}")
 
 @blueprint_router.get("/documents")
-async def list_documents(request: Request):
-    """List all available documents"""
+async def list_shared_documents(request: Request):
+    """
+    List all available shared documents in the system.
+    """
     try:
         storage_service = request.app.state.storage_service
         
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
-        
-        # Get all PDF files from main container
-        all_blobs = await storage_service.list_blobs(settings.AZURE_CONTAINER_NAME)
-        pdf_files = [blob for blob in all_blobs if blob.endswith('.pdf')]
+        # List all cached chunks files to find available documents
+        blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
         
         documents = []
-        for pdf_file in pdf_files:
-            document_id = pdf_file.replace('.pdf', '')
-            
-            # Check if document is processed
-            try:
-                await storage_service.download_blob_as_text(
-                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{document_id}_context.txt"
-                )
-                status = "ready"
-            except:
-                status = "processing"
-            
-            documents.append({
-                "document_id": document_id,
-                "filename": pdf_file,
-                "status": status
-            })
+        for blob_name in blobs:
+            if blob_name.endswith('_chunks.json'):
+                # Extract document_id from blob name by removing the suffix
+                document_id = blob_name.replace('_chunks.json', '')
+                
+                # Ensure the extracted document_id is also validated/cleaned before use
+                clean_document_id = validate_document_id(document_id)
+
+                try:
+                    # Get document info using the cleaned ID
+                    ai_service = request.app.state.ai_service
+                    doc_info = await ai_service.get_document_info(clean_document_id, storage_service)
+                    documents.append(doc_info)
+                except Exception: 
+                    # If we can't get info (e.g., context file missing), still list the document
+                    documents.append({
+                        "document_id": clean_document_id,
+                        "status": "available",
+                        "warning": "Could not retrieve full info"
+                    })
         
         return {
             "documents": documents,
             "total_count": len(documents)
         }
-        
-    except HTTPException:
-        raise
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
-# === ADMIN ROUTES ===
+# SERVICE ADMIN ENDPOINTS - Protected by environment variable
 
-@blueprint_router.get("/admin/analytics/{document_id}")
-async def get_document_analytics(
+@blueprint_router.get("/admin/documents/{document_id}/all-chats")
+async def admin_get_all_chats(
     request: Request,
     document_id: str,
-    admin_token: str = Header(...)
+    admin_token: str = Header(None, alias="X-Admin-Token")
 ):
-    """Get analytics for a specific document (admin only)"""
+    """
+    SERVICE ADMIN: Get ALL chat conversations from ALL users
+    Use this for analytics, understanding usage patterns, etc.
+    """
     try:
-        # Validate admin access
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
         validate_admin_access(admin_token)
         
-        clean_document_id = validate_document_id(document_id)
+        clean_document_id = validate_document_id(document_id) 
         storage_service = request.app.state.storage_service
         
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
-        
-        # Get all chat activity
+        # SERVICE: Get ALL chats from ALL users
         activity_blob_name = f"{clean_document_id}_all_chats.json"
         try:
             activity_data = await storage_service.download_blob_as_text(
@@ -675,27 +450,97 @@ async def get_document_analytics(
                 blob_name=activity_blob_name
             )
             all_chats = json.loads(activity_data)
-        except:
+        except Exception: 
             all_chats = []
         
-        # Generate analytics
-        total_chats = len(all_chats)
-        unique_users = len(set(chat["author"] for chat in all_chats))
-        avg_prompt_length = sum(chat["prompt_length"] for chat in all_chats) / total_chats if total_chats > 0 else 0
-        avg_response_length = sum(chat["response_length"] for chat in all_chats) / total_chats if total_chats > 0 else 0
+        # Analytics
+        analytics = {
+            "total_conversations": len(all_chats),
+            "unique_users": len(set(chat.get("author") for chat in all_chats)),
+            "avg_prompt_length": sum(chat.get("prompt_length", 0) for chat in all_chats) / len(all_chats) if all_chats else 0,
+            "avg_response_length": sum(chat.get("response_length", 0) for chat in all_chats) / len(all_chats) if all_chats else 0
+        }
         
         return {
             "document_id": clean_document_id,
-            "analytics": {
-                "total_chats": total_chats,
-                "unique_users": unique_users,
-                "avg_prompt_length": round(avg_prompt_length, 2),
-                "avg_response_length": round(avg_response_length, 2),
-                "recent_activity": all_chats[-10:] if all_chats else []
-            }
+            "all_chats": all_chats, 
+            "analytics": analytics
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get analytics: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
+
+@blueprint_router.get("/admin/documents/{document_id}/user-chat/{author}")
+async def admin_get_user_chat(
+    request: Request,
+    document_id: str,
+    author: str,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """
+    SERVICE ADMIN: Get specific user's complete chat history
+    """
+    try:
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        clean_document_id = validate_document_id(document_id) 
+        storage_service = request.app.state.storage_service
+        
+        # Get specific user's chat history
+        user_chats = await load_user_chat_history(clean_document_id, author, storage_service)
+        
+        return {
+            "document_id": clean_document_id,
+            "author": author,
+            "chat_history": user_chats,
+            "total_conversations": len(user_chats)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
+
+@blueprint_router.get("/admin/system/stats")
+async def admin_get_system_stats(
+    request: Request,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """
+    SERVICE ADMIN: Get overall system statistics
+    """
+    try:
+        if not admin_token:
+            raise HTTPException(status_code=401, detail="Admin token required")
+        
+        validate_admin_access(admin_token)
+        
+        storage_service = request.app.state.storage_service
+        
+        # Get basic storage stats
+        main_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CONTAINER_NAME)
+        cache_blobs = await storage_service.list_blobs(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
+        
+        # Count document types
+        pdf_documents = len([b for b in main_blobs if b.endswith('.pdf')])
+        processed_documents = len([b for b in cache_blobs if b.endswith('_chunks.json')])
+        
+        return {
+            "system_stats": {
+                "total_pdf_documents": pdf_documents,
+                "processed_documents": processed_documents,
+                "total_cache_files": len(cache_blobs),
+                "total_main_files": len(main_blobs)
+            },
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
