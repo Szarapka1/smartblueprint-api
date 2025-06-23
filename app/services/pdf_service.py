@@ -1,4 +1,4 @@
-# app/services/pdf_service.py - Enhanced with High Resolution Images
+# app/services/pdf_service.py - Enhanced with High Resolution Images and Debugging
 import logging
 import fitz  # PyMuPDF library
 import json 
@@ -13,7 +13,7 @@ class PDFService:
     def __init__(self, settings: AppSettings):
         self.settings = settings
         # Set high DPI for technical drawings - configurable via environment
-        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "300"))  # Default 300 DPI (was 150)
+        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "300"))  # Default 300 DPI
         self.thumbnail_dpi = int(os.getenv("PDF_THUMBNAIL_DPI", "150"))  # For thumbnails if needed
         logger.info(f"✅ PDFService initialized with {self.image_dpi} DPI for analysis images")
 
@@ -43,25 +43,31 @@ class PDFService:
                 
                 for page_num, page in enumerate(doc):
                     try:
-                        # Use high DPI for better symbol/detail recognition
-                        logger.debug(f"🖼️ Rendering page {page_num + 1} at {self.image_dpi} DPI...")
+                        logger.info(f"🖼️ Rendering page {page_num + 1} at {self.image_dpi} DPI...")
                         
-                        # Get pixmap with high DPI - this is the key improvement!
-                        pix = page.get_pixmap(dpi=self.image_dpi)
+                        # Get pixmap with high DPI
+                        matrix = fitz.Matrix(self.image_dpi / 72, self.image_dpi / 72)  # DPI conversion
+                        pix = page.get_pixmap(matrix=matrix)
                         
                         # Convert to PNG bytes
                         image_bytes = pix.tobytes("png")
                         images.append(image_bytes)
                         
-                        # Log the size improvement
+                        # Log the size and validate PNG
                         estimated_size_mb = len(image_bytes) / (1024 * 1024)
+                        is_valid_png = image_bytes.startswith(b'\x89PNG\r\n\x1a\n')
+                        
                         logger.info(f"🖼️ Page {page_num + 1}: {estimated_size_mb:.1f}MB at {self.image_dpi}DPI ({pix.width}x{pix.height}px)")
+                        logger.info(f"🖼️ Page {page_num + 1}: Valid PNG = {is_valid_png}")
+                        
+                        if not is_valid_png:
+                            logger.warning(f"⚠️ Page {page_num + 1} may not be a valid PNG!")
                         
                         # Clean up memory
                         pix = None
                         
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to render page {page_num + 1}: {e}")
+                        logger.error(f"❌ Failed to render page {page_num + 1}: {e}")
                         # Continue with other pages
                         continue
             
@@ -88,7 +94,8 @@ class PDFService:
                 for page_num, page in enumerate(doc):
                     try:
                         # Lower DPI for thumbnails/UI display
-                        pix = page.get_pixmap(dpi=self.thumbnail_dpi)
+                        matrix = fitz.Matrix(self.thumbnail_dpi / 72, self.thumbnail_dpi / 72)
+                        pix = page.get_pixmap(matrix=matrix)
                         image_bytes = pix.tobytes("png")
                         thumbnails.append(image_bytes)
                         
@@ -218,23 +225,38 @@ class PDFService:
                 blob_name=text_blob_name,
                 data=full_text.encode('utf-8')
             )
-            logger.info(f"✅ Step 1 complete: Uploaded text context")
+            logger.info(f"✅ Step 1 complete: Uploaded text context to {text_blob_name}")
 
             # 2. Extract HIGH-RESOLUTION page images for AI analysis
             logger.info(f"🖼️ Step 2: Extracting HIGH-RESOLUTION page images ({self.image_dpi} DPI)...")
             page_images = self._extract_page_images(pdf_bytes)
             
+            uploaded_images = 0
             for i, image_bytes in enumerate(page_images):
-                image_blob_name = f"{session_id}_page_{i + 1}.png"
-                await storage_service.upload_file(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=image_blob_name,
-                    data=image_bytes
-                )
-                size_mb = len(image_bytes) / (1024 * 1024)
-                logger.debug(f"🖼️ Uploaded HIGH-RES page {i + 1}: {size_mb:.1f}MB")
+                try:
+                    image_blob_name = f"{session_id}_page_{i + 1}.png"
+                    
+                    # Validate image before upload
+                    is_valid_png = image_bytes.startswith(b'\x89PNG\r\n\x1a\n')
+                    if not is_valid_png:
+                        logger.error(f"❌ Invalid PNG for page {i + 1}, skipping upload")
+                        continue
+                    
+                    await storage_service.upload_file(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=image_blob_name,
+                        data=image_bytes
+                    )
+                    
+                    size_mb = len(image_bytes) / (1024 * 1024)
+                    logger.info(f"🖼️ ✅ Uploaded HIGH-RES page {i + 1}: {size_mb:.1f}MB -> {image_blob_name}")
+                    uploaded_images += 1
+                    
+                except Exception as upload_error:
+                    logger.error(f"❌ Failed to upload page {i + 1}: {upload_error}")
+                    continue
             
-            logger.info(f"✅ Step 2 complete: Uploaded {len(page_images)} HIGH-RESOLUTION images")
+            logger.info(f"✅ Step 2 complete: Uploaded {uploaded_images}/{len(page_images)} HIGH-RESOLUTION images")
 
             # 3. Generate and cache chunks
             logger.info("📑 Step 3: Generating text chunks...")
@@ -255,7 +277,7 @@ class PDFService:
                 blob_name=chunks_blob_name,
                 data=chunks_json.encode('utf-8')
             )
-            logger.info(f"✅ Step 3 complete: Cached {len(chunks)} chunks")
+            logger.info(f"✅ Step 3 complete: Cached {len(chunks)} chunks to {chunks_blob_name}")
             
             # Optional Step 4: Create lower-res thumbnails for UI if needed
             create_thumbnails = os.getenv("CREATE_THUMBNAILS", "false").lower() == "true"
@@ -277,7 +299,7 @@ class PDFService:
             total_storage_mb = sum(len(img) for img in page_images) / (1024 * 1024)
             logger.info(f"🎯 HIGH-RESOLUTION PDF processing completed for '{session_id}':")
             logger.info(f"   📄 Text: {len(full_text)} characters")
-            logger.info(f"   🖼️ HIGH-RES Images: {len(page_images)} pages ({total_storage_mb:.1f}MB)")
+            logger.info(f"   🖼️ HIGH-RES Images: {uploaded_images} pages ({total_storage_mb:.1f}MB)")
             logger.info(f"   📑 Chunks: {len(chunks)} sections")
             logger.info(f"   🔍 DPI: {self.image_dpi} (optimized for symbol recognition)")
             logger.info(f"   🆔 Document ID: '{session_id}' is ready for VISUAL AI analysis!")
