@@ -1019,12 +1019,16 @@ Text from document:
 
 Question: {prompt}
 
-IMPORTANT: Match your response to the question type:
-- If they're asking for a general overview (e.g., "tell me about this document"), provide a clear summary without diving into every detail
-- If they're asking something specific (e.g., "how many sprinklers"), provide precise analysis
-- If they're asking for simple info (e.g., "what's the address"), just answer directly
+IMPORTANT INSTRUCTIONS:
+1. This is about a SPECIFIC document that has been uploaded. Always analyze THIS document.
+2. If the question requires visual information (counting items, reading specific callouts, understanding layout), you MUST use the analyze_document_visually tool FIRST.
+3. Match your response to the question type:
+   - General overview: Describe what you see in THIS document
+   - Specific technical questions: Analyze THIS document and provide specific calculations
+   - Simple info: Extract from THIS document
+4. Never give generic answers - always base your response on what's actually in THIS document.
 
-Be conversational and helpful."""
+The user is asking about the specific blueprint/document they uploaded. Analyze it and answer based on what you find."""
             
             user_message["content"].append({"type": "text", "text": context})
             messages.append(user_message)
