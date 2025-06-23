@@ -49,7 +49,7 @@ class SessionService:
                 logger.info(f"✅ Added annotation to session:")
                 logger.info(f"   🆔 Session: {session_id}")
                 logger.info(f"   📄 Page: {annotation.page_number}")
-                logger.info(f"   📝 Content: '{annotation.content[:50]}{'...' if len(annotation.content) > 50 else ''}'")
+                logger.info(f"   📝 Content: '{annotation.text[:50]}{'...' if len(annotation.text) > 50 else ''}'")
                 logger.info(f"   📊 Total annotations for session: {len(self.sessions[session_id]['annotations'])}")
                 
             else:
