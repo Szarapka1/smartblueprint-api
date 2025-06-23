@@ -936,9 +936,9 @@ class ProfessionalAIService:
                             "height": {"type": "number", "description": "Building height in feet"},
                             "occupancy_type": {"type": "string", "enum": ["assembly_concentrated", "assembly_unconcentrated", "business", "educational", "factory_industrial", "institutional", "mercantile", "residential", "storage", "utility_miscellaneous"], "description": "IBC occupancy classification"},
                             "construction_type": {"type": "string", "enum": ["type_i_a", "type_i_b", "type_ii_a", "type_ii_b", "type_iii_a", "type_iii_b", "type_iv", "type_v_a", "type_v_b"], "description": "IBC construction type"},
-                            "sprinklered": {"type": "boolean", "description": "Whether building has sprinkler system", "default": false},
+                            "sprinklered": {"type": "boolean", "description": "Whether building has sprinkler system", "default": False},
                             "stories": {"type": "number", "description": "Number of stories", "default": 1},
-                            "basement": {"type": "boolean", "description": "Whether building has basement", "default": false}
+                            "basement": {"type": "boolean", "description": "Whether building has basement", "default": False}
                         },
                         "required": ["area", "occupancy_type", "construction_type"]
                     }
@@ -991,7 +991,7 @@ class ProfessionalAIService:
                             "value": {"type": "number"},
                             "from_unit": {"type": "string"},
                             "to_unit": {"type": "string"},
-                            "precision_required": {"type": "boolean", "default": false}
+                            "precision_required": {"type": "boolean", "default": False}
                         },
                         "required": ["value", "from_unit", "to_unit"]
                     }
