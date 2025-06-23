@@ -915,6 +915,9 @@ class EnhancedAIService:
                 return "I'm having trouble accessing the document. Please ensure it's been properly uploaded."
             
             # Process with comprehensive understanding
+            if not document_text and not image_url:
+                return "I couldn't access the document data. Please ensure the document has been properly uploaded and processed."
+            
             result = await self._process_with_deep_understanding(
                 prompt=prompt,
                 document_text=document_text,
@@ -1020,22 +1023,22 @@ Match your response depth to the question. Be helpful and conversational."""
                 })
             
             # Context with query
-            context = f"""Document: {document_id}
+            if image_url:
+                context = f"""Document: {document_id}
+Available text from document (may be incomplete):
+{document_text[:2000] if document_text else "No text available"}...
+
+IMPORTANT: You have access to a blueprint image. For this question, you MUST use the analyze_document_visually tool to examine the blueprint and provide specific information from it.
+
+Question: {prompt}"""
+            else:
+                context = f"""Document: {document_id}
 Text from document:
-{document_text[:3000]}...
+{document_text[:3000] if document_text else "No text available"}...
 
-Question: {prompt}
+Note: No image is available for visual analysis. Work with the text information provided.
 
-IMPORTANT INSTRUCTIONS:
-1. This is about a SPECIFIC document that has been uploaded. Always analyze THIS document.
-2. If the question requires visual information (counting items, reading specific callouts, understanding layout), you MUST use the analyze_document_visually tool FIRST.
-3. Match your response to the question type:
-   - General overview: Describe what you see in THIS document
-   - Specific technical questions: Analyze THIS document and provide specific calculations
-   - Simple info: Extract from THIS document
-4. Never give generic answers - always base your response on what's actually in THIS document.
-
-The user is asking about the specific blueprint/document they uploaded. Analyze it and answer based on what you find."""
+Question: {prompt}"""
             
             user_message["content"].append({"type": "text", "text": context})
             messages.append(user_message)
@@ -1092,6 +1095,8 @@ The user is asking about the specific blueprint/document they uploaded. Analyze 
             function_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
             
+            logger.debug(f"Executing tool: {function_name} with args: {arguments}")
+            
             if function_name == "analyze_document_visually":
                 return await self.analyzer.deep_visual_analysis(arguments["image_url"])
             elif function_name == "extract_measurements":
@@ -1105,8 +1110,8 @@ The user is asking about the specific blueprint/document they uploaded. Analyze 
                 return {"error": f"Unknown function: {function_name}"}
                 
         except Exception as e:
-            logger.error(f"Tool error: {e}")
-            return {"error": str(e)}
+            logger.error(f"Tool execution error in {function_name}: {str(e)}", exc_info=True)
+            return {"error": f"Tool {function_name} failed: {str(e)}"}
     
     async def __aenter__(self):
         return self
