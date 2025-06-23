@@ -325,7 +325,7 @@ class EnhancedBuildingCodeAnalyzer:
             response = await asyncio.get_event_loop().run_in_executor(
                 None,  # Use default executor
                 lambda: openai_client.chat.completions.create(
-                    model="gpt-4-vision-preview",
+                    model="gpt-4o",  # Use gpt-4o instead of deprecated gpt-4-vision-preview
                     messages=[
                         {
                             "role": "system",
@@ -354,7 +354,7 @@ class EnhancedBuildingCodeAnalyzer:
             return {
                 "extraction_successful": True,
                 "extracted_text": extracted_text,
-                "source": "gpt-4-vision-preview"
+                "source": "gpt-4o"
             }
         except Exception as e:
             logger.error(f"❌ Vision-based text extraction failed: {e}")
@@ -1352,7 +1352,7 @@ Please provide a comprehensive professional analysis. Remember to use the `analy
                 asyncio.get_event_loop().run_in_executor(
                     self.executor,
                     lambda: self.client.chat.completions.create(
-                        model="gpt-4-vision-preview",
+                        model="gpt-4o",  # Use gpt-4o instead of deprecated gpt-4-vision-preview
                         messages=messages,
                         tools=self.tools,
                         tool_choice="auto",
@@ -1402,7 +1402,7 @@ Please provide a comprehensive professional analysis. Remember to use the `analy
                     asyncio.get_event_loop().run_in_executor(
                         self.executor,
                         lambda: self.client.chat.completions.create(
-                            model="gpt-4-vision-preview",
+                            model="gpt-4o",
                             messages=messages,
                             max_tokens=4000,
                             temperature=0.05
