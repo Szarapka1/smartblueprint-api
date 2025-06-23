@@ -886,43 +886,43 @@ class IntelligentAIService:
         try:
             # Create system message based on intent
             if intent == QuestionIntent.GENERAL_OVERVIEW:
-                system_content = """You are analyzing a construction document. Provide a clear, conversational overview of what you see. Include:
+                system_content = """You are analyzing a construction document. When asked for an overview, use the analyze_blueprint_visually tool to examine the document, then provide a clear, conversational overview of what you see. Include:
 - Document type and purpose
 - Key spaces and their uses
 - Overall size and scope
 - Notable features or systems
-Keep it informative but accessible, like explaining to a colleague."""
+Keep it informative but accessible."""
             
             elif intent == QuestionIntent.SIMPLE_INFO:
-                system_content = """You are looking for specific project information. Find and provide the requested information directly and concisely. Look for:
+                system_content = """You are looking for specific project information. ALWAYS use the analyze_blueprint_visually tool FIRST to examine the document, then find and provide the requested information directly and concisely. Look for:
 - Project addresses, names, dates
 - People involved (owner, architect, etc.)
 - Drawing numbers and details
 Just give the specific answer requested."""
             
             elif intent == QuestionIntent.COUNTING:
-                system_content = """You need to count specific items in the blueprint. Use visual analysis to:
+                system_content = """You need to count specific items in the blueprint. ALWAYS use the analyze_blueprint_visually tool to examine the document, then:
 - Identify and count the requested items
 - Be precise with your count
 - Note what you counted and where
 Provide the exact count with brief explanation."""
             
             elif intent == QuestionIntent.CALCULATION:
-                system_content = """You need to perform technical calculations. Use the appropriate tools to:
+                system_content = """You need to perform technical calculations. First use the analyze_blueprint_visually tool to get the document information, then use the calculate_requirements tool to:
 - Calculate based on actual document data
 - Apply relevant building codes
 - Show your work briefly
 - Provide practical recommendations"""
             
             elif intent == QuestionIntent.CODE_COMPLIANCE:
-                system_content = """You need to check code compliance. Analyze against:
+                system_content = """You need to check code compliance. First use the analyze_blueprint_visually tool to examine the document, then analyze against:
 - Relevant building codes (IBC, NFPA, ADA, etc.)
 - Specific requirements for the space type
 - Safety and accessibility standards
 Provide clear compliance status with specifics."""
             
             else:  # SPECIFIC_TECHNICAL
-                system_content = """You are answering a specific technical question. Provide:
+                system_content = """You are answering a specific technical question. Use the analyze_blueprint_visually tool if visual information would help, then provide:
 - Direct answer to the question
 - Relevant calculations or code references
 - Practical considerations
@@ -931,12 +931,18 @@ Be thorough but focused on what was asked."""
             # Add base capabilities
             system_content += """
 
-You have access to:
-- Visual analysis tools for blueprints
-- Comprehensive building code knowledge
-- Calculation tools for all building systems
+You have access to these tools:
+- analyze_blueprint_visually: Use this to examine blueprints and extract all information
+- extract_measurements: Extract measurements from text
+- calculate_requirements: Calculate code requirements for building systems
 
-IMPORTANT: This is about a SPECIFIC document the user uploaded. Always analyze THIS document, not generic examples."""
+CRITICAL INSTRUCTIONS:
+1. For ANY question about the document content (address, what's shown, counting items, etc.), you MUST use the analyze_blueprint_visually tool FIRST
+2. You have the image_url in the conversation - use it with the tool
+3. NEVER say "I can't access the image" - you CAN access it through the analyze_blueprint_visually tool
+4. This is about a SPECIFIC document the user uploaded - always analyze it
+
+Remember: The user uploaded a blueprint and wants information about IT specifically."""
             
             messages = [{"role": "system", "content": system_content}]
             
@@ -950,12 +956,22 @@ IMPORTANT: This is about a SPECIFIC document the user uploaded. Always analyze T
                 })
             
             # Add context and question
-            context = f"""Document ID: {document_id}
-{f'Document text: {document_text[:2000]}...' if document_text else 'No text available'}
+            if image_url:
+                context = f"""Document ID: {document_id}
+{f'Document text (may be incomplete): {document_text[:1000]}...' if document_text else 'No text extraction available'}
+
+The user has uploaded a blueprint image that you can analyze.
 
 Question: {prompt}
 
-{'Use visual analysis to examine the blueprint and answer based on what you see.' if image_url else 'Work with the available text information.'}"""
+IMPORTANT: Use the analyze_blueprint_visually tool with the provided image_url to examine this specific blueprint and answer the question based on what you find."""
+            else:
+                context = f"""Document ID: {document_id}
+Document text: {document_text[:2000] if document_text else 'No text available'}...
+
+Question: {prompt}
+
+Note: No image is available, work with the text information provided."""
             
             user_message["content"].append({"type": "text", "text": context})
             messages.append(user_message)
