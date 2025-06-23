@@ -2,7 +2,7 @@
 import uuid
 import logging
 from typing import Dict, Any, List, Optional
-from app.core.config import AppSettings
+from app.core.config import AppSettings, get_settings
 from app.models.schemas import Annotation
 
 logger = logging.getLogger(__name__)
