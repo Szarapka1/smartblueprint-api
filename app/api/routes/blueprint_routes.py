@@ -194,7 +194,7 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str, ai_r
         })
         
         # Limit size
-        max_chats = int(os.getenv("MAX_CHAT_LOGS", "1000"))
+        max_chats = getattr(settings, 'MAX_CHAT_LOGS', 1000)
         if len(all_chats) > max_chats:
             all_chats = all_chats[-max_chats:]
         
