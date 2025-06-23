@@ -77,26 +77,47 @@ async def get_document_statistics(request: Request, document_id: str):
         storage_service = request.app.state.storage_service
         ai_service = request.app.state.ai_service
 
+        # Resolve the real file name from the ID
         real_filename = await resolve_real_filename(clean_document_id, storage_service)
-        doc_info = await ai_service.get_document_info(real_filename, storage_service)
 
+        # Try getting document info from AI service
+        try:
+            doc_info = await ai_service.get_document_info(real_filename, storage_service)
+            if not isinstance(doc_info, dict):
+                raise ValueError("AI service did not return a valid dictionary")
+        except Exception as e:
+            logging.warning(f"AI service failed: {e}")
+            doc_info = {
+                "total_characters": 0,
+                "estimated_tokens": 0,
+                "status": "unknown"
+            }
+
+        # Check if the document wasn't found explicitly
         if doc_info.get("status") == "not_found":
             raise HTTPException(status_code=404, detail=f"Document '{clean_document_id}' not found")
 
+        # Load annotations
         annotations = await load_document_annotations(clean_document_id, storage_service)
         unique_authors = list(set(ann.get("author", "Unknown") for ann in annotations))
+
         annotation_types = {}
         for ann in annotations:
             ann_type = ann.get("annotation_type", "note")
             annotation_types[ann_type] = annotation_types.get(ann_type, 0) + 1
 
+        # Get the latest activity timestamp
         last_activity = None
         if annotations:
-            last_activity = max(ann.get("created_at", ann.get("updated_at", "")) for ann in annotations)
+            last_activity = max(
+                ann.get("created_at") or ann.get("updated_at", "") for ann in annotations
+            )
 
+        # Get page stats
         page_numbers = [ann.get("page_number", 1) for ann in annotations]
         max_page = max(page_numbers) if page_numbers else 1
 
+        # Final structured response
         return DocumentStatsResponse(
             document_id=clean_document_id,
             total_annotations=len(annotations),
@@ -106,12 +127,15 @@ async def get_document_statistics(request: Request, document_id: str):
             unique_authors=unique_authors,
             annotation_types=annotation_types,
             last_activity=last_activity,
-            status=doc_info.get("status", "unknown")
+            status=doc_info.get("status", "ok")
         )
+
     except HTTPException:
         raise
     except Exception as e:
+        logging.error(f"Unexpected error in get_document_statistics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get document statistics: {str(e)}")
+
 
 @document_router.get("/documents/{document_id}/activity", response_model=DocumentActivityResponse)
 async def get_document_activity(request: Request, document_id: str, limit: int = 20):
