@@ -94,7 +94,10 @@ def validate_document_id(document_id: str) -> str:
 def validate_author(author: str) -> str:
     """Validate and sanitize author name"""
     if not author or not isinstance(author, str):
-        raise HTTPException(status_code=400, detail="Author name must be a non-empty string")
+        raise HTTPException(
+            status_code=400,
+            detail="Author name must be a non-empty string"
+        )
     
     clean_author = author.strip()
     
@@ -164,12 +167,9 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str, ai_r
         all_chats.append({
             "chat_id": str(uuid.uuid4())[:8],
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "document_id": document_id,
-            "author": author,
-            "prompt": prompt,
-            "ai_response": ai_response,
-            "prompt_length": len(prompt),
-            "response_length": len(ai_response)
+            "document_id": document_id, "author": author,
+            "prompt": prompt, "ai_response": ai_response,
+            "prompt_length": len(prompt), "response_length": len(ai_response)
         })
         
         max_chats = int(os.getenv("MAX_CHAT_LOGS", "1000"))
