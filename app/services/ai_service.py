@@ -320,9 +320,19 @@ class ComprehensiveDocumentAnalyzer:
                             "role": "system",
                             "content": """You are analyzing a construction document. Extract EVERYTHING you see, including:
 
+PROJECT INFORMATION (LOOK IN TITLE BLOCK):
+- Project name and number
+- PROJECT ADDRESS / LOCATION
+- Owner/Client name
+- Architect/Engineer names and license numbers
+- Contractor information
+- Drawing date, revision dates
+- Sheet number and title
+- Scale
+- North arrow orientation
+
 GENERAL:
-- Document type, title, project name, sheet number
-- Scale, north arrow, grid lines
+- Document type (architectural, structural, etc.)
 - Overall dimensions and areas
 - All rooms/spaces with names and dimensions
 
@@ -406,6 +416,13 @@ Count EVERYTHING. Note ALL text, dimensions, and callouts. Be extremely thorough
     def extract_all_measurements(self, text: str) -> Dict[str, Any]:
         """Extract measurements for ALL trades"""
         patterns = {
+            # Project Information
+            'address': r'(?:address|location|site)[\s:]*([^\n]+)',
+            'project_name': r'(?:project|job)[\s:]*([^\n]+)',
+            'owner': r'(?:owner|client)[\s:]*([^\n]+)',
+            'architect': r'(?:architect|designer)[\s:]*([^\n]+)',
+            'date': r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            
             # Dimensions
             'room_dims': r'(\d+)[\'\-\s]*(\d+)?"?\s*[xX×]\s*(\d+)[\'\-\s]*(\d+)?"?',
             'linear_dims': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:LF|lf|linear)',
@@ -918,7 +935,32 @@ class EnhancedAIService:
             # Comprehensive system message
             system_message = {
                 "role": "system",
-                "content": """You are an AI with COMPREHENSIVE understanding of ALL construction trades and building systems. You have expert-level knowledge in:
+                "content": """You are an AI assistant with deep construction knowledge. You understand how to read intent and provide appropriate responses.
+
+RESPONSE STRATEGIES:
+1. GENERAL QUESTIONS (e.g., "tell me about this document", "what is this?"):
+   - Provide a clear, high-level overview
+   - Identify document type and purpose
+   - Mention key spaces or systems shown
+   - Note the project scope
+   - Keep it conversational and accessible
+   - DON'T list every measurement or count every item
+
+2. SPECIFIC QUESTIONS (e.g., "how many doors?", "calculate the electrical load"):
+   - Use detailed analysis tools
+   - Provide precise calculations
+   - Reference relevant codes
+   - Show your work when helpful
+
+3. SIMPLE INFORMATION (e.g., "what's the address?", "who's the architect?"):
+   - Answer directly and concisely
+   - Don't over-explain
+
+BASIC CAPABILITIES:
+- Read and understand any construction document
+- Identify project information (addresses, names, dates)
+- Recognize drawing types and purposes
+- Extract any visible information
 
 TRADES & DISCIPLINES:
 - Architecture & Space Planning
@@ -950,15 +992,13 @@ CAPABILITIES:
 - Identify potential issues or conflicts
 
 APPROACH:
-1. Understand exactly what's being asked - could be about any trade or system
-2. Use visual analysis if it helps answer the question better
-3. Apply relevant codes and standards
-4. Perform appropriate calculations
-5. Provide clear, helpful answers
-6. Include code references when relevant
-7. Note when professional review is needed
+1. First, understand the INTENT - is this a general overview, specific technical question, or simple information request?
+2. For GENERAL OVERVIEWS: Describe what you see, the document's purpose, and key features without overwhelming detail
+3. For SPECIFIC QUESTIONS: Use appropriate tools and provide detailed analysis
+4. For SIMPLE REQUESTS: Give direct answers
+5. Always be ready to dive deeper if asked follow-up questions
 
-Answer naturally but thoroughly. You can handle questions about ANYTHING in construction."""
+Match your response depth to the question. Be helpful and conversational."""
             }
             
             messages = [system_message]
@@ -979,7 +1019,12 @@ Text from document:
 
 Question: {prompt}
 
-Provide a comprehensive answer using your deep knowledge of all construction trades and systems."""
+IMPORTANT: Match your response to the question type:
+- If they're asking for a general overview (e.g., "tell me about this document"), provide a clear summary without diving into every detail
+- If they're asking something specific (e.g., "how many sprinklers"), provide precise analysis
+- If they're asking for simple info (e.g., "what's the address"), just answer directly
+
+Be conversational and helpful."""
             
             user_message["content"].append({"type": "text", "text": context})
             messages.append(user_message)
