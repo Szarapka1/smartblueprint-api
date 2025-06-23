@@ -43,7 +43,10 @@ except ImportError as e:
     blueprint_router = None
 
 # --- Init logging & settings ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger("SmartBlueprintAPI")
 
 try:
@@ -62,6 +65,9 @@ async def lifespan(app: FastAPI):
     """
     logger.info("🚀 Starting Smart Blueprint API...")
     logger.info(f"🔧 Environment: {'Development' if getattr(settings, 'DEBUG', False) else 'Production'}")
+    
+    # Print environment info for debugging
+    logger.info(f"📊 Python environment: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # --- Initialize services explicitly and safely ---
     app.state.storage_service = None
@@ -73,6 +79,7 @@ async def lifespan(app: FastAPI):
             logger.info("✅ Storage Service initialized and connection verified")
         except Exception as e:
             logger.error(f"❌ Storage Service initialization failed: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
     else:
         logger.warning("⚠️ Storage Service disabled: class not available or connection string missing.")
 
@@ -81,7 +88,12 @@ async def lifespan(app: FastAPI):
         try:
             # Initialize the ProfessionalAIService by passing the entire settings object
             app.state.ai_service = ProfessionalAIService(settings=settings)
-            logger.info("✅ AI Service initialized")
+            logger.info("✅ AI Service initialized with Professional capabilities")
+            
+            # Log AI capabilities
+            capabilities = app.state.ai_service.get_professional_capabilities()
+            logger.info(f"🤖 AI Service capabilities loaded: {len(capabilities.get('building_codes', []))} building codes, "
+                       f"{len(capabilities.get('engineering_disciplines', []))} disciplines")
         except Exception as e:
             logger.error(f"❌ AI Service initialization failed: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
@@ -91,19 +103,17 @@ async def lifespan(app: FastAPI):
     app.state.pdf_service = None
     if PDFService and settings:
         try:
-            # FIX: Pass the settings object to the PDFService constructor.
             app.state.pdf_service = PDFService(settings=settings)
             logger.info("✅ PDF Service initialized")
         except Exception as e:
             logger.error(f"❌ PDF Service initialization failed: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
     else:
-         logger.warning("⚠️ PDF Service disabled: class not available or settings missing.")
+        logger.warning("⚠️ PDF Service disabled: class not available or settings missing.")
 
     app.state.session_service = None
     if SessionService and settings:
         try:
-            # FIX: Pass the settings object to the SessionService constructor.
             app.state.session_service = SessionService(settings=settings)
             logger.info("✅ Session Service initialized")
         except Exception as e:
@@ -115,13 +125,13 @@ async def lifespan(app: FastAPI):
     # --- Log final status ---
     active_services = [
         "📁 Storage" if app.state.storage_service else None,
-        "🤖 AI" if app.state.ai_service else None,
+        "🤖 AI (Professional)" if app.state.ai_service else None,
         "📄 PDF" if app.state.pdf_service else None,
         "👥 Sessions" if app.state.session_service else None
     ]
     active_services_str = ', '.join(filter(None, active_services))
     logger.info(f"🎯 Startup complete. Active services: {active_services_str if active_services_str else 'Basic API only'}")
-    logger.info("🌐 API is ready for requests")
+    logger.info("🌐 API is ready for blueprint analysis requests")
 
     yield
 
@@ -129,12 +139,13 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, 'ai_service') and app.state.ai_service and hasattr(app.state.ai_service, '__aexit__'):
         await app.state.ai_service.__aexit__(None, None, None)
         logger.info("🤖 AI Service shutdown complete.")
+    logger.info("👋 Smart Blueprint API shutdown complete")
 
 # --- Create FastAPI app ---
 app = FastAPI(
     title=getattr(settings, 'PROJECT_NAME', 'Smart Blueprint Chat API'),
-    description="Robust collaborative chat, annotation, and analysis for construction blueprints.",
-    version="2.1.0",
+    description="Professional blueprint analysis with AI-powered code compliance, calculations, and insights.",
+    version="2.2.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc"
@@ -182,33 +193,81 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # --- Register routes safely ---
 if blueprint_router:
-    app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Chat"])
-    logger.info("✅ Blueprint routes registered")
-
-# Add other routers if they exist
-# if document_router: app.include_router(...)
-# if annotation_router: app.include_router(...)
+    app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Analysis"])
+    logger.info("✅ Blueprint routes registered for professional analysis")
 
 # --- Core API endpoints ---
 @app.get("/", tags=["General"])
 async def root():
-    return {"message": "Welcome to Smart Blueprint Chat API", "version": "2.1.0", "docs": "/docs"}
+    return {
+        "message": "Welcome to Smart Blueprint Chat API - Professional Edition",
+        "version": "2.2.0",
+        "docs": "/docs",
+        "capabilities": [
+            "Blueprint Visual Analysis",
+            "Code Compliance Verification",
+            "Professional Calculations",
+            "ADA Compliance Checking",
+            "Fire Safety Analysis",
+            "Quantity Takeoffs"
+        ]
+    }
 
 @app.get("/health", tags=["General"])
 async def health_check(request: Request):
     """Provides a health check of the API and its connected services."""
     app_state = request.app.state
+    
+    # Check AI service capabilities
+    ai_capabilities = None
+    if hasattr(app_state, 'ai_service') and app_state.ai_service:
+        try:
+            ai_capabilities = app_state.ai_service.get_professional_capabilities()
+            ai_status = "professional"
+        except:
+            ai_status = "basic"
+    else:
+        ai_status = "disabled"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
         "services": {
             "storage": "connected" if hasattr(app_state, 'storage_service') and app_state.storage_service else "disabled",
-            "ai": "connected" if hasattr(app_state, 'ai_service') and app_state.ai_service else "disabled",
+            "ai": ai_status,
             "pdf": "available" if hasattr(app_state, 'pdf_service') and app_state.pdf_service else "disabled",
             "sessions": "active" if hasattr(app_state, 'session_service') and app_state.session_service else "disabled"
         },
-        "version": "2.1.0"
+        "ai_capabilities": {
+            "vision_analysis": True if ai_status == "professional" else False,
+            "code_compliance": True if ai_status == "professional" else False,
+            "calculations": True if ai_status == "professional" else False
+        },
+        "version": "2.2.0",
+        "environment": "Production" if not getattr(settings, 'DEBUG', False) else "Development"
     }
+
+@app.get("/capabilities", tags=["General"])
+async def get_capabilities(request: Request):
+    """Returns the professional capabilities of the AI service."""
+    app_state = request.app.state
+    
+    if hasattr(app_state, 'ai_service') and app_state.ai_service:
+        try:
+            return {
+                "status": "available",
+                "capabilities": app_state.ai_service.get_professional_capabilities()
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    else:
+        return {
+            "status": "unavailable",
+            "message": "AI service not initialized"
+        }
 
 # --- Local development server ---
 if __name__ == "__main__":
@@ -216,5 +275,6 @@ if __name__ == "__main__":
     port = getattr(settings, 'PORT', 8000)
     reload = getattr(settings, 'DEBUG', False)
     
-    logger.info(f"🚀 Starting development server at http://{host}:{port}")
+    logger.info(f"🚀 Starting Smart Blueprint API server at http://{host}:{port}")
+    logger.info("📊 Professional blueprint analysis ready")
     uvicorn.run("main:app", host=host, port=port, reload=reload, log_level="info")
