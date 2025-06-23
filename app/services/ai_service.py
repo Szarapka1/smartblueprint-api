@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-from app.core.config import AppSettings
+from app.core.config import get_settings, AppSettings
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -290,6 +290,55 @@ class EnhancedBuildingCodeAnalyzer:
                 calculations={"error": str(e)},
                 confidence=0.0
             )
+    # ADD THE NEW METHODS HERE (after line 293, before line 294)
+    @staticmethod
+    def _analyze_ramp_accessibility(**kwargs) -> ComplianceResult:
+        """Placeholder for ramp accessibility analysis"""
+        return ComplianceResult(
+            compliant=False,
+            issues=["Ramp analysis not yet implemented"],
+            recommendations=["Consult ADA guidelines for ramp requirements"],
+            code_references=["ADA Standards Section 405"],
+            severity="warning",
+            calculations={},
+            confidence=0.0
+        )
+    
+    @staticmethod
+    def _analyze_parking_accessibility(**kwargs) -> ComplianceResult:
+        """Placeholder for parking accessibility analysis"""
+        return ComplianceResult(
+            compliant=False,
+            issues=["Parking analysis not yet implemented"],
+            recommendations=["Consult ADA guidelines for parking requirements"],
+            code_references=["ADA Standards Section 502"],
+            severity="warning",
+            calculations={},
+            confidence=0.0
+        )
+    
+    @staticmethod
+    def _analyze_restroom_accessibility(**kwargs) -> ComplianceResult:
+        """Placeholder for restroom accessibility analysis"""
+        return ComplianceResult(
+            compliant=False,
+            issues=["Restroom analysis not yet implemented"],
+            recommendations=["Consult ADA guidelines for restroom requirements"],
+            code_references=["ADA Standards Section 604"],
+            severity="warning",
+            calculations={},
+            confidence=0.0
+        )
+    
+    @staticmethod
+    def _get_comprehensive_fire_ratings(building_params: BuildingParameters) -> Dict[str, Any]:
+        """Placeholder for fire rating analysis"""
+        return {
+            "fire_separation": "Analysis pending",
+            "structural_ratings": "Analysis pending",
+            "wall_ratings": "Analysis pending"
+        }
+
     
     @staticmethod
     def comprehensive_accessibility_analysis(element_type: str, **kwargs) -> ComplianceResult:
