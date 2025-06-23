@@ -1,12 +1,13 @@
 # app/api/routes/annotation_routes.py
 
-from fastapi import APIRouter, Request, HTTPException, Header
+from fastapi import APIRouter, Request, HTTPException, Header, Query
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 import json
 import uuid
 import os
+import re
 from app.core.config import get_settings
 
 annotation_router = APIRouter()
@@ -59,7 +60,7 @@ def validate_admin_access(admin_token: str) -> bool:
 
 async def load_all_annotations(document_id: str, storage_service) -> List[dict]:
     """Load ALL annotations for the service - both private and public"""
-    annotations_blob_name = f"{document_id}_all_annotations.json"
+    annotations_blob_name = f"{document_id}_annotations.json"  # FIXED: unified naming
     
     try:
         annotations_data = await storage_service.download_blob_as_text(
@@ -72,7 +73,7 @@ async def load_all_annotations(document_id: str, storage_service) -> List[dict]:
 
 async def save_all_annotations(document_id: str, annotations: List[dict], storage_service):
     """Save ALL annotations - service has access to everything"""
-    annotations_blob_name = f"{document_id}_all_annotations.json"
+    annotations_blob_name = f"{document_id}_annotations.json"  # FIXED: unified naming
     annotations_json = json.dumps(annotations, indent=2, ensure_ascii=False)
     
     await storage_service.upload_file(
@@ -83,7 +84,7 @@ async def save_all_annotations(document_id: str, annotations: List[dict], storag
 
 async def log_user_activity(document_id: str, activity_type: str, author: str, details: dict, storage_service):
     """Log all user activity for service analytics"""
-    activity_blob_name = f"{document_id}_service_activity.json"
+    activity_blob_name = f"{document_id}_all_chats.json"  # FIXED: unified naming
     
     try:
         activity_data = await storage_service.download_blob_as_text(
@@ -105,7 +106,7 @@ async def log_user_activity(document_id: str, activity_type: str, author: str, d
     activities.append(new_activity)
     
     # Keep configurable number of activities
-    max_activities = int(os.getenv("MAX_ACTIVITY_LOGS", "1000"))
+    max_activities = getattr(settings, 'MAX_ACTIVITY_LOGS', 1000)  # FIXED: use settings
     if len(activities) > max_activities:
         activities = activities[-max_activities:]
     
@@ -132,7 +133,7 @@ def filter_user_visible_annotations(annotations: List[dict], requesting_author: 
 async def get_user_visible_annotations(
     request: Request, 
     document_id: str,
-    author: str  # Query parameter: who is requesting?
+    author: str = Query(...)  # Query parameter: who is requesting?
 ):
     """
     USER VIEW: Returns only annotations the user should see
@@ -258,7 +259,7 @@ async def publish_annotation(
     request: Request,
     document_id: str,
     annotation_id: str,
-    author: str  # Query parameter
+    author: str = Query(...)  # Query parameter
 ):
     """
     USER: Publishes their private annotation to make it visible to others
@@ -393,7 +394,7 @@ async def admin_get_all_activity(
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
         
-        activity_blob_name = f"{clean_document_id}_service_activity.json"
+        activity_blob_name = f"{clean_document_id}_all_chats.json"
         try:
             activity_data = await storage_service.download_blob_as_text(
                 container_name=settings.AZURE_CACHE_CONTAINER_NAME,
