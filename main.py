@@ -143,14 +143,17 @@ cors_origins = [
     "http://127.0.0.1:3000",
 ]
 
-# If settings.CORS_ORIGINS is a list, extend directly (no .split)
+# If CORS_ORIGINS is defined in settings as a list, extend the default list
 if hasattr(settings, 'CORS_ORIGINS') and isinstance(settings.CORS_ORIGINS, list):
     cors_origins.extend(origin.strip() for origin in settings.CORS_ORIGINS if origin.strip())
 
-# Remove duplicates just in case
+# Deduplicate origins
 cors_origins = list(set(cors_origins))
 
+# Log which origins are allowed
 logger.info(f"🌐 CORS enabled for origins: {cors_origins}")
+
+# Add middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
