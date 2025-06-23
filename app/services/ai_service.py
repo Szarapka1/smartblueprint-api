@@ -892,7 +892,7 @@ class ProfessionalAIService:
                             "construction_type": {"type": "string", "enum": ["type_i_a", "type_i_b", "type_ii_a", "type_ii_b", "type_iii_a", "type_iii_b", "type_iv", "type_v_a", "type_v_b"], "description": "IBC construction type"},
                             "sprinklered": {"type": "boolean", "description": "Whether building has sprinkler system"},
                             "stories": {"type": "number", "description": "Number of stories", "default": 1},
-                            "basement": {"type": "boolean", "description": "Whether building has basement", "default": false},
+                            "basement": {"type": "boolean", "description": "Whether building has basement", "default": False},
                             "travel_distances": {"type": "array", "items": {"type": "number"}, "description": "Travel distances to exits in feet"},
                             "exit_widths": {"type": "array", "items": {"type": "number"}, "description": "Exit widths in inches"},
                             "exit_count": {"type": "number", "description": "Number of exits provided"}
