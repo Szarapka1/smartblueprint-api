@@ -170,9 +170,9 @@ class EnhancedBuildingCodeAnalyzer:
     
     @staticmethod
     def comprehensive_egress_analysis(building_params: BuildingParameters, 
-                                    travel_distances: List[float] = None,
-                                    exit_widths: List[float] = None,
-                                    exit_count: int = None) -> ComplianceResult:
+                                      travel_distances: List[float] = None,
+                                      exit_widths: List[float] = None,
+                                      exit_count: int = None) -> ComplianceResult:
         """Comprehensive egress analysis with enhanced IBC compliance checking"""
         try:
             issues = []
@@ -309,7 +309,58 @@ class EnhancedBuildingCodeAnalyzer:
                 calculations={"error": str(e)},
                 confidence=0.0
             )
-    # ADD THE NEW METHODS HERE (after line 293, before line 294)
+
+    ### --- NEW CODE START --- ###
+    # This is the new function that directly uses the vision model for OCR.
+    @staticmethod
+    async def analyze_blueprint_image_with_vision(image_url: str) -> Dict[str, Any]:
+        """
+        Analyzes a blueprint image using GPT-4 Vision to extract ALL visible text,
+        dimensions, callouts, and symbols. This is a targeted OCR and data extraction tool.
+        This function should be called when the initial document text seems insufficient
+        or when visual context is critical for analysis.
+        """
+        logger.debug(f"🖼️ Calling Vision model for targeted data extraction from image.")
+        try:
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,  # Use default executor
+                lambda: openai_client.chat.completions.create(
+                    model="gpt-4-vision-preview",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a specialized Optical Character Recognition (OCR) and data extraction engine for construction blueprints. Your task is to meticulously extract all text, dimensions, callouts, and symbols you see in the provided image. Present the extracted data as a comprehensive block of text. Be precise and capture everything, including text in schedules and notes."
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": image_url, "detail": "high"}
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "Extract all textual and dimensional information from this blueprint image. Be as complete and accurate as possible."
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=2500,
+                    temperature=0.0
+                )
+            )
+            extracted_text = response.choices[0].message.content
+            logger.debug(f"✅ Vision model extracted text: {len(extracted_text)} chars")
+            return {
+                "extraction_successful": True,
+                "extracted_text": extracted_text,
+                "source": "gpt-4-vision-preview"
+            }
+        except Exception as e:
+            logger.error(f"❌ Vision-based text extraction failed: {e}")
+            return {"extraction_successful": False, "error": str(e)}
+    ### --- NEW CODE END --- ###
+
     @staticmethod
     def _analyze_ramp_accessibility(**kwargs) -> ComplianceResult:
         """Placeholder for ramp accessibility analysis"""
@@ -395,8 +446,8 @@ class EnhancedBuildingCodeAnalyzer:
     
     @staticmethod
     def _analyze_door_accessibility(width: float = 32, threshold_height: float = 0.5,
-                                  opening_force: float = 5, maneuvering_clearance: float = 18,
-                                  closing_speed: float = 5, **kwargs) -> ComplianceResult:
+                                    opening_force: float = 5, maneuvering_clearance: float = 18,
+                                    closing_speed: float = 5, **kwargs) -> ComplianceResult:
         """Comprehensive door accessibility analysis"""
         issues = []
         recommendations = []
@@ -622,9 +673,9 @@ class UniversalConstructionAnalyzer:
     
     @staticmethod
     async def calculate_by_area_advanced(total_area: float, coverage_per_unit: float, 
-                                       unit_name: str = "items", area_unit: str = "sqft",
-                                       efficiency_factor: float = 1.0,
-                                       overlap_factor: float = 0.0) -> Dict[str, Any]:
+                                           unit_name: str = "items", area_unit: str = "sqft",
+                                           efficiency_factor: float = 1.0,
+                                           overlap_factor: float = 0.0) -> Dict[str, Any]:
         """Advanced area-based calculation with efficiency and overlap considerations"""
         try:
             # Account for efficiency and overlap
@@ -935,7 +986,7 @@ class ProfessionalAIService:
                 "type": "function",
                 "function": {
                     "name": "extract_measurements_enhanced",
-                    "description": "Enhanced measurement extraction with AI validation and cross-referencing",
+                    "description": "Enhanced measurement extraction from TEXT using Regex. Use this after extracting text from an image.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -945,6 +996,23 @@ class ProfessionalAIService:
                     }
                 }
             },
+            ### --- NEW CODE START --- ###
+            # This is the new tool definition that enables vision analysis.
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_blueprint_image_with_vision",
+                    "description": "Performs targeted visual analysis (OCR) on a blueprint image to extract all text, dimensions, and callouts. Use this tool FIRST if the user asks a question about the visual content of the blueprint and the initial text context seems insufficient.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_url": {"type": "string", "description": "The base64 encoded data URL of the blueprint image to analyze."}
+                        },
+                        "required": ["image_url"]
+                    }
+                }
+            },
+            ### --- NEW CODE END --- ###
             # Professional building code compliance tools
             {
                 "type": "function",
@@ -1071,8 +1139,8 @@ class ProfessionalAIService:
     
     async def _execute_tool_call_async(self, tool_call) -> str:
         """Asynchronous tool execution with enhanced error handling"""
+        function_name = tool_call.function.name
         try:
-            function_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
             
             # Route to appropriate analyzer method
@@ -1080,6 +1148,13 @@ class ProfessionalAIService:
                 result = await self.analyzer.calculate_by_area_advanced(**arguments)
             elif function_name == "extract_measurements_enhanced":
                 result = self.analyzer.extract_measurements_with_ai_validation(arguments["document_text"])
+            
+            ### --- NEW CODE START --- ###
+            # This is the new logic to handle the vision tool call.
+            elif function_name == "analyze_blueprint_image_with_vision":
+                result = await self.code_analyzer.analyze_blueprint_image_with_vision(arguments["image_url"])
+            ### --- NEW CODE END --- ###
+            
             elif function_name == "comprehensive_egress_analysis":
                 # Convert arguments to BuildingParameters
                 building_params = BuildingParameters(
@@ -1208,7 +1283,7 @@ class ProfessionalAIService:
             return f"I encountered a system error: {str(e)}"
 
     async def process_query_with_professional_analysis(self, prompt: str, document_text: str = "", 
-                                                     image_url: str = None, document_id: str = None) -> Dict[str, Any]:
+                                                       image_url: str = None, document_id: str = None) -> Dict[str, Any]:
         """Professional-grade query processing with comprehensive analysis"""
         try:
             # Enhanced system message with professional expertise
@@ -1223,39 +1298,17 @@ class ProfessionalAIService:
 - Expert in all construction trades and disciplines
 
 📋 COMPREHENSIVE CAPABILITIES:
-
-BUILDING CODE COMPLIANCE:
-✅ IBC (International Building Code) - All chapters and sections
-✅ NFPA Standards (13, 72, 101, 70, 90A) - Complete compliance analysis
-✅ ADA Accessibility Guidelines - Detailed compliance verification
-✅ NEC (National Electrical Code) - Load calculations and safety
-✅ IMC/IPC (Mechanical/Plumbing Codes) - System design requirements
-✅ IECC (Energy Code) - Efficiency and performance standards
-
-ENGINEERING ANALYSIS:
-🔧 Structural analysis (loads, spans, capacities, deflection)
-⚡ Electrical design (load calculations, panel sizing, code compliance)
-🌡️ Mechanical systems (HVAC sizing, ductwork, controls)
-🚰 Plumbing design (fixture units, pipe sizing, pressure analysis)
-🔥 Fire protection (sprinkler design, alarm systems, egress analysis)
-🏗️ Construction management (sequencing, materials, quantities)
+- BUILDING CODE COMPLIANCE: IBC, NFPA, ADA, NEC, etc.
+- ENGINEERING ANALYSIS: Structural, Electrical, Mechanical, Plumbing, Fire Protection.
+- CONSTRUCTION MANAGEMENT: Sequencing, materials, quantities.
 
 PROFESSIONAL METHODOLOGY:
-1. Analyze document type and scope with expert judgment
-2. Extract ALL relevant data with engineering precision
-3. Apply appropriate codes and standards systematically
-4. Perform detailed calculations with safety factors
-5. Identify compliance issues with specific code citations
-6. Provide professional recommendations with implementation details
-7. Flag items requiring licensed professional review
-
-PROFESSIONAL STANDARDS:
-- Use engineering judgment and conservative assumptions
-- Provide detailed calculations with clear methodology
-- Reference specific code sections and standards
-- Identify limitations and recommend professional verification
-- Maintain professional liability awareness
-- Follow industry best practices and safety protocols
+1.  **Assess the Goal:** Understand the user's question and the available data (text and image).
+2.  **Visual First (If Necessary):** If the user's question requires visual information (like counting items, reading a specific callout, or understanding layout) and the provided text seems insufficient, **your first step must be to use the `analyze_blueprint_image_with_vision` tool.** This gives you the necessary visual context.
+3.  **Extract Data:** Use the text (either from the initial context or from the vision tool) to extract specific measurements and data using the `extract_measurements_enhanced` tool.
+4.  **Analyze & Calculate:** Apply appropriate codes and standards using the `comprehensive_..._analysis` tools.
+5.  **Synthesize:** Formulate a professional answer, citing code references, showing calculations, and providing actionable recommendations.
+6.  **Disclose:** Always flag items requiring licensed professional review.
 
 Always approach each analysis as a licensed professional engineer would, with attention to safety, code compliance, and professional responsibility."""
             }
@@ -1280,19 +1333,13 @@ Document ID: {document_id or 'Unknown'}
 Content Length: {len(document_text):,} characters
 Analysis Type: Professional Engineering Review
 
-DOCUMENT CONTENT:
+DOCUMENT CONTENT (Initial Text Extraction):
 {document_text}
 
 PROFESSIONAL ANALYSIS REQUEST:
 {prompt}
 
-Please provide a comprehensive professional analysis including:
-1. Document type and engineering scope identification
-2. Code compliance verification with specific references
-3. Detailed engineering calculations where applicable
-4. Safety and regulatory issue identification
-5. Professional recommendations with implementation guidance
-6. Items requiring licensed professional engineer review
+Please provide a comprehensive professional analysis. Remember to use the `analyze_blueprint_image_with_vision` tool if the initial text is insufficient to answer the user's question about the visual layout or details.
 """
                 user_message["content"].append({"type": "text", "text": context_summary})
             else:
@@ -1564,7 +1611,7 @@ Please provide a comprehensive professional analysis including:
             }
 
     async def generate_professional_report(self, document_id: str, storage_service: StorageService, 
-                                         report_type: str = "comprehensive") -> Dict[str, Any]:
+                                           report_type: str = "comprehensive") -> Dict[str, Any]:
         """Generate professional-grade compliance and analysis reports"""
         try:
             # Conduct full audit first
