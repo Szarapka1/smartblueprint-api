@@ -3,7 +3,6 @@ import logging
 import uvicorn
 import traceback
 from contextlib import asynccontextmanager
-from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -25,6 +24,7 @@ except ImportError as e:
     PDFService = None
 
 try:
+    # Use the ProfessionalAIService aliased as AIService
     from app.services.ai_service import AIService
 except ImportError as e:
     logging.warning(f"AI service import failed: {e}")
@@ -43,169 +43,89 @@ except ImportError as e:
     logging.warning(f"Blueprint routes import failed: {e}")
     blueprint_router = None
 
-try:
-    from app.api.routes.document_routes import document_router
-except ImportError as e:
-    logging.warning(f"Document routes import failed: {e}")
-    document_router = None
-
-try:
-    from app.api.routes.annotation_routes import annotation_router
-except ImportError as e:
-    logging.warning(f"Annotation routes import failed: {e}")
-    annotation_router = None
-
 # --- Init logging & settings ---
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SmartBlueprintAPI")
 
-# Safe settings initialization
 try:
     settings = get_settings()
     logger.info("✅ Settings loaded successfully")
 except Exception as e:
-    logger.error(f"❌ Settings failed to load: {e}")
-    # Create minimal fallback settings
-    class FallbackSettings:
-        PROJECT_NAME = "Smart Blueprint Chat API"
-        DEBUG = False
-        HOST = "0.0.0.0"
-        PORT = 8000
-        AZURE_STORAGE_CONNECTION_STRING = None
-        AZURE_CONTAINER_NAME = "blueprints"
-        AZURE_CACHE_CONTAINER_NAME = "blueprints-cache"
-        OPENAI_API_KEY = None
-    
-    settings = FallbackSettings()
-    logger.info("⚠️ Using fallback settings")
+    logger.error(f"❌ Settings failed to load: {e}. The application may not function correctly.")
+    settings = None
 
-# --- Service initialization helper ---
-async def init_service(service_class, service_name: str, required_config: list = None):
-    """Safely initialize a service with error handling"""
-    if service_class is None:
-        logger.warning(f"⚠️ {service_name} class not available")
-        return None
-    
-    # Check required configuration
-    if required_config:
-        missing_config = []
-        for config_key in required_config:
-            if not hasattr(settings, config_key) or getattr(settings, config_key) is None:
-                missing_config.append(config_key)
-        
-        if missing_config:
-            logger.warning(f"⚠️ {service_name} disabled - missing config: {missing_config}")
-            return None
-    
-    try:
-        service = service_class(settings)
-        logger.info(f"✅ {service_name} initialized")
-        return service
-    except Exception as e:
-        logger.error(f"❌ {service_name} initialization failed: {e}")
-        logger.debug(f"Traceback: {traceback.format_exc()}")
-        return None
-
-# --- Storage verification helper ---
-async def verify_storage_connection(storage_service):
-    """Safely verify storage connection"""
-    if not storage_service:
-        return False
-    
-    try:
-        await storage_service.verify_connection()
-        logger.info("✅ Storage connection verified")
-        return True
-    except Exception as e:
-        logger.warning(f"⚠️ Storage verification failed: {e}")
-        return False
-
-# --- Health check helper ---
-async def verify_system_health(app: FastAPI):
-    """Comprehensive system health check"""
-    health_status = {
-        "storage": False,
-        "ai": False,
-        "pdf": False,
-        "session": False
-    }
-    
-    # Check storage health
-    if app.state.storage_service:
-        try:
-            main_blobs = await app.state.storage_service.list_blobs(settings.AZURE_CONTAINER_NAME)
-            cache_blobs = await app.state.storage_service.list_blobs(settings.AZURE_CACHE_CONTAINER_NAME)
-            logger.info(f"✅ Blob containers: {len(main_blobs)} main / {len(cache_blobs)} cache")
-            health_status["storage"] = True
-        except Exception as e:
-            logger.warning(f"⚠️ Storage health check failed: {e}")
-    
-    # Check other services
-    health_status["ai"] = app.state.ai_service is not None
-    health_status["pdf"] = app.state.pdf_service is not None
-    health_status["session"] = app.state.session_service is not None
-    
-    logger.info(f"📊 System health: {health_status}")
-    return health_status
-
-# --- Lifecycle hooks ---
+# --- Application Lifecycle (Startup & Shutdown) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Handles application startup and shutdown events.
+    Initializes all services and attaches them to the app state.
+    """
     logger.info("🚀 Starting Smart Blueprint API...")
-    logger.info(f"🔧 Environment: {'Development' if settings.DEBUG else 'Production'}")
-    
-    # Initialize services with robust error handling
-    app.state.storage_service = await init_service(
-        StorageService, 
-        "Storage Service", 
-        ["AZURE_STORAGE_CONNECTION_STRING"]
-    )
-    
-    # Verify storage connection if available
-    if app.state.storage_service:
-        storage_ok = await verify_storage_connection(app.state.storage_service)
-        if not storage_ok:
-            logger.warning("⚠️ Storage service disabled due to connection issues")
-            app.state.storage_service = None
-    
-    app.state.pdf_service = await init_service(PDFService, "PDF Service")
-    
-    app.state.ai_service = await init_service(
-        AIService, 
-        "AI Service", 
-        ["OPENAI_API_KEY"]
-    )
-    
-    app.state.session_service = await init_service(SessionService, "Session Service")
-    
-    # Perform health check
-    try:
-        health_status = await verify_system_health(app)
-        active_services = sum(health_status.values())
-        logger.info(f"✅ Startup complete: {active_services}/4 services active")
-    except Exception as e:
-        logger.warning(f"⚠️ Health check failed: {e}")
-    
-    # Log startup summary
-    services_status = []
-    if app.state.storage_service:
-        services_status.append("📁 Storage")
-    if app.state.ai_service:
-        services_status.append("🤖 AI")
-    if app.state.pdf_service:
-        services_status.append("📄 PDF")
-    if app.state.session_service:
-        services_status.append("👥 Sessions")
-    
-    logger.info(f"🎯 Active services: {', '.join(services_status) if services_status else 'Basic API only'}")
+    logger.info(f"🔧 Environment: {'Development' if getattr(settings, 'DEBUG', False) else 'Production'}")
+
+    # --- Initialize services explicitly and safely ---
+    app.state.storage_service = None
+    if StorageService and settings and settings.AZURE_STORAGE_CONNECTION_STRING:
+        try:
+            storage_service = StorageService(settings)
+            await storage_service.verify_connection()
+            app.state.storage_service = storage_service
+            logger.info("✅ Storage Service initialized and connection verified")
+        except Exception as e:
+            logger.error(f"❌ Storage Service initialization failed: {e}")
+    else:
+        logger.warning("⚠️ Storage Service disabled: class not available or connection string missing.")
+
+    app.state.ai_service = None
+    if AIService and settings and settings.OPENAI_API_KEY:
+        try:
+            # FIX: Initialize the new AIService by passing the entire settings object
+            app.state.ai_service = AIService(settings=settings)
+            logger.info("✅ AI Service initialized")
+        except Exception as e:
+            logger.error(f"❌ AI Service initialization failed: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+    else:
+        logger.warning("⚠️ AI Service disabled: class not available or OPENAI_API_KEY missing.")
+
+    app.state.pdf_service = None
+    if PDFService:
+        try:
+            # Assuming PDFService has a simple constructor
+            app.state.pdf_service = PDFService()
+            logger.info("✅ PDF Service initialized")
+        except Exception as e:
+            logger.error(f"❌ PDF Service initialization failed: {e}")
+
+    app.state.session_service = None
+    if SessionService:
+        try:
+            # Assuming SessionService has a simple constructor
+            app.state.session_service = SessionService()
+            logger.info("✅ Session Service initialized")
+        except Exception as e:
+            logger.error(f"❌ Session Service initialization failed: {e}")
+
+    # --- Log final status ---
+    active_services = [
+        "📁 Storage" if app.state.storage_service else None,
+        "🤖 AI" if app.state.ai_service else None,
+        "📄 PDF" if app.state.pdf_service else None,
+        "👥 Sessions" if app.state.session_service else None
+    ]
+    active_services_str = ', '.join(filter(None, active_services))
+    logger.info(f"🎯 Startup complete. Active services: {active_services_str if active_services_str else 'Basic API only'}")
     logger.info("🌐 API is ready for requests")
-    
+
     yield
-    
+
     logger.info("🛑 Shutting down gracefully...")
+    if hasattr(app.state, 'ai_service') and app.state.ai_service:
+        # Gracefully shutdown the AI service's thread pool
+        await app.state.ai_service.__aexit__(None, None, None)
+        logger.info("🤖 AI Service shutdown complete.")
+
 
 # --- Create FastAPI app ---
 app = FastAPI(
@@ -217,35 +137,20 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# --- CORS Middleware (FIXED) ---
-# Explicitly allow localhost origins for development
+# --- CORS Middleware ---
 cors_origins = [
     "http://localhost:3000",
-    "http://127.0.0.1:3000", 
-    "https://localhost:3000",
-    "http://localhost:3001",  # In case you use a different port
-    "http://localhost:8080",  # Common alternative port
+    "http://127.0.0.1:3000",
 ]
-
-# Add any additional origins from settings
 if hasattr(settings, 'CORS_ORIGINS') and settings.CORS_ORIGINS:
-    if isinstance(settings.CORS_ORIGINS, str):
-        # Handle comma-separated string from environment variables
-        additional_origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(',')]
-        cors_origins.extend(additional_origins)
-    elif isinstance(settings.CORS_ORIGINS, list):
-        cors_origins.extend(settings.CORS_ORIGINS)
+    cors_origins.extend([origin.strip() for origin in settings.CORS_ORIGINS.split(',')])
 
-# Remove duplicates while preserving order
-cors_origins = list(dict.fromkeys(cors_origins))
-
-logger.info(f"🌐 CORS enabled for origins: {cors_origins}")
-
+logger.info(f"🌐 CORS enabled for origins: {list(set(cors_origins))}")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=list(set(cors_origins)),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -254,16 +159,12 @@ app.add_middleware(
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"🚨 Unhandled error: {exc}")
     logger.debug(f"Traceback: {traceback.format_exc()}")
-    
-    # Don't expose internal errors in production
-    error_detail = str(exc) if getattr(settings, 'DEBUG', False) else "Internal server error"
-    
+    error_detail = str(exc) if getattr(settings, 'DEBUG', False) else "An internal server error occurred."
     return JSONResponse(
         status_code=500,
         content={
-            "error": "Server Error",
+            "error": "Internal Server Error",
             "detail": error_detail,
-            "url": str(request.url),
             "timestamp": datetime.datetime.now().isoformat()
         }
     )
@@ -273,120 +174,36 @@ if blueprint_router:
     app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Chat"])
     logger.info("✅ Blueprint routes registered")
 
-if document_router:
-    app.include_router(document_router, prefix="/api/v1", tags=["Documents"])
-    logger.info("✅ Document routes registered")
-
-if annotation_router:
-    app.include_router(annotation_router, prefix="/api/v1", tags=["Annotations"])
-    logger.info("✅ Annotation routes registered")
+# Add other routers if they exist
+# if document_router: app.include_router(...)
+# if annotation_router: app.include_router(...)
 
 # --- Core API endpoints ---
 @app.get("/", tags=["General"])
 async def root():
-    """Welcome endpoint with API information"""
-    return {
-        "message": "Welcome to Smart Blueprint Chat API",
-        "version": "2.1.0",
-        "status": "operational",
-        "docs": "/docs",
-        "health": "/health"
-    }
+    return {"message": "Welcome to Smart Blueprint Chat API", "version": "2.1.0", "docs": "/docs"}
 
 @app.get("/health", tags=["General"])
-async def health_check():
-    """Comprehensive health check endpoint"""
-    storage_status = "connected" if hasattr(app.state, 'storage_service') and app.state.storage_service else "disabled"
-    ai_status = "connected" if hasattr(app.state, 'ai_service') and app.state.ai_service else "disabled"
-    pdf_status = "available" if hasattr(app.state, 'pdf_service') and app.state.pdf_service else "disabled"
-    session_status = "active" if hasattr(app.state, 'session_service') and app.state.session_service else "disabled"
-    
+async def health_check(request: Request):
+    """Provides a health check of the API and its connected services."""
+    app_state = request.app.state
     return {
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
         "services": {
-            "storage": storage_status,
-            "ai": ai_status,
-            "pdf": pdf_status,
-            "sessions": session_status
+            "storage": "connected" if hasattr(app_state, 'storage_service') and app_state.storage_service else "disabled",
+            "ai": "connected" if hasattr(app_state, 'ai_service') and app_state.ai_service else "disabled",
+            "pdf": "available" if hasattr(app_state, 'pdf_service') and app_state.pdf_service else "disabled",
+            "sessions": "active" if hasattr(app_state, 'session_service') and app_state.session_service else "disabled"
         },
         "version": "2.1.0"
     }
 
-@app.get("/api/v1/system/info", tags=["General"])
-async def system_info():
-    """System information and capabilities"""
-    features = ["Basic API", "Error Handling", "Health Monitoring", "CORS Support"]
-    
-    if hasattr(app.state, 'storage_service') and app.state.storage_service:
-        features.extend(["Blueprint Uploads", "File Storage", "Blob Integration"])
-    
-    if hasattr(app.state, 'ai_service') and app.state.ai_service:
-        features.extend(["AI Chat", "Blueprint Analysis", "Smart Annotations"])
-    
-    if hasattr(app.state, 'pdf_service') and app.state.pdf_service:
-        features.extend(["PDF Processing", "Document Parsing"])
-    
-    if hasattr(app.state, 'session_service') and app.state.session_service:
-        features.extend(["User Sessions", "Team Collaboration"])
-    
-    return {
-        "project": getattr(settings, 'PROJECT_NAME', 'Smart Blueprint Chat API'),
-        "version": "2.1.0",
-        "environment": "development" if getattr(settings, 'DEBUG', False) else "production",
-        "features": features,
-        "cors_origins": cors_origins,
-        "endpoints": {
-            "docs": "/docs",
-            "health": "/health",
-            "api": "/api/v1"
-        }
-    }
-
-@app.get("/api/v1/system/status", tags=["General"])
-async def detailed_status():
-    """Detailed system status for monitoring"""
-    try:
-        # Perform live health checks
-        health_status = await verify_system_health(app) if hasattr(app.state, 'storage_service') else {}
-        
-        return {
-            "overall_status": "operational",
-            "timestamp": datetime.datetime.now().isoformat(),
-            "version": "2.1.0",
-            "health_checks": health_status,
-            "configuration": {
-                "debug_mode": getattr(settings, 'DEBUG', False),
-                "cors_enabled": True,
-                "cors_origins_count": len(cors_origins),
-                "storage_configured": bool(getattr(settings, 'AZURE_STORAGE_CONNECTION_STRING', None)),
-                "ai_configured": bool(getattr(settings, 'OPENAI_API_KEY', None))
-            }
-        }
-    except Exception as e:
-        logger.error(f"Status check failed: {e}")
-        return {
-            "overall_status": "degraded",
-            "error": str(e),
-            "timestamp": datetime.datetime.now().isoformat()
-        }
-
-# --- CORS preflight handler ---
-@app.options("/{path:path}")
-async def handle_cors_preflight(path: str):
-    """Handle CORS preflight requests"""
-    return JSONResponse(
-        status_code=200,
-        content={"message": "CORS preflight successful"}
-    )
-
 # --- Local development server ---
 if __name__ == "__main__":
-    logger.info("🚀 Starting development server...")
-    uvicorn.run(
-        "main:app",
-        host=getattr(settings, 'HOST', '0.0.0.0'),
-        port=getattr(settings, 'PORT', 8000),
-        reload=getattr(settings, 'DEBUG', False),
-        log_level="info"
-    )
+    host = getattr(settings, 'HOST', '0.0.0.0')
+    port = getattr(settings, 'PORT', 8000)
+    reload = getattr(settings, 'DEBUG', False)
+    
+    logger.info(f"🚀 Starting development server at http://{host}:{port}")
+    uvicorn.run("main:app", host=host, port=port, reload=reload, log_level="info")
