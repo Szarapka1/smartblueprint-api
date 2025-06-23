@@ -5,7 +5,7 @@ import fitz  # PyMuPDF library
 import json 
 import os
 from typing import List, Dict, Optional
-from app.core.config import AppSettings
+from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
