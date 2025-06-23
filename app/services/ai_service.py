@@ -1,4 +1,4 @@
-# app/services/ai_service.py - ULTIMATE PROFESSIONAL VERSION (with DEBUG logging)
+# app/services/ai_service.py - COMPREHENSIVE MULTI-TRADE AI WITH DEEP UNDERSTANDING
 
 import asyncio
 import base64
@@ -7,16 +7,16 @@ import logging
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Set
 
 # Set up logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Safety check for OpenAI import
+# OpenAI imports with safety check
 try:
     from openai import OpenAI, APIError
     from openai.types.chat import ChatCompletionToolParam
@@ -25,11 +25,11 @@ except ImportError as e:
     logger.error(f"❌ Failed to import OpenAI SDK: {e}")
     raise
 
-# Internal config and services
+# Internal imports
 from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
 
-# Initialize OpenAI client
+# Initialize settings and client
 try:
     settings: AppSettings = get_settings()
     openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -38,907 +38,758 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize OpenAI client: {e}")
     raise
 
-# Professional data structures for enhanced type safety and validation
-class OccupancyType(Enum):
-    ASSEMBLY_CONCENTRATED = "assembly_concentrated"
-    ASSEMBLY_UNCONCENTRATED = "assembly_unconcentrated" 
-    BUSINESS = "business"
-    EDUCATIONAL = "educational"
-    FACTORY_INDUSTRIAL = "factory_industrial"
-    INSTITUTIONAL = "institutional"
-    MERCANTILE = "mercantile"
-    RESIDENTIAL = "residential"
-    STORAGE = "storage"
-    UTILITY_MISCELLANEOUS = "utility_miscellaneous"
 
-class ConstructionType(Enum):
-    TYPE_I_A = "type_i_a"  # Fire resistive
-    TYPE_I_B = "type_i_b"  # Fire resistive
-    TYPE_II_A = "type_ii_a"  # Non-combustible
-    TYPE_II_B = "type_ii_b"  # Non-combustible
-    TYPE_III_A = "type_iii_a"  # Ordinary
-    TYPE_III_B = "type_iii_b"  # Ordinary
-    TYPE_IV = "type_iv"  # Heavy timber
-    TYPE_V_A = "type_v_a"  # Wood frame
-    TYPE_V_B = "type_v_b"  # Wood frame
-
-@dataclass
-class ComplianceResult:
-    """Structured compliance analysis result"""
-    compliant: bool
-    issues: List[str]
-    recommendations: List[str]
-    code_references: List[str]
-    severity: str  # "critical", "major", "minor", "warning"
-    calculations: Dict[str, Any]
-    confidence: float  # 0-1 confidence in analysis
-
-@dataclass
-class BuildingParameters:
-    """Comprehensive building parameters for analysis"""
-    area: float
-    height: float
-    occupancy_type: OccupancyType
-    construction_type: ConstructionType
-    sprinklered: bool = False
-    stories: int = 1
-    basement: bool = False
-    allowable_area_increases: List[str] = None
-    special_conditions: List[str] = None
-
-class EnhancedBuildingCodeAnalyzer:
-    """Professional-grade building code analyzer with comprehensive IBC/NFPA knowledge"""
+class UniversalBuildingKnowledge:
+    """Comprehensive knowledge base for ALL building trades and codes"""
     
-    # Comprehensive occupancy load factors per IBC Table 1004.5
-    OCCUPANCY_LOAD_FACTORS = {
-        OccupancyType.ASSEMBLY_CONCENTRATED: {
-            "gross": 7,  # sq ft per person
-            "net": 7,
-            "description": "Assembly with fixed seating, concentrated use"
+    # ARCHITECTURAL KNOWLEDGE
+    SPACE_TYPES = {
+        "office": {"load_factor": 150, "min_ceiling": 9, "lighting_fc": 50},
+        "conference": {"load_factor": 15, "min_ceiling": 9, "lighting_fc": 30},
+        "restroom": {"load_factor": 50, "min_ceiling": 8, "lighting_fc": 20},
+        "corridor": {"load_factor": 100, "min_ceiling": 8, "lighting_fc": 10},
+        "storage": {"load_factor": 300, "min_ceiling": 8, "lighting_fc": 10},
+        "mechanical": {"load_factor": 300, "min_ceiling": 8, "lighting_fc": 30},
+        "retail": {"load_factor": 30, "min_ceiling": 10, "lighting_fc": 50},
+        "restaurant": {"load_factor": 15, "min_ceiling": 10, "lighting_fc": 50},
+        "kitchen": {"load_factor": 100, "min_ceiling": 10, "lighting_fc": 70},
+        "lobby": {"load_factor": 40, "min_ceiling": 12, "lighting_fc": 20}
+    }
+    
+    # STRUCTURAL KNOWLEDGE
+    STRUCTURAL_SYSTEMS = {
+        "steel_frame": {
+            "typical_bay": "25-30 ft",
+            "max_bay": "45 ft",
+            "floor_depth": "24-36 in",
+            "fireproofing": "1-3 hour rating"
         },
-        OccupancyType.ASSEMBLY_UNCONCENTRATED: {
-            "gross": 15,
-            "net": 15, 
-            "description": "Assembly without fixed seating"
+        "concrete_frame": {
+            "typical_bay": "20-25 ft",
+            "max_bay": "35 ft",
+            "slab_thickness": "8-12 in",
+            "column_size": "18-36 in"
         },
-        OccupancyType.BUSINESS: {
-            "gross": 150,
-            "net": 100,
-            "description": "Business occupancies"
+        "wood_frame": {
+            "typical_span": "12-16 ft",
+            "max_span": "24 ft",
+            "joist_spacing": "16-24 in oc",
+            "load_capacity": "40-50 psf"
         },
-        OccupancyType.EDUCATIONAL: {
-            "gross": 50,
-            "net": 20,
-            "description": "Educational occupancies"
-        },
-        OccupancyType.FACTORY_INDUSTRIAL: {
-            "gross": 200,
-            "net": 100,
-            "description": "Factory and industrial"
-        },
-        OccupancyType.INSTITUTIONAL: {
-            "gross": 240,
-            "net": 120,
-            "description": "Institutional occupancies"
-        },
-        OccupancyType.MERCANTILE: {
-            "gross": 60,
-            "net": 30,
-            "description": "Mercantile occupancies"
-        },
-        OccupancyType.RESIDENTIAL: {
-            "gross": 300,
-            "net": 200,
-            "description": "Residential occupancies"
-        },
-        OccupancyType.STORAGE: {
-            "gross": 500,
-            "net": 500,
-            "description": "Storage occupancies"
-        },
-        OccupancyType.UTILITY_MISCELLANEOUS: {
-            "gross": 300,
-            "net": 300,
-            "description": "Utility and miscellaneous"
+        "masonry": {
+            "wall_thickness": "8-16 in",
+            "max_height": "35 ft",
+            "reinforcement": "#5 @ 32 in oc",
+            "grouting": "partial or full"
         }
     }
     
-    # Enhanced travel distance matrix per IBC Table 1017.1
-    MAX_TRAVEL_DISTANCES = {
-        # (occupancy, sprinklered): max_distance_feet
-        (OccupancyType.ASSEMBLY_CONCENTRATED, True): 300,
-        (OccupancyType.ASSEMBLY_CONCENTRATED, False): 250,
-        (OccupancyType.ASSEMBLY_UNCONCENTRATED, True): 300,
-        (OccupancyType.ASSEMBLY_UNCONCENTRATED, False): 250,
-        (OccupancyType.BUSINESS, True): 300,
-        (OccupancyType.BUSINESS, False): 200,
-        (OccupancyType.EDUCATIONAL, True): 300,
-        (OccupancyType.EDUCATIONAL, False): 250,
-        (OccupancyType.FACTORY_INDUSTRIAL, True): 400,
-        (OccupancyType.FACTORY_INDUSTRIAL, False): 200,
-        (OccupancyType.INSTITUTIONAL, True): 300,
-        (OccupancyType.INSTITUTIONAL, False): 200,
-        (OccupancyType.MERCANTILE, True): 300,
-        (OccupancyType.MERCANTILE, False): 200,
-        (OccupancyType.RESIDENTIAL, True): 300,
-        (OccupancyType.RESIDENTIAL, False): 250,
-        (OccupancyType.STORAGE, True): 400,
-        (OccupancyType.STORAGE, False): 300,
-        (OccupancyType.UTILITY_MISCELLANEOUS, True): 300,
-        (OccupancyType.UTILITY_MISCELLANEOUS, False): 250
+    # MECHANICAL (HVAC) KNOWLEDGE
+    HVAC_REQUIREMENTS = {
+        "office": {
+            "cfm_per_person": 20,
+            "cfm_per_sqft": 0.06,
+            "tons_per_sqft": 350,  # 1 ton per 350 sqft
+            "duct_velocity": 1000,  # fpm
+            "vav_min": 0.3  # 30% minimum
+        },
+        "retail": {
+            "cfm_per_person": 15,
+            "cfm_per_sqft": 0.12,
+            "tons_per_sqft": 250,
+            "duct_velocity": 1200,
+            "exhaust_cfm": 0.5  # per sqft for general
+        },
+        "restaurant": {
+            "cfm_per_person": 20,
+            "cfm_per_sqft": 0.18,
+            "tons_per_sqft": 200,
+            "kitchen_exhaust": 100,  # cfm per linear ft of hood
+            "makeup_air": 0.8  # 80% of exhaust
+        },
+        "restroom": {
+            "exhaust_cfm": 75,  # per toilet/urinal
+            "ach": 10,  # air changes per hour
+            "negative_pressure": 0.05  # inches w.c.
+        }
     }
     
-    @staticmethod
-    def comprehensive_egress_analysis(building_params: BuildingParameters, 
-                                      travel_distances: List[float] = None,
-                                      exit_widths: List[float] = None,
-                                      exit_count: int = None) -> ComplianceResult:
-        """Comprehensive egress analysis with enhanced IBC compliance checking"""
-        try:
-            issues = []
-            recommendations = []
-            calculations = {}
-            
-            # 1. Occupant Load Calculation (IBC Section 1004)
-            load_factor_data = EnhancedBuildingCodeAnalyzer.OCCUPANCY_LOAD_FACTORS[building_params.occupancy_type]
-            gross_load_factor = load_factor_data["gross"]
-            net_load_factor = load_factor_data["net"]
-            
-            # Use net area factor for more conservative calculation
-            occupant_load = math.ceil(building_params.area / net_load_factor)
-            calculations["occupant_load"] = {
-                "area_sqft": building_params.area,
-                "load_factor_net": net_load_factor,
-                "load_factor_gross": gross_load_factor,
-                "calculated_occupant_load": occupant_load,
-                "occupancy_description": load_factor_data["description"]
+    # ELECTRICAL KNOWLEDGE
+    ELECTRICAL_LOADS = {
+        "lighting": {
+            "office": 1.3,  # watts/sqft
+            "retail": 1.5,
+            "warehouse": 0.6,
+            "parking": 0.2,
+            "emergency": 0.2  # additional
+        },
+        "receptacles": {
+            "office": 1.5,  # watts/sqft
+            "retail": 1.0,
+            "industrial": 2.0,
+            "spacing": 12,  # feet max
+            "kitchen": 3.0
+        },
+        "equipment": {
+            "elevator": "30-50 HP",
+            "escalator": "15-25 HP",
+            "hvac_rtu": "varies",
+            "fire_pump": "50-150 HP"
+        },
+        "panel_sizing": {
+            "standard": [100, 200, 400, 600, 800, 1200, 1600, 2000],
+            "voltage": [120, 208, 277, 480],
+            "phases": [1, 3]
+        }
+    }
+    
+    # PLUMBING KNOWLEDGE
+    PLUMBING_FIXTURES = {
+        "water_closets": {
+            "office": 1.25,  # per 1000 sqft
+            "retail": 0.5,
+            "restaurant": 2.0,
+            "assembly": 3.0,
+            "gpf": 1.6  # gallons per flush
+        },
+        "lavatories": {
+            "ratio_to_wc": 1.0,  # 1:1 with water closets
+            "gpm": 0.5,  # gallons per minute
+            "ada_height": 34  # inches
+        },
+        "drinking_fountains": {
+            "per_floor": 1,
+            "per_1000_sqft": 0.1,
+            "ada_dual": True  # high/low required
+        },
+        "hot_water": {
+            "office": 1.0,  # gallons per person per day
+            "restaurant": 2.5,
+            "recovery": 4.0,  # gallons per hour per fixture
+            "temp": 120  # degrees F
+        },
+        "drainage": {
+            "slope": 0.25,  # inches per foot min
+            "vent_distance": 6,  # feet max
+            "stack_size": "varies",
+            "roof_drain": 1.5  # per 1000 sqft roof
+        }
+    }
+    
+    # FIRE PROTECTION KNOWLEDGE
+    FIRE_PROTECTION = {
+        "sprinklers": {
+            "light_hazard": {"spacing": 225, "density": 0.1},
+            "ordinary_1": {"spacing": 130, "density": 0.15},
+            "ordinary_2": {"spacing": 130, "density": 0.2},
+            "extra_hazard": {"spacing": 100, "density": 0.3}
+        },
+        "fire_alarm": {
+            "smoke_detector": 30,  # feet spacing
+            "pull_station": 200,  # feet travel
+            "horn_strobe": 15,  # candela
+            "battery_backup": 24  # hours
+        },
+        "extinguishers": {
+            "class_a": 75,  # feet travel
+            "class_b": 50,
+            "class_c": 75,
+            "class_k": 30,  # kitchen
+            "size": "2A:10BC"  # typical
+        },
+        "fire_ratings": {
+            "corridors": 1,  # hour
+            "stairwells": 2,
+            "electrical_rooms": 2,
+            "mechanical_rooms": 1,
+            "exterior_walls": "varies"
+        }
+    }
+    
+    # SITE/CIVIL KNOWLEDGE
+    SITE_REQUIREMENTS = {
+        "parking": {
+            "standard": {"width": 9, "length": 18},
+            "compact": {"width": 8, "length": 16},
+            "ada": {"width": 8, "aisle": 5},
+            "ratio": {
+                "office": 4.0,  # per 1000 sqft
+                "retail": 5.0,
+                "restaurant": 10.0
+            },
+            "ada_count": {
+                1: 1, 25: 1, 50: 2, 75: 3, 100: 4,
+                150: 5, 200: 6, 300: 7, 400: 8, 500: 9
             }
-            
-            # 2. Required Number of Exits (IBC Section 1006)
-            if occupant_load <= 49:
-                required_exits = 1
-            elif occupant_load <= 500:
-                required_exits = 2
-            elif occupant_load <= 1000:
-                required_exits = 3
-            else:
-                required_exits = 4
-            
-            # High-hazard occupancies require 2 exits regardless of occupant load
-            if building_params.occupancy_type == OccupancyType.FACTORY_INDUSTRIAL and occupant_load > 10:
-                required_exits = max(required_exits, 2)
-            
-            calculations["required_exits"] = {
-                "occupant_load": occupant_load,
-                "required_exits": required_exits,
-                "provided_exits": exit_count or 0
-            }
-            
-            if exit_count and exit_count < required_exits:
-                issues.append(f"Building requires {required_exits} exits for {occupant_load} occupants, only {exit_count} provided")
-                recommendations.append(f"Add {required_exits - exit_count} additional exit(s) per IBC Section 1006")
-            
-            # 3. Travel Distance Analysis (IBC Section 1017)
-            max_allowed_distance = EnhancedBuildingCodeAnalyzer.MAX_TRAVEL_DISTANCES.get(
-                (building_params.occupancy_type, building_params.sprinklered), 250
-            )
-            
-            calculations["travel_distance"] = {
-                "max_allowed_feet": max_allowed_distance,
-                "sprinklered": building_params.sprinklered,
-                "occupancy_type": building_params.occupancy_type.value
-            }
-            
-            if travel_distances:
-                max_actual_distance = max(travel_distances)
-                calculations["travel_distance"]["max_actual_feet"] = max_actual_distance
-                calculations["travel_distance"]["all_distances"] = travel_distances
-                
-                if max_actual_distance > max_allowed_distance:
-                    issues.append(f"Maximum travel distance {max_actual_distance}' exceeds {max_allowed_distance}' limit")
-                    if not building_params.sprinklered:
-                        recommendations.append("Install automatic sprinkler system to increase allowable travel distance")
-                    recommendations.append("Relocate exits or add additional exits to reduce travel distances")
-            
-            # 4. Exit Width Requirements (IBC Section 1005)
-            # Stairs: 0.3" per occupant, Level exits: 0.2" per occupant
-            required_stair_width = occupant_load * 0.3  # inches
-            required_level_width = occupant_load * 0.2  # inches
-            
-            # Minimum widths per IBC
-            min_door_width = 32  # inches clear width
-            min_corridor_width = 44  # inches for occupant loads > 49
-            
-            calculations["exit_width"] = {
-                "occupant_load": occupant_load,
-                "required_stair_width_inches": required_stair_width,
-                "required_level_width_inches": required_level_width,
-                "minimum_door_width": min_door_width,
-                "minimum_corridor_width": min_corridor_width
-            }
-            
-            if exit_widths:
-                total_provided_width = sum(exit_widths)
-                calculations["exit_width"]["provided_widths"] = exit_widths
-                calculations["exit_width"]["total_provided"] = total_provided_width
-                
-                if total_provided_width < required_level_width:
-                    issues.append(f"Total exit width {total_provided_width:.1f}\" insufficient for {occupant_load} occupants")
-                    recommendations.append(f"Increase total exit width to minimum {required_level_width:.1f}\"")
-                
-                # Check individual door widths
-                narrow_doors = [w for w in exit_widths if w < min_door_width]
-                if narrow_doors:
-                    issues.append(f"Exit doors with width < {min_door_width}\" found: {narrow_doors}")
-                    recommendations.append(f"All exit doors must have minimum {min_door_width}\" clear width")
-            
-            # 5. Special Conditions Analysis
-            severity = "minor"
-            if any("travel distance" in issue.lower() for issue in issues):
-                severity = "major"
-            if any("exits" in issue.lower() for issue in issues):
-                severity = "critical"
-            
-            # 6. Code References
-            code_references = [
-                "IBC Section 1004 - Occupant Load",
-                "IBC Section 1005 - Egress Width",
-                "IBC Section 1006 - Number of Exits", 
-                "IBC Section 1017 - Travel Distance",
-                "IBC Table 1004.5 - Maximum Floor Area Allowances per Occupant",
-                "IBC Table 1017.1 - Exit Access Travel Distance"
-            ]
-            
-            return ComplianceResult(
-                compliant=len(issues) == 0,
-                issues=issues,
-                recommendations=recommendations,
-                code_references=code_references,
-                severity=severity,
-                calculations=calculations,
-                confidence=0.95 if travel_distances and exit_widths else 0.85
-            )
-            
-        except Exception as e:
-            return ComplianceResult(
-                compliant=False,
-                issues=[f"Egress analysis error: {str(e)}"],
-                recommendations=["Consult structural engineer for detailed egress analysis"],
-                code_references=["IBC Chapter 10"],
-                severity="critical",
-                calculations={"error": str(e)},
-                confidence=0.0
-            )
+        },
+        "stormwater": {
+            "retention": 1.0,  # inches typical
+            "bio_swale": 0.5,  # cfs per acre
+            "pervious": 0.3,  # ratio target
+            "pipe_slope": 0.5  # percent min
+        },
+        "utilities": {
+            "water": {"depth": 48, "pressure": "40-80 psi"},
+            "sewer": {"depth": 60, "slope": 1.0},
+            "gas": {"depth": 36, "pressure": "varies"},
+            "electric": {"depth": 36, "primary": 480},
+            "telecom": {"depth": 24, "conduits": 4}
+        }
+    }
+    
+    # ENERGY/SUSTAINABILITY
+    ENERGY_REQUIREMENTS = {
+        "envelope": {
+            "wall_r": {"climate_1": 13, "climate_4": 19, "climate_6": 25},
+            "roof_r": {"climate_1": 25, "climate_4": 30, "climate_6": 38},
+            "window_u": {"climate_1": 0.50, "climate_4": 0.40, "climate_6": 0.35},
+            "shgc": {"climate_1": 0.25, "climate_4": 0.40, "climate_6": 0.45}
+        },
+        "lighting_power": {
+            "lpd": {  # watts per sqft
+                "office": 0.82,
+                "retail": 1.26,
+                "warehouse": 0.66,
+                "parking": 0.15
+            },
+            "controls": ["occupancy", "daylight", "dimming", "scheduling"]
+        },
+        "renewable": {
+            "solar_pv": 5.0,  # watts per sqft roof
+            "solar_thermal": 0.75,  # efficiency
+            "geothermal": 4.0  # COP
+        }
+    }
+    
+    # ACCESSIBILITY (ADA)
+    ADA_REQUIREMENTS = {
+        "general": {
+            "clear_width": 36,  # inches
+            "door_width": 32,
+            "turning_radius": 60,
+            "reach_height": {"min": 15, "max": 48},
+            "counter_height": 36
+        },
+        "ramps": {
+            "slope": 8.33,  # percent (1:12)
+            "landing": 60,  # inches
+            "handrail": {"min": 34, "max": 38},
+            "width": 36
+        },
+        "parking": {
+            "width": 96,  # inches (8 feet)
+            "aisle": 60,  # access aisle
+            "van_aisle": 96,
+            "slope": 2.0  # percent max
+        },
+        "restroom": {
+            "stall": {"width": 60, "depth": 59},
+            "grab_bars": {"side": 42, "rear": 36},
+            "lavatory": {"height": 34, "knee": 27},
+            "accessories": {"height": 48, "reach": 40}
+        }
+    }
 
-    ### --- NEW CODE START --- ###
-    # This is the new function that directly uses the vision model for OCR.
-    @staticmethod
-    async def analyze_blueprint_image_with_vision(image_url: str) -> Dict[str, Any]:
-        """
-        Analyzes a blueprint image using GPT-4 Vision to extract ALL visible text,
-        dimensions, callouts, and symbols. This is a targeted OCR and data extraction tool.
-        This function should be called when the initial document text seems insufficient
-        or when visual context is critical for analysis.
-        """
-        logger.debug(f"🖼️ Calling Vision model for targeted data extraction from image.")
+
+class ComprehensiveDocumentAnalyzer:
+    """Analyzes any construction document with deep multi-trade understanding"""
+    
+    def __init__(self):
+        self.knowledge = UniversalBuildingKnowledge()
+        self.understanding = {
+            "document_type": None,
+            "identified_elements": {},
+            "measurements": {},
+            "systems": set(),
+            "spaces": [],
+            "trade_specific_items": {},
+            "code_items": []
+        }
+    
+    async def deep_visual_analysis(self, image_url: str) -> Dict[str, Any]:
+        """Comprehensive visual analysis for ANY trade or system"""
+        logger.debug("🔍 Performing deep multi-trade visual analysis")
+        
         try:
             response = await asyncio.get_event_loop().run_in_executor(
-                None,  # Use default executor
+                None,
                 lambda: openai_client.chat.completions.create(
-                    model="gpt-4o",  # Use gpt-4o instead of deprecated gpt-4-vision-preview
+                    model="gpt-4o",
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a specialized Optical Character Recognition (OCR) and data extraction engine for construction blueprints. Your task is to meticulously extract all text, dimensions, callouts, and symbols you see in the provided image. Present the extracted data as a comprehensive block of text. Be precise and capture everything, including text in schedules and notes."
+                            "content": """You are analyzing a construction document. Extract EVERYTHING you see, including:
+
+GENERAL:
+- Document type, title, project name, sheet number
+- Scale, north arrow, grid lines
+- Overall dimensions and areas
+- All rooms/spaces with names and dimensions
+
+ARCHITECTURAL:
+- Doors (count, sizes, types, swings)
+- Windows (count, sizes, types)
+- Walls (types, thickness)
+- Finishes (floor, ceiling, wall)
+- Furniture, fixtures, equipment
+- Stairs, elevators, ramps
+
+STRUCTURAL:
+- Columns (size, spacing, grid)
+- Beams (size, type)
+- Slabs (thickness, type)
+- Foundations (type, size)
+- Reinforcement callouts
+- Load information
+
+MECHANICAL (HVAC):
+- Ductwork (sizes, CFM)
+- Diffusers/grilles (count, sizes)
+- Equipment (RTUs, VAVs, fans)
+- Piping (if shown)
+- Thermostat locations
+
+ELECTRICAL:
+- Panels (location, size)
+- Circuits (home runs)
+- Receptacles (count, type)
+- Lighting (fixtures, switches)
+- Special systems (data, fire alarm)
+- Conduit runs
+
+PLUMBING:
+- Fixtures (count, type)
+- Piping (sizes, materials)
+- Drains (floor, roof)
+- Water heaters
+- Cleanouts, vents
+
+FIRE PROTECTION:
+- Sprinkler heads (count, type)
+- Fire alarm devices
+- Extinguisher locations
+- Exit signs
+- Fire ratings
+
+SITE/CIVIL:
+- Parking (spaces, dimensions)
+- Utilities (water, sewer, gas, electric)
+- Grading/drainage
+- Landscaping
+- Sidewalks/paving
+
+Count EVERYTHING. Note ALL text, dimensions, and callouts. Be extremely thorough."""
                         },
                         {
                             "role": "user",
                             "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url, "detail": "high"}
-                                },
-                                {
-                                    "type": "text",
-                                    "text": "Extract all textual and dimensional information from this blueprint image. Be as complete and accurate as possible."
-                                }
+                                {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
+                                {"type": "text", "text": "Extract all information from this construction document."}
                             ]
                         }
                     ],
-                    max_tokens=2500,
+                    max_tokens=4000,
                     temperature=0.0
                 )
             )
-            extracted_text = response.choices[0].message.content
-            logger.debug(f"✅ Vision model extracted text: {len(extracted_text)} chars")
+            
             return {
-                "extraction_successful": True,
-                "extracted_text": extracted_text,
-                "source": "gpt-4o"
+                "success": True,
+                "extracted_data": response.choices[0].message.content,
+                "timestamp": datetime.now().isoformat()
             }
+            
         except Exception as e:
-            logger.error(f"❌ Vision-based text extraction failed: {e}")
-            return {"extraction_successful": False, "error": str(e)}
-    ### --- NEW CODE END --- ###
-
-    @staticmethod
-    def _analyze_ramp_accessibility(**kwargs) -> ComplianceResult:
-        """Placeholder for ramp accessibility analysis"""
-        return ComplianceResult(
-            compliant=False,
-            issues=["Ramp analysis not yet implemented"],
-            recommendations=["Consult ADA guidelines for ramp requirements"],
-            code_references=["ADA Standards Section 405"],
-            severity="warning",
-            calculations={},
-            confidence=0.0
-        )
+            logger.error(f"Visual analysis error: {e}")
+            return {"success": False, "error": str(e)}
     
-    @staticmethod
-    def _analyze_parking_accessibility(**kwargs) -> ComplianceResult:
-        """Placeholder for parking accessibility analysis"""
-        return ComplianceResult(
-            compliant=False,
-            issues=["Parking analysis not yet implemented"],
-            recommendations=["Consult ADA guidelines for parking requirements"],
-            code_references=["ADA Standards Section 502"],
-            severity="warning",
-            calculations={},
-            confidence=0.0
-        )
+    def extract_all_measurements(self, text: str) -> Dict[str, Any]:
+        """Extract measurements for ALL trades"""
+        patterns = {
+            # Dimensions
+            'room_dims': r'(\d+)[\'\-\s]*(\d+)?"?\s*[xX×]\s*(\d+)[\'\-\s]*(\d+)?"?',
+            'linear_dims': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:LF|lf|linear)',
+            'area_sqft': r'(\d+[\d,]*\.?\d*)\s*(?:SF|sq\.?\s*ft\.?|square feet)',
+            'height': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:AFF|aff|high|height|clg)',
+            
+            # Structural
+            'beam_size': r'([WwSsCc]\d+[xX×]\d+(?:\.\d+)?)',
+            'column_size': r'(\d+)"\s*[xX×]\s*(\d+)"\s*(?:COL|col|column)',
+            'slab_thick': r'(\d+)"\s*(?:SLAB|slab|thick)',
+            'rebar': r'#(\d+)\s*@\s*(\d+)"\s*(?:OC|oc|o\.c\.)',
+            
+            # Mechanical
+            'cfm': r'(\d+)\s*(?:CFM|cfm)',
+            'duct_size': r'(\d+)"\s*[xX×]\s*(\d+)"\s*(?:DUCT|duct|supply|return)',
+            'tons': r'(\d+\.?\d*)\s*(?:TON|ton|tons)',
+            'pipe_size': r'(\d+\.?\d*)"\s*(?:PIPE|pipe|dia\.?)',
+            
+            # Electrical
+            'voltage': r'(\d+)\s*(?:V|volt|volts)',
+            'amperage': r'(\d+)\s*(?:A|amp|amps|ampere)',
+            'kw': r'(\d+\.?\d*)\s*(?:KW|kw|kilowatt)',
+            'circuit': r'(\d+)\s*(?:CKT|ckt|circuit)',
+            'conduit': r'(\d+\.?\d*)"\s*(?:C|EMT|RGS|conduit)',
+            
+            # Plumbing
+            'gpm': r'(\d+\.?\d*)\s*(?:GPM|gpm)',
+            'fixture_units': r'(\d+\.?\d*)\s*(?:FU|fu|fixture units)',
+            'drain_size': r'(\d+)"\s*(?:DRAIN|drain|waste)',
+            
+            # Fire Protection
+            'sprinkler_spacing': r'(\d+)[\'\-\s]*(\d+)?"?\s*(?:OC|oc|o\.c\.)\s*(?:SPKLR|sprinkler)',
+            'fire_rating': r'(\d+\.?\d*)\s*(?:HR|hr|hour)\s*(?:RATED|rated|rating)',
+            
+            # Counts
+            'door_count': r'(?:DOOR|door|DR|dr)[\s\-]*(\d+)',
+            'fixture_count': r'(\d+)\s*(?:WC|LAV|UR|DF|wc|lav)',
+            'device_count': r'(\d+)\s*(?:devices?|heads?|units?)'
+        }
+        
+        results = {}
+        for pattern_name, pattern in patterns.items():
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if matches:
+                results[pattern_name] = matches
+        
+        return results
     
-    @staticmethod
-    def _analyze_restroom_accessibility(**kwargs) -> ComplianceResult:
-        """Placeholder for restroom accessibility analysis"""
-        return ComplianceResult(
-            compliant=False,
-            issues=["Restroom analysis not yet implemented"],
-            recommendations=["Consult ADA guidelines for restroom requirements"],
-            code_references=["ADA Standards Section 604"],
-            severity="warning",
-            calculations={},
-            confidence=0.0
-        )
+    def analyze_any_system(self, system_type: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze ANY building system with appropriate calculations"""
+        
+        if system_type == "hvac_sizing":
+            return self._calculate_hvac_requirements(parameters)
+        elif system_type == "electrical_load":
+            return self._calculate_electrical_loads(parameters)
+        elif system_type == "plumbing_fixtures":
+            return self._calculate_plumbing_requirements(parameters)
+        elif system_type == "structural_loads":
+            return self._calculate_structural_requirements(parameters)
+        elif system_type == "parking":
+            return self._calculate_parking_requirements(parameters)
+        elif system_type == "egress":
+            return self._calculate_egress_requirements(parameters)
+        elif system_type == "fire_protection":
+            return self._calculate_fire_protection(parameters)
+        elif system_type == "accessibility":
+            return self._check_ada_compliance(parameters)
+        elif system_type == "energy":
+            return self._calculate_energy_requirements(parameters)
+        else:
+            return self._general_code_check(system_type, parameters)
     
-    @staticmethod
-    def _get_comprehensive_fire_ratings(building_params: BuildingParameters) -> Dict[str, Any]:
-        """Placeholder for fire rating analysis"""
+    def _calculate_hvac_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate HVAC requirements for any space"""
+        space_type = params.get("space_type", "office")
+        area = params.get("area", 0)
+        occupants = params.get("occupants", 0)
+        
+        reqs = self.knowledge.HVAC_REQUIREMENTS.get(space_type, self.knowledge.HVAC_REQUIREMENTS["office"])
+        
+        # Ventilation calculations
+        cfm_people = occupants * reqs["cfm_per_person"]
+        cfm_area = area * reqs["cfm_per_sqft"]
+        total_cfm = cfm_people + cfm_area
+        
+        # Cooling calculations
+        tons_required = area / reqs["tons_per_sqft"]
+        
+        # Duct sizing (simplified)
+        main_duct_area = total_cfm / reqs["duct_velocity"]
+        
         return {
-            "fire_separation": "Analysis pending",
-            "structural_ratings": "Analysis pending",
-            "wall_ratings": "Analysis pending"
+            "space_type": space_type,
+            "area": area,
+            "ventilation": {
+                "cfm_per_person": reqs["cfm_per_person"],
+                "cfm_per_area": reqs["cfm_per_sqft"],
+                "people_cfm": cfm_people,
+                "area_cfm": cfm_area,
+                "total_cfm": total_cfm,
+                "code_ref": "ASHRAE 62.1"
+            },
+            "cooling": {
+                "tons_required": round(tons_required, 1),
+                "btuh": tons_required * 12000,
+                "rule_of_thumb": f"{reqs['tons_per_sqft']} sqft/ton"
+            },
+            "duct_sizing": {
+                "velocity_fpm": reqs["duct_velocity"],
+                "main_duct_area_sqin": round(main_duct_area * 144),
+                "typical_size": self._suggest_duct_size(main_duct_area)
+            },
+            "notes": [
+                "Final design requires heat load calculations",
+                "Consider diversity factors for VAV systems",
+                "Account for building envelope and orientation"
+            ]
+        }
+    
+    def _calculate_electrical_loads(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate electrical loads for any space"""
+        space_type = params.get("space_type", "office")
+        area = params.get("area", 0)
+        
+        lighting = self.knowledge.ELECTRICAL_LOADS["lighting"].get(space_type, 1.3)
+        receptacle = self.knowledge.ELECTRICAL_LOADS["receptacles"].get(space_type, 1.5)
+        
+        lighting_load = area * lighting
+        receptacle_load = area * receptacle
+        total_load = lighting_load + receptacle_load
+        
+        # Add demand factors per NEC
+        lighting_demand = lighting_load * 1.0  # 100% for first 3000W
+        receptacle_demand = receptacle_load * 0.5  # 50% for receptacles
+        
+        total_demand = lighting_demand + receptacle_demand
+        
+        # Size panel
+        voltage = 208  # typical commercial
+        phases = 3
+        amps = total_demand / (voltage * 1.732)  # 1.732 for 3-phase
+        
+        panel_size = next((size for size in self.knowledge.ELECTRICAL_LOADS["panel_sizing"]["standard"] 
+                          if size >= amps * 1.25), 400)
+        
+        return {
+            "space_type": space_type,
+            "area": area,
+            "lighting": {
+                "watts_per_sqft": lighting,
+                "total_watts": lighting_load,
+                "demand_watts": lighting_demand
+            },
+            "receptacles": {
+                "watts_per_sqft": receptacle,
+                "total_watts": receptacle_load,
+                "demand_watts": receptacle_demand
+            },
+            "total": {
+                "connected_load": total_load,
+                "demand_load": total_demand,
+                "amps": round(amps, 1),
+                "panel_size": panel_size
+            },
+            "code_references": [
+                "NEC Article 220 - Load Calculations",
+                "NEC Table 220.12 - Lighting Load Demand",
+                "NEC Section 220.44 - Receptacle Loads"
+            ]
+        }
+    
+    def _calculate_plumbing_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate plumbing fixture requirements"""
+        space_type = params.get("space_type", "office")
+        area = params.get("area", 0)
+        occupants = params.get("occupants", 0)
+        
+        fixtures = self.knowledge.PLUMBING_FIXTURES
+        
+        # Calculate required fixtures
+        wc_per_1000 = fixtures["water_closets"].get(space_type, 1.25)
+        required_wc = max(2, math.ceil(area * wc_per_1000 / 1000))
+        required_lav = required_wc  # 1:1 ratio typical
+        
+        # Drinking fountains
+        df_required = max(1, math.ceil(area * fixtures["drinking_fountains"]["per_1000_sqft"] / 1000))
+        
+        # Hot water
+        hot_water_gpd = occupants * fixtures["hot_water"].get(space_type, 1.0)
+        
+        return {
+            "fixtures_required": {
+                "water_closets": required_wc,
+                "lavatories": required_lav,
+                "drinking_fountains": df_required,
+                "calculation": f"Based on {area} sqft and {space_type} use"
+            },
+            "hot_water": {
+                "gallons_per_day": hot_water_gpd,
+                "recovery_gph": required_wc * fixtures["hot_water"]["recovery"],
+                "temperature": fixtures["hot_water"]["temp"]
+            },
+            "drainage": {
+                "min_slope": f"{fixtures['drainage']['slope']} in/ft",
+                "roof_drains": math.ceil(area * fixtures["drainage"]["roof_drain"] / 1000)
+            },
+            "code_references": [
+                "IPC Table 403.1 - Minimum Fixtures",
+                "IPC Section 604 - Water Distribution",
+                "IPC Section 704 - Drainage Piping"
+            ]
+        }
+    
+    def _suggest_duct_size(self, area_sqft: float) -> str:
+        """Suggest rectangular duct size based on area"""
+        area_sqin = area_sqft * 144
+        
+        # Common aspect ratios
+        if area_sqin < 144:
+            return "12x12"
+        elif area_sqin < 288:
+            return "24x12"
+        elif area_sqin < 432:
+            return "24x18"
+        elif area_sqin < 576:
+            return "24x24"
+        else:
+            return "30x24 or larger"
+    
+    def _calculate_structural_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Basic structural calculations"""
+        return {
+            "loads": {
+                "dead_load": "15-25 psf typical",
+                "live_load": "50-100 psf (office/retail)",
+                "total": "65-125 psf"
+            },
+            "note": "Requires structural engineer for final design"
+        }
+    
+    def _calculate_parking_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate parking requirements"""
+        space_type = params.get("space_type", "office")
+        area = params.get("area", 0)
+        
+        parking = self.knowledge.SITE_REQUIREMENTS["parking"]
+        ratio = parking["ratio"].get(space_type, 4.0)
+        required_spaces = math.ceil(area * ratio / 1000)
+        
+        # ADA spaces
+        ada_required = 0
+        for threshold, count in parking["ada_count"].items():
+            if required_spaces >= threshold:
+                ada_required = count
+        
+        return {
+            "required_spaces": required_spaces,
+            "ada_spaces": ada_required,
+            "van_accessible": max(1, ada_required // 8),
+            "calculation": f"{ratio} spaces per 1000 sqft",
+            "dimensions": parking["standard"]
+        }
+    
+    def _calculate_egress_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate egress requirements - already comprehensive"""
+        space_type = params.get("space_type", "office")
+        area = params.get("area", 0)
+        
+        # Get occupant load factor
+        load_factor = self.knowledge.SPACE_TYPES.get(space_type, {"load_factor": 150})["load_factor"]
+        occupant_load = math.ceil(area / load_factor)
+        
+        # Required exits
+        if occupant_load <= 49:
+            required_exits = 1
+        elif occupant_load <= 500:
+            required_exits = 2
+        else:
+            required_exits = 3
+        
+        return {
+            "occupant_load": occupant_load,
+            "load_factor": load_factor,
+            "required_exits": required_exits,
+            "exit_width": occupant_load * 0.2,  # inches
+            "travel_distance": "See IBC Table 1017.2"
+        }
+    
+    def _calculate_fire_protection(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate fire protection requirements"""
+        space_type = params.get("space_type", "office")
+        area = params.get("area", 0)
+        
+        # Determine hazard
+        if space_type in ["office", "residential"]:
+            hazard = "light_hazard"
+        else:
+            hazard = "ordinary_1"
+        
+        sprinkler = self.knowledge.FIRE_PROTECTION["sprinklers"][hazard]
+        heads_required = math.ceil(area / sprinkler["spacing"])
+        
+        # Fire alarm
+        smoke_detectors = math.ceil(area / (30 * 30))  # 30ft spacing
+        pull_stations = math.ceil(math.sqrt(area) * 4 / 200)  # perimeter / 200
+        
+        return {
+            "sprinklers": {
+                "hazard": hazard,
+                "heads_required": heads_required,
+                "spacing": sprinkler["spacing"],
+                "density": sprinkler["density"]
+            },
+            "fire_alarm": {
+                "smoke_detectors": smoke_detectors,
+                "pull_stations": max(2, pull_stations),
+                "notification": "horn/strobes per NFPA 72"
+            },
+            "extinguishers": math.ceil(area / (75 * 75))  # 75ft travel
+        }
+    
+    def _check_ada_compliance(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Check ADA compliance for various elements"""
+        element = params.get("element", "general")
+        
+        ada = self.knowledge.ADA_REQUIREMENTS
+        
+        if element == "door":
+            return {
+                "min_clear_width": ada["general"]["clear_width"],
+                "threshold": "1/2 inch max",
+                "maneuvering_clearance": "18 inches pull side",
+                "hardware_height": "34-48 inches AFF"
+            }
+        elif element == "ramp":
+            return ada["ramps"]
+        elif element == "parking":
+            return ada["parking"]
+        elif element == "restroom":
+            return ada["restroom"]
+        else:
+            return ada["general"]
+    
+    def _calculate_energy_requirements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate energy code requirements"""
+        climate_zone = params.get("climate_zone", 4)
+        area = params.get("area", 0)
+        space_type = params.get("space_type", "office")
+        
+        energy = self.knowledge.ENERGY_REQUIREMENTS
+        
+        return {
+            "envelope": {
+                "wall_r_value": energy["envelope"]["wall_r"][f"climate_{climate_zone}"],
+                "roof_r_value": energy["envelope"]["roof_r"][f"climate_{climate_zone}"],
+                "window_u_factor": energy["envelope"]["window_u"][f"climate_{climate_zone}"]
+            },
+            "lighting": {
+                "max_lpd": energy["lighting_power"]["lpd"].get(space_type, 1.0),
+                "total_watts": area * energy["lighting_power"]["lpd"].get(space_type, 1.0),
+                "controls_required": energy["lighting_power"]["controls"]
+            },
+            "code": "IECC/ASHRAE 90.1"
+        }
+    
+    def _general_code_check(self, system: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """General code compliance check for any system"""
+        return {
+            "system": system,
+            "parameters": params,
+            "note": "Consult applicable codes for specific requirements",
+            "common_codes": [
+                "IBC - International Building Code",
+                "NEC - National Electrical Code", 
+                "IPC - International Plumbing Code",
+                "IMC - International Mechanical Code",
+                "NFPA - Fire Protection Standards",
+                "ADA - Accessibility Guidelines"
+            ]
         }
 
-    
-    @staticmethod
-    def comprehensive_accessibility_analysis(element_type: str, **kwargs) -> ComplianceResult:
-        """Enhanced ADA compliance analysis with detailed requirements"""
-        try:
-            if element_type.lower() == "door":
-                return EnhancedBuildingCodeAnalyzer._analyze_door_accessibility(**kwargs)
-            elif element_type.lower() == "ramp":
-                return EnhancedBuildingCodeAnalyzer._analyze_ramp_accessibility(**kwargs)
-            elif element_type.lower() == "parking":
-                return EnhancedBuildingCodeAnalyzer._analyze_parking_accessibility(**kwargs)
-            elif element_type.lower() == "restroom":
-                return EnhancedBuildingCodeAnalyzer._analyze_restroom_accessibility(**kwargs)
-            else:
-                return ComplianceResult(
-                    compliant=False,
-                    issues=[f"Accessibility analysis not implemented for: {element_type}"],
-                    recommendations=["Consult ADA guidelines for specific requirements"],
-                    code_references=["ADA Standards"],
-                    severity="warning",
-                    calculations={},
-                    confidence=0.0
-                )
-                
-        except Exception as e:
-            return ComplianceResult(
-                compliant=False,
-                issues=[f"Accessibility analysis error: {str(e)}"],
-                recommendations=["Consult accessibility specialist"],
-                code_references=["ADA Standards"],
-                severity="major",
-                calculations={"error": str(e)},
-                confidence=0.0
-            )
-    
-    @staticmethod
-    def _analyze_door_accessibility(width: float = 32, threshold_height: float = 0.5,
-                                    opening_force: float = 5, maneuvering_clearance: float = 18,
-                                    closing_speed: float = 5, **kwargs) -> ComplianceResult:
-        """Comprehensive door accessibility analysis"""
-        issues = []
-        recommendations = []
-        calculations = {}
-        
-        # ADA Standards for door accessibility
-        min_clear_width = 32  # inches
-        max_threshold = 0.75  # inches
-        max_opening_force = 5  # pounds
-        min_maneuvering_clearance = 18  # inches pull side
-        min_closing_time = 5  # seconds
-        
-        calculations.update({
-            "provided_width": width,
-            "provided_threshold": threshold_height,
-            "provided_opening_force": opening_force,
-            "provided_clearance": maneuvering_clearance,
-            "provided_closing_speed": closing_speed,
-            "requirements": {
-                "min_width": min_clear_width,
-                "max_threshold": max_threshold,
-                "max_opening_force": max_opening_force,
-                "min_clearance": min_maneuvering_clearance,
-                "min_closing_time": min_closing_time
-            }
-        })
-        
-        # Check compliance
-        if width < min_clear_width:
-            issues.append(f"Door clear width {width}\" < {min_clear_width}\" minimum")
-            recommendations.append(f"Increase door clear opening to minimum {min_clear_width}\"")
-        
-        if threshold_height > max_threshold:
-            issues.append(f"Threshold height {threshold_height}\" > {max_threshold}\" maximum")
-            recommendations.append(f"Reduce threshold to maximum {max_threshold}\" or provide beveled edge")
-        
-        if opening_force > max_opening_force:
-            issues.append(f"Opening force {opening_force} lbf > {max_opening_force} lbf maximum")
-            recommendations.append("Adjust door closer or install power-assist operator")
-        
-        if maneuvering_clearance < min_maneuvering_clearance:
-            issues.append(f"Maneuvering clearance {maneuvering_clearance}\" < {min_maneuvering_clearance}\" minimum")
-            recommendations.append(f"Provide minimum {min_maneuvering_clearance}\" clearance on pull side")
-        
-        severity = "critical" if any("width" in issue for issue in issues) else "minor"
-        
-        return ComplianceResult(
-            compliant=len(issues) == 0,
-            issues=issues,
-            recommendations=recommendations,
-            code_references=["ADA Standards Section 404", "IBC Section 1010"],
-            severity=severity,
-            calculations=calculations,
-            confidence=0.98
-        )
-    
-    @staticmethod
-    def comprehensive_fire_safety_analysis(building_params: BuildingParameters) -> ComplianceResult:
-        """Professional fire safety analysis per NFPA and IBC"""
-        try:
-            issues = []
-            recommendations = []
-            calculations = {}
-            
-            # 1. Sprinkler System Requirements (IBC Section 903)
-            sprinkler_required = EnhancedBuildingCodeAnalyzer._check_sprinkler_requirements(building_params)
-            
-            calculations["sprinkler_analysis"] = {
-                "required": sprinkler_required["required"],
-                "reasons": sprinkler_required["reasons"],
-                "provided": building_params.sprinklered,
-                "area_sqft": building_params.area,
-                "height_feet": building_params.height,
-                "stories": building_params.stories
-            }
-            
-            if sprinkler_required["required"] and not building_params.sprinklered:
-                issues.append("Automatic sprinkler system required")
-                for reason in sprinkler_required["reasons"]:
-                    issues.append(f"  - {reason}")
-                recommendations.append("Install NFPA 13 compliant automatic sprinkler system")
-            
-            # 2. Fire Alarm System Requirements (IBC Section 907)
-            alarm_required = EnhancedBuildingCodeAnalyzer._check_alarm_requirements(building_params)
-            
-            calculations["alarm_analysis"] = {
-                "required": alarm_required["required"],
-                "reasons": alarm_required["reasons"],
-                "area_sqft": building_params.area,
-                "occupancy_type": building_params.occupancy_type.value
-            }
-            
-            if alarm_required["required"]:
-                recommendations.append("Install NFPA 72 compliant fire alarm system")
-                recommendations.append("Provide manual pull stations at exits")
-                recommendations.append("Install smoke detection in required areas")
-            
-            # 3. Fire Rating Requirements
-            fire_ratings = EnhancedBuildingCodeAnalyzer._get_comprehensive_fire_ratings(building_params)
-            calculations["fire_ratings"] = fire_ratings
-            
-            # 4. Emergency Egress Requirements
-            emergency_lighting_required = building_params.occupancy_type in [
-                OccupancyType.ASSEMBLY_CONCENTRATED, OccupancyType.ASSEMBLY_UNCONCENTRATED,
-                OccupancyType.BUSINESS, OccupancyType.EDUCATIONAL, OccupancyType.INSTITUTIONAL
-            ]
-            
-            if emergency_lighting_required:
-                recommendations.append("Provide emergency egress lighting per IBC Section 1008")
-                recommendations.append("Install illuminated exit signs at all exits")
-            
-            # 5. Determine severity
-            severity = "critical" if sprinkler_required["required"] and not building_params.sprinklered else "minor"
-            
-            code_references = [
-                "IBC Section 903 - Automatic Sprinkler Systems",
-                "IBC Section 907 - Fire Alarm and Detection Systems",
-                "IBC Section 1008 - Emergency Egress",
-                "NFPA 13 - Installation of Sprinkler Systems",
-                "NFPA 72 - National Fire Alarm Code"
-            ]
-            
-            return ComplianceResult(
-                compliant=len(issues) == 0,
-                issues=issues,
-                recommendations=recommendations,
-                code_references=code_references,
-                severity=severity,
-                calculations=calculations,
-                confidence=0.92
-            )
-            
-        except Exception as e:
-            return ComplianceResult(
-                compliant=False,
-                issues=[f"Fire safety analysis error: {str(e)}"],
-                recommendations=["Consult fire protection engineer"],
-                code_references=["IBC Chapter 9", "NFPA Standards"],
-                severity="critical",
-                calculations={"error": str(e)},
-                confidence=0.0
-            )
-    
-    @staticmethod
-    def _check_sprinkler_requirements(building_params: BuildingParameters) -> Dict[str, Any]:
-        """Comprehensive sprinkler requirement analysis"""
-        required = False
-        reasons = []
-        
-        # High-rise buildings (IBC Section 403)
-        if building_params.height > 75:
-            required = True
-            reasons.append(f"High-rise building (>{75}' height)")
-        
-        # Large area requirements vary by occupancy
-        area_thresholds = {
-            OccupancyType.ASSEMBLY_CONCENTRATED: 5000,
-            OccupancyType.ASSEMBLY_UNCONCENTRATED: 5000,
-            OccupancyType.BUSINESS: 12000,
-            OccupancyType.EDUCATIONAL: 20000,
-            OccupancyType.FACTORY_INDUSTRIAL: 12000,
-            OccupancyType.INSTITUTIONAL: 5000,
-            OccupancyType.MERCANTILE: 12000,
-            OccupancyType.RESIDENTIAL: 5000,
-            OccupancyType.STORAGE: 12000,
-            OccupancyType.UTILITY_MISCELLANEOUS: 12000
-        }
-        
-        threshold = area_thresholds.get(building_params.occupancy_type, 12000)
-        if building_params.area > threshold:
-            required = True
-            reasons.append(f"Area {building_params.area} sq ft exceeds {threshold} sq ft threshold")
-        
-        # Multi-story requirements
-        if building_params.stories > 2 and building_params.occupancy_type in [
-            OccupancyType.BUSINESS, OccupancyType.MERCANTILE, OccupancyType.FACTORY_INDUSTRIAL
-        ]:
-            required = True
-            reasons.append(f"Multi-story ({building_params.stories} stories) {building_params.occupancy_type.value}")
-        
-        # Basement requirements
-        if building_params.basement and building_params.area > 1500:
-            required = True
-            reasons.append("Basement area > 1500 sq ft")
-        
-        return {"required": required, "reasons": reasons}
-    
-    @staticmethod
-    def _check_alarm_requirements(building_params: BuildingParameters) -> Dict[str, Any]:
-        """Fire alarm system requirement analysis"""
-        required = False
-        reasons = []
-        
-        # Occupancy-based requirements
-        alarm_required_occupancies = [
-            OccupancyType.ASSEMBLY_CONCENTRATED,
-            OccupancyType.ASSEMBLY_UNCONCENTRATED,
-            OccupancyType.BUSINESS,
-            OccupancyType.EDUCATIONAL,
-            OccupancyType.INSTITUTIONAL,
-            OccupancyType.MERCANTILE
-        ]
-        
-        if building_params.occupancy_type in alarm_required_occupancies:
-            required = True
-            reasons.append(f"{building_params.occupancy_type.value} occupancy requires fire alarm")
-        
-        # Area-based requirements
-        if building_params.area > 5000:
-            required = True
-            reasons.append(f"Building area {building_params.area} sq ft > 5000 sq ft")
-        
-        # Height-based requirements
-        if building_params.height > 55:
-            required = True
-            reasons.append(f"Building height {building_params.height}' > 55'")
-        
-        return {"required": required, "reasons": reasons}
 
-
-class UniversalConstructionAnalyzer:
-    """Enhanced universal calculation and analysis tools with advanced capabilities"""
-    
-    @staticmethod
-    async def calculate_by_area_advanced(total_area: float, coverage_per_unit: float, 
-                                           unit_name: str = "items", area_unit: str = "sqft",
-                                           efficiency_factor: float = 1.0,
-                                           overlap_factor: float = 0.0) -> Dict[str, Any]:
-        """Advanced area-based calculation with efficiency and overlap considerations"""
-        try:
-            # Account for efficiency and overlap
-            effective_coverage = coverage_per_unit * efficiency_factor * (1 - overlap_factor)
-            units_needed = math.ceil(total_area / effective_coverage)
-            
-            # Multiple waste factor scenarios
-            waste_scenarios = {
-                "minimal": 1.05,
-                "standard": 1.10,
-                "conservative": 1.15,
-                "high_waste": 1.20
-            }
-            
-            waste_calculations = {}
-            for scenario, factor in waste_scenarios.items():
-                waste_calculations[scenario] = {
-                    "units": math.ceil(units_needed * factor),
-                    "waste_percentage": (factor - 1) * 100,
-                    "extra_units": math.ceil(units_needed * factor) - units_needed
-                }
-            
-            # Cost optimization analysis
-            bulk_breakpoints = [100, 250, 500, 1000]
-            cost_analysis = {}
-            for breakpoint in bulk_breakpoints:
-                if units_needed >= breakpoint * 0.8:  # Within 80% of breakpoint
-                    potential_savings = (breakpoint - units_needed) / units_needed * 100
-                    cost_analysis[f"bulk_{breakpoint}"] = {
-                        "additional_units": breakpoint - units_needed,
-                        "potential_savings_percent": round(potential_savings, 2)
-                    }
-            
-            return {
-                "calculation_type": "advanced_area_based",
-                "input_parameters": {
-                    "total_area": total_area,
-                    "area_unit": area_unit,
-                    "coverage_per_unit": coverage_per_unit,
-                    "efficiency_factor": efficiency_factor,
-                    "overlap_factor": overlap_factor
-                },
-                "basic_calculation": {
-                    "effective_coverage": effective_coverage,
-                    "units_needed": units_needed,
-                    "unit_type": unit_name
-                },
-                "waste_scenarios": waste_calculations,
-                "cost_optimization": cost_analysis,
-                "formula": f"{total_area} {area_unit} ÷ ({coverage_per_unit} × {efficiency_factor} × {1-overlap_factor}) = {units_needed} {unit_name}",
-                "confidence_level": 0.95 if efficiency_factor == 1.0 else 0.85
-            }
-        except Exception as e:
-            return {"error": f"Advanced area calculation failed: {str(e)}"}
-    
-    @staticmethod
-    def extract_measurements_with_ai_validation(text: str) -> Dict[str, Any]:
-        """Enhanced measurement extraction with AI validation and error detection"""
-        try:
-            # Enhanced patterns with validation
-            enhanced_patterns = {
-                # Architectural measurements
-                'room_dimensions': r"(\d+\.?\d*)\s*[x×]\s*(\d+\.?\d*)\s*(?:feet|ft|')",
-                'door_sizes': r"(\d+\.?\d*)\s*[x×]\s*(\d+\.?\d*)\s*(?:door|dr)",
-                'window_sizes': r"(\d+\.?\d*)\s*[x×]\s*(\d+\.?\d*)\s*(?:window|win)",
-                'ceiling_heights': r"(\d+\.?\d*)\s*(?:feet|ft|')\s*(?:ceiling|clg|height)",
-                
-                # Structural measurements
-                'beam_sizes': r"([wW]\d+[xX]\d+|[hH][sS]\d+[xX]\d+|[cC]\d+[xX]\d+)",
-                'column_sizes': r"(\d+\.?\d*)\s*[x×]\s*(\d+\.?\d*)\s*(?:column|col)",
-                'slab_thickness': r"(\d+\.?\d*)\s*(?:inch|in|\")\s*(?:slab|deck)",
-                'rebar_spacing': r"(\d+\.?\d*)\s*(?:oc|on\s*center)\s*(?:rebar|bar)",
-                
-                # MEP measurements
-                'duct_sizes': r"(\d+\.?\d*)\s*[x×]\s*(\d+\.?\d*)\s*(?:duct|rectangular)",
-                'pipe_sizes': r"(\d+\.?\d*)\s*(?:inch|in|\")\s*(?:pipe|dia|diameter)",
-                'conduit_sizes': r"(\d+\.?\d*)\s*(?:inch|in|\")\s*(?:conduit|emt|rig)",
-                'wire_sizes': r"#(\d+)\s*(?:awg|wire|conductor)",
-                
-                # Loads and capacities
-                'electrical_loads': r"(\d+\.?\d*)\s*(?:amp|amps|amperes?|a)(?!\w)",
-                'hvac_loads': r"(\d+\.?\d*)\s*(?:cfm|tons?|btu)",
-                'structural_loads': r"(\d+\.?\d*)\s*(?:psf|plf|kips?|lbs?)",
-                
-                # Fire safety
-                'sprinkler_spacing': r"(\d+\.?\d*)\s*(?:feet|ft|')\s*(?:oc|spacing|centers?)",
-                'exit_widths': r"(\d+\.?\d*)\s*(?:inches?|in|\")\s*(?:wide|width|clear)",
-                'fire_ratings': r"(\d+\.?\d*)\s*(?:hour|hr|hours?)\s*(?:rated|rating|fire)",
-                
-                # Areas and quantities
-                'areas_sqft': r"(\d+[\d,]*\.?\d*)\s*(?:sq\.?\s*ft|sqft|square\s*feet)",
-                'areas_sqm': r"(\d+[\d,]*\.?\d*)\s*(?:sq\.?\s*m|sqm|square\s*met)",
-                'quantities': r"(\d+)\s*(?:each|ea|pcs?|pieces?|units?|items?)",
-                
-                # Special conditions
-                'percentages': r"(\d+(?:\.\d+)?)\s*%",
-                'temperatures': r"(\d+\.?\d*)\s*(?:degrees?|°)\s*(?:f|fahrenheit|c|celsius)",
-                'slopes_grades': r"(\d+(?:\.\d+)?)\s*%\s*(?:slope|grade|pitch)",
-                'flow_rates': r"(\d+\.?\d*)\s*(?:gpm|gph|lpm|cfm|cms)",
-                'pressures': r"(\d+\.?\d*)\s*(?:psi|bar|kpa|pa)",
-                'velocities': r"(\d+\.?\d*)\s*(?:mph|fps|mps|fpm)"
-            }
-            
-            extracted_data = {}
-            validation_results = {}
-            
-            text_lower = text.lower()
-            
-            for category, pattern in enhanced_patterns.items():
-                matches = re.findall(pattern, text_lower, re.IGNORECASE)
-                if matches:
-                    # Validate extracted measurements
-                    validated_matches = []
-                    validation_issues = []
-                    
-                    for match in matches:
-                        validation = UniversalConstructionAnalyzer._validate_measurement(category, match)
-                        if validation["valid"]:
-                            validated_matches.append(match)
-                        else:
-                            validation_issues.append(validation["issue"])
-                    
-                    extracted_data[category] = validated_matches
-                    if validation_issues:
-                        validation_results[category] = validation_issues
-            
-            # Cross-reference validation
-            cross_validation = UniversalConstructionAnalyzer._cross_validate_measurements(extracted_data)
-            
-            # Calculate confidence score
-            total_extractions = sum(len(matches) for matches in extracted_data.values())
-            total_issues = sum(len(issues) for issues in validation_results.values())
-            confidence = max(0.5, 1.0 - (total_issues / max(total_extractions, 1)) * 0.5)
-            
-            return {
-                "extraction_successful": True,
-                "extracted_measurements": extracted_data,
-                "validation_results": validation_results,
-                "cross_validation": cross_validation,
-                "total_patterns_found": len([k for k, v in extracted_data.items() if v]),
-                "confidence_score": round(confidence, 2),
-                "quality_indicators": {
-                    "measurement_density": total_extractions / max(len(text), 1) * 1000,
-                    "validation_pass_rate": (total_extractions - total_issues) / max(total_extractions, 1),
-                    "pattern_diversity": len(extracted_data) / len(enhanced_patterns)
-                }
-            }
-            
-        except Exception as e:
-            return {"error": f"Enhanced measurement extraction failed: {str(e)}"}
-    
-    @staticmethod
-    def _validate_measurement(category: str, measurement) -> Dict[str, Any]:
-        """Validate individual measurements for reasonableness"""
-        try:
-            # Convert measurement to numeric if possible
-            if isinstance(measurement, tuple):
-                values = [float(x) for x in measurement if str(x).replace('.', '').isdigit()]
-            else:
-                values = [float(measurement)] if str(measurement).replace('.', '').isdigit() else []
-            
-            if not values:
-                return {"valid": True, "issue": None}  # Non-numeric measurements pass through
-            
-            # Validation rules by category
-            validation_rules = {
-                'room_dimensions': {"min": 1, "max": 1000, "typical_range": (8, 100)},
-                'door_sizes': {"min": 1, "max": 20, "typical_range": (2, 12)},
-                'ceiling_heights': {"min": 6, "max": 50, "typical_range": (8, 20)},
-                'beam_sizes': {"min": 4, "max": 48, "typical_range": (8, 24)},
-                'pipe_sizes': {"min": 0.5, "max": 48, "typical_range": (0.75, 12)},
-                'electrical_loads': {"min": 1, "max": 10000, "typical_range": (15, 400)},
-                'areas_sqft': {"min": 1, "max": 1000000, "typical_range": (100, 50000)},
-                'fire_ratings': {"min": 0.5, "max": 4, "typical_range": (1, 3)},
-                'sprinkler_spacing': {"min": 6, "max": 20, "typical_range": (10, 15)},
-                'percentages': {"min": 0, "max": 100, "typical_range": (1, 99)}
-            }
-            
-            rules = validation_rules.get(category, {"min": 0, "max": float('inf'), "typical_range": (0, float('inf'))})
-            
-            for value in values:
-                if value < rules["min"] or value > rules["max"]:
-                    return {
-                        "valid": False, 
-                        "issue": f"{category}: {value} outside reasonable range ({rules['min']}-{rules['max']})"
-                    }
-                
-                # Warning for atypical values
-                typical_min, typical_max = rules["typical_range"]
-                if not (typical_min <= value <= typical_max):
-                    return {
-                        "valid": True,
-                        "issue": f"{category}: {value} outside typical range ({typical_min}-{typical_max}) - verify"
-                    }
-            
-            return {"valid": True, "issue": None}
-            
-        except Exception as e:
-            return {"valid": False, "issue": f"Validation error: {str(e)}"}
-    
-    @staticmethod
-    def _cross_validate_measurements(extracted_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Cross-validate measurements for consistency"""
-        issues = []
-        suggestions = []
-        
-        try:
-            # Check room dimension consistency
-            if 'room_dimensions' in extracted_data and 'areas_sqft' in extracted_data:
-                room_dims = extracted_data['room_dimensions']
-                areas = extracted_data['areas_sqft']
-                
-                if room_dims and areas:
-                    # Calculate area from dimensions and compare
-                    for dim_pair in room_dims:
-                        if len(dim_pair) >= 2:
-                            calculated_area = float(dim_pair[0]) * float(dim_pair[1])
-                            for area in areas:
-                                if isinstance(area, tuple):
-                                    area_val = float(area[0])
-                                else:
-                                    area_val = float(area)
-                                
-                                # Check if areas are reasonably close (within 20%)
-                                if abs(calculated_area - area_val) / area_val > 0.2:
-                                    issues.append(f"Area mismatch: {dim_pair[0]}' x {dim_pair[1]}' = {calculated_area} sq ft vs listed {area_val} sq ft")
-            
-            # Check electrical load consistency
-            if 'electrical_loads' in extracted_data:
-                loads = [float(x[0]) if isinstance(x, tuple) else float(x) for x in extracted_data['electrical_loads']]
-                if loads:
-                    total_load = sum(loads)
-                    if total_load > 2000:  # High total load
-                        suggestions.append(f"High total electrical load ({total_load}A) - verify panel capacity")
-            
-            # Check HVAC sizing consistency
-            if 'hvac_loads' in extracted_data and 'areas_sqft' in extracted_data:
-                hvac_loads = extracted_data['hvac_loads']
-                areas = extracted_data['areas_sqft']
-                
-                if hvac_loads and areas:
-                    # Rough sizing check (400-600 sq ft per ton)
-                    for area in areas:
-                        area_val = float(area[0]) if isinstance(area, tuple) else float(area)
-                        estimated_tons = area_val / 500  # Conservative estimate
-                        
-                        for load in hvac_loads:
-                            load_val = float(load[0]) if isinstance(load, tuple) else float(load)
-                            if 'ton' in str(load).lower() and abs(load_val - estimated_tons) / estimated_tons > 0.5:
-                                suggestions.append(f"HVAC sizing check: {area_val} sq ft suggests ~{estimated_tons:.1f} tons vs {load_val} tons specified")
-            
-            return {
-                "consistency_issues": issues,
-                "sizing_suggestions": suggestions,
-                "validation_passed": len(issues) == 0
-            }
-            
-        except Exception as e:
-            return {"error": f"Cross-validation failed: {str(e)}"}
-
-
-class ProfessionalAIService:
-    """Ultimate professional-grade AI service with advanced building analysis capabilities"""
+class EnhancedAIService:
+    """AI Service with comprehensive multi-trade understanding"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -948,375 +799,171 @@ class ProfessionalAIService:
             logger.error("❌ OpenAI API key not provided")
             raise ValueError("OpenAI API key is required")
         
-        # Initialize OpenAI client with enhanced error handling
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ Professional OpenAI client initialized")
+            logger.info("✅ AI client initialized with comprehensive capabilities")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
         
-        self.analyzer = UniversalConstructionAnalyzer()
-        self.code_analyzer = EnhancedBuildingCodeAnalyzer()
+        self.analyzer = ComprehensiveDocumentAnalyzer()
         self.executor = ThreadPoolExecutor(max_workers=4)
         
-        # Professional-grade tool definitions with enhanced capabilities
+        # Comprehensive tool definitions for ALL trades
         self.tools = [
-            # Enhanced calculation tools
             {
                 "type": "function",
                 "function": {
-                    "name": "calculate_by_area_advanced",
-                    "description": "Advanced area-based calculations with efficiency factors, overlap considerations, and cost optimization",
+                    "name": "analyze_document_visually",
+                    "description": "Comprehensive visual analysis of construction document for ALL trades",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "total_area": {"type": "number", "description": "Total area needing coverage"},
-                            "coverage_per_unit": {"type": "number", "description": "Area covered by each unit"},
-                            "unit_name": {"type": "string", "description": "Type of item"},
-                            "area_unit": {"type": "string", "description": "Unit of area", "default": "sqft"},
-                            "efficiency_factor": {"type": "number", "description": "Installation efficiency (0.8-1.0)", "default": 1.0},
-                            "overlap_factor": {"type": "number", "description": "Overlap factor (0.0-0.2)", "default": 0.0}
-                        },
-                        "required": ["total_area", "coverage_per_unit", "unit_name"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "extract_measurements_enhanced",
-                    "description": "Enhanced measurement extraction from TEXT using Regex. Use this after extracting text from an image.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "document_text": {"type": "string", "description": "Text content from the document"}
-                        },
-                        "required": ["document_text"]
-                    }
-                }
-            },
-            ### --- NEW CODE START --- ###
-            # This is the new tool definition that enables vision analysis.
-            {
-                "type": "function",
-                "function": {
-                    "name": "analyze_blueprint_image_with_vision",
-                    "description": "Performs targeted visual analysis (OCR) on a blueprint image to extract all text, dimensions, and callouts. Use this tool FIRST if the user asks a question about the visual content of the blueprint and the initial text context seems insufficient.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "image_url": {"type": "string", "description": "The base64 encoded data URL of the blueprint image to analyze."}
+                            "image_url": {"type": "string", "description": "Document image URL"}
                         },
                         "required": ["image_url"]
                     }
                 }
             },
-            ### --- NEW CODE END --- ###
-            # Professional building code compliance tools
             {
                 "type": "function",
                 "function": {
-                    "name": "comprehensive_egress_analysis",
-                    "description": "Professional-grade egress analysis per IBC with detailed occupant load calculations",
+                    "name": "extract_measurements",
+                    "description": "Extract all measurements and quantities from text",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "area": {"type": "number", "description": "Total area in square feet"},
-                            "occupancy_type": {"type": "string", "enum": ["assembly_concentrated", "assembly_unconcentrated", "business", "educational", "factory_industrial", "institutional", "mercantile", "residential", "storage", "utility_miscellaneous"], "description": "IBC occupancy classification"},
-                            "height": {"type": "number", "description": "Building height in feet"},
-                            "construction_type": {"type": "string", "enum": ["type_i_a", "type_i_b", "type_ii_a", "type_ii_b", "type_iii_a", "type_iii_b", "type_iv", "type_v_a", "type_v_b"], "description": "IBC construction type"},
-                            "sprinklered": {"type": "boolean", "description": "Whether building has sprinkler system"},
-                            "stories": {"type": "number", "description": "Number of stories", "default": 1},
-                            "basement": {"type": "boolean", "description": "Whether building has basement", "default": False},
-                            "travel_distances": {"type": "array", "items": {"type": "number"}, "description": "Travel distances to exits in feet"},
-                            "exit_widths": {"type": "array", "items": {"type": "number"}, "description": "Exit widths in inches"},
-                            "exit_count": {"type": "number", "description": "Number of exits provided"}
+                            "text": {"type": "string", "description": "Text to analyze"}
                         },
-                        "required": ["area", "occupancy_type", "construction_type"]
+                        "required": ["text"]
                     }
                 }
             },
             {
                 "type": "function",
                 "function": {
-                    "name": "comprehensive_accessibility_analysis",
-                    "description": "Detailed ADA compliance analysis for building elements",
+                    "name": "analyze_building_system",
+                    "description": "Analyze any building system (HVAC, electrical, plumbing, structural, etc.)",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "element_type": {"type": "string", "enum": ["door", "ramp", "parking", "restroom"], "description": "Type of element to analyze"},
-                            "width": {"type": "number", "description": "Width in inches", "default": 32},
-                            "threshold_height": {"type": "number", "description": "Threshold height in inches", "default": 0.5},
-                            "opening_force": {"type": "number", "description": "Opening force in pounds", "default": 5},
-                            "maneuvering_clearance": {"type": "number", "description": "Maneuvering clearance in inches", "default": 18},
-                            "closing_speed": {"type": "number", "description": "Closing speed in seconds", "default": 5},
-                            "slope": {"type": "number", "description": "Slope percentage for ramps"},
-                            "length": {"type": "number", "description": "Length in feet"},
-                            "has_handrails": {"type": "boolean", "description": "Whether handrails are present"},
-                            "has_landings": {"type": "boolean", "description": "Whether landings are present"}
+                            "system_type": {
+                                "type": "string",
+                                "enum": ["hvac_sizing", "electrical_load", "plumbing_fixtures", 
+                                        "structural_loads", "parking", "egress", "fire_protection",
+                                        "accessibility", "energy", "general"],
+                                "description": "Type of system to analyze"
+                            },
+                            "parameters": {
+                                "type": "object",
+                                "description": "System-specific parameters"
+                            }
                         },
-                        "required": ["element_type"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "comprehensive_fire_safety_analysis",
-                    "description": "Professional fire safety analysis per NFPA and IBC standards",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "area": {"type": "number", "description": "Building area in square feet"},
-                            "height": {"type": "number", "description": "Building height in feet"},
-                            "occupancy_type": {"type": "string", "enum": ["assembly_concentrated", "assembly_unconcentrated", "business", "educational", "factory_industrial", "institutional", "mercantile", "residential", "storage", "utility_miscellaneous"], "description": "IBC occupancy classification"},
-                            "construction_type": {"type": "string", "enum": ["type_i_a", "type_i_b", "type_ii_a", "type_ii_b", "type_iii_a", "type_iii_b", "type_iv", "type_v_a", "type_v_b"], "description": "IBC construction type"},
-                            "sprinklered": {"type": "boolean", "description": "Whether building has sprinkler system", "default": False},
-                            "stories": {"type": "number", "description": "Number of stories", "default": 1},
-                            "basement": {"type": "boolean", "description": "Whether building has basement", "default": False}
-                        },
-                        "required": ["area", "occupancy_type", "construction_type"]
-                    }
-                }
-            },
-            # Existing tools (maintained for compatibility)
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculate_by_perimeter",
-                    "description": "Calculate quantities for perimeter-based items",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "perimeter_length": {"type": "number"},
-                            "spacing": {"type": "number"},
-                            "unit_name": {"type": "string"},
-                            "length_unit": {"type": "string", "default": "ft"}
-                        },
-                        "required": ["perimeter_length", "spacing", "unit_name"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculate_grid_pattern",
-                    "description": "Calculate quantities for grid-pattern items",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "length": {"type": "number"},
-                            "width": {"type": "number"},
-                            "spacing": {"type": "number"},
-                            "unit_name": {"type": "string"},
-                            "unit": {"type": "string", "default": "ft"}
-                        },
-                        "required": ["length", "width", "spacing", "unit_name"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "convert_units_professional",
-                    "description": "Professional unit conversion with uncertainty analysis",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "value": {"type": "number"},
-                            "from_unit": {"type": "string"},
-                            "to_unit": {"type": "string"},
-                            "precision_required": {"type": "boolean", "default": False}
-                        },
-                        "required": ["value", "from_unit", "to_unit"]
+                        "required": ["system_type", "parameters"]
                     }
                 }
             }
         ]
-        
-        logger.info("✅ Professional AI Service initialized with enhanced capabilities")
     
-    async def _execute_tool_call_async(self, tool_call) -> str:
-        """Asynchronous tool execution with enhanced error handling"""
-        function_name = tool_call.function.name
+    async def get_ai_response(self, prompt: str, document_id: str, 
+                              storage_service: StorageService, author: str = None) -> str:
+        """Process ANY construction-related query with deep understanding"""
         try:
-            arguments = json.loads(tool_call.function.arguments)
+            logger.info(f"🤖 Processing comprehensive query for document {document_id}")
             
-            # Route to appropriate analyzer method
-            if function_name == "calculate_by_area_advanced":
-                result = await self.analyzer.calculate_by_area_advanced(**arguments)
-            elif function_name == "extract_measurements_enhanced":
-                result = self.analyzer.extract_measurements_with_ai_validation(arguments["document_text"])
-            
-            ### --- NEW CODE START --- ###
-            # This is the new logic to handle the vision tool call.
-            elif function_name == "analyze_blueprint_image_with_vision":
-                result = await self.code_analyzer.analyze_blueprint_image_with_vision(arguments["image_url"])
-            ### --- NEW CODE END --- ###
-            
-            elif function_name == "comprehensive_egress_analysis":
-                # Convert arguments to BuildingParameters
-                building_params = BuildingParameters(
-                    area=arguments["area"],
-                    height=arguments.get("height", 20),
-                    occupancy_type=OccupancyType(arguments["occupancy_type"]),
-                    construction_type=ConstructionType(arguments["construction_type"]),
-                    sprinklered=arguments.get("sprinklered", False),
-                    stories=arguments.get("stories", 1),
-                    basement=arguments.get("basement", False)
-                )
-                
-                result = self.code_analyzer.comprehensive_egress_analysis(
-                    building_params,
-                    travel_distances=arguments.get("travel_distances"),
-                    exit_widths=arguments.get("exit_widths"),
-                    exit_count=arguments.get("exit_count")
-                )
-                # Convert ComplianceResult to dict
-                result = result.__dict__
-                
-            elif function_name == "comprehensive_accessibility_analysis":
-                result = self.code_analyzer.comprehensive_accessibility_analysis(
-                    arguments["element_type"], **{k: v for k, v in arguments.items() if k != "element_type"}
-                )
-                result = result.__dict__
-                
-            elif function_name == "comprehensive_fire_safety_analysis":
-                building_params = BuildingParameters(
-                    area=arguments["area"],
-                    height=arguments.get("height", 20),
-                    occupancy_type=OccupancyType(arguments["occupancy_type"]),
-                    construction_type=ConstructionType(arguments["construction_type"]),
-                    sprinklered=arguments.get("sprinklered", False),
-                    stories=arguments.get("stories", 1),
-                    basement=arguments.get("basement", False)
-                )
-                
-                result = self.code_analyzer.comprehensive_fire_safety_analysis(building_params)
-                result = result.__dict__
-                
-            # Legacy tool support
-            elif function_name == "calculate_by_perimeter":
-                result = UniversalConstructionAnalyzer.calculate_by_perimeter(**arguments)
-            elif function_name == "calculate_grid_pattern":
-                result = UniversalConstructionAnalyzer.calculate_grid_pattern(**arguments)
-            elif function_name == "convert_units_professional":
-                result = UniversalConstructionAnalyzer.universal_unit_converter(
-                    arguments["value"], arguments["from_unit"], arguments["to_unit"]
-                )
-                if arguments.get("precision_required"):
-                    result["precision_note"] = "High precision conversion - verify for critical applications"
-            else:
-                result = {"error": f"Unknown function: {function_name}"}
-            
-            return json.dumps(result, indent=2, default=str)
-            
-        except Exception as e:
-            logger.error(f"Tool execution error in {function_name}: {e}")
-            return json.dumps({
-                "error": f"Tool execution failed: {str(e)}",
-                "function": function_name,
-                "timestamp": datetime.now().isoformat()
-            })
-
-    async def get_ai_response(self, prompt: str, document_id: str, storage_service: StorageService, author: str = None) -> str:
-        """Enhanced AI response with professional-grade analysis"""
-        try:
-            logger.info(f"🤖 Processing professional AI request for document {document_id}")
-            
-            # Load document context with enhanced error handling
+            # Load document
             document_text = ""
-            image_urls = []
+            image_url = None
             
             try:
-                # Parallel loading of document assets
                 context_task = storage_service.download_blob_as_text(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{document_id}_context.txt"
                 )
-                
-                image_task = storage_service.download_blob_as_bytes(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{document_id}_page_1.png"
-                )
-                
-                # Execute tasks with timeout
                 document_text = await asyncio.wait_for(context_task, timeout=30.0)
-                logger.info(f"📄 Loaded document context: {len(document_text):,} characters")
                 
                 try:
-                    page_1_bytes = await asyncio.wait_for(image_task, timeout=30.0)
-                    page_1_b64 = base64.b64encode(page_1_bytes).decode('utf-8')
-                    image_url = f"data:image/png;base64,{page_1_b64}"
-                    image_urls.append(image_url)
-                    logger.info(f"🖼️ Loaded page 1 image: {len(page_1_bytes):,} bytes")
-                except asyncio.TimeoutError:
-                    logger.warning("⚠️ Image loading timeout - proceeding without image")
-                except Exception as img_error:
-                    logger.warning(f"⚠️ Could not load page images: {img_error}")
-                
-            except asyncio.TimeoutError:
-                logger.error("❌ Document loading timeout")
-                return "I apologize, but the document loading timed out. Please try again."
+                    image_task = storage_service.download_blob_as_bytes(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=f"{document_id}_page_1.png"
+                    )
+                    page_bytes = await asyncio.wait_for(image_task, timeout=30.0)
+                    page_b64 = base64.b64encode(page_bytes).decode('utf-8')
+                    image_url = f"data:image/png;base64,{page_b64}"
+                except:
+                    logger.info("No image available")
+                    
             except Exception as e:
-                logger.error(f"❌ Failed to load document data: {e}")
-                return f"I couldn't access the document data for '{document_id}'. Please ensure the document is properly processed."
+                logger.error(f"Document loading error: {e}")
+                return "I'm having trouble accessing the document. Please ensure it's been properly uploaded."
             
-            # Process with enhanced professional analysis
-            result = await self.process_query_with_professional_analysis(
+            # Process with comprehensive understanding
+            result = await self._process_with_deep_understanding(
                 prompt=prompt,
                 document_text=document_text,
-                image_url=image_urls[0] if image_urls else None,
+                image_url=image_url,
                 document_id=document_id
             )
             
-            if result["success"]:
-                logger.info(f"✅ Professional AI response generated: {result['tools_used']} tools, confidence: {result.get('confidence', 'N/A')}")
-                return result["ai_response"]
-            else:
-                logger.error(f"❌ Professional AI processing failed: {result.get('error', 'Unknown error')}")
-                return "I encountered an error during analysis. Please try rephrasing your question or contact support."
-                
+            return result
+            
         except Exception as e:
-            logger.error(f"❌ Professional AI response failed: {e}")
-            return f"I encountered a system error: {str(e)}"
-
-    async def process_query_with_professional_analysis(self, prompt: str, document_text: str = "", 
-                                                       image_url: str = None, document_id: str = None) -> Dict[str, Any]:
-        """Professional-grade query processing with comprehensive analysis"""
+            logger.error(f"Response error: {e}")
+            return "I encountered an error. Please try rephrasing your question."
+    
+    async def _process_with_deep_understanding(self, prompt: str, document_text: str, 
+                                               image_url: str = None, document_id: str = None) -> str:
+        """Process with comprehensive multi-trade understanding"""
         try:
-            # Enhanced system message with professional expertise
+            # Comprehensive system message
             system_message = {
                 "role": "system",
-                "content": """You are a PROFESSIONAL CONSTRUCTION AI ENGINEER with comprehensive expertise in building codes, engineering calculations, and construction analysis.
+                "content": """You are an AI with COMPREHENSIVE understanding of ALL construction trades and building systems. You have expert-level knowledge in:
 
-🏗️ PROFESSIONAL QUALIFICATIONS:
-- Licensed Professional Engineer (PE) level knowledge
-- Certified Building Code Expert (IBC, NFPA, ADA, NEC, IMC, IPC)
-- 20+ years equivalent construction industry experience
-- Expert in all construction trades and disciplines
+TRADES & DISCIPLINES:
+- Architecture & Space Planning
+- Structural Engineering (steel, concrete, wood, masonry)
+- Mechanical/HVAC (sizing, ductwork, equipment)
+- Electrical (loads, panels, circuits, lighting)
+- Plumbing (fixtures, piping, drainage)
+- Fire Protection (sprinklers, alarms, ratings)
+- Civil/Site (parking, utilities, drainage)
+- Energy & Sustainability
+- Accessibility (ADA compliance)
 
-📋 COMPREHENSIVE CAPABILITIES:
-- BUILDING CODE COMPLIANCE: IBC, NFPA, ADA, NEC, etc.
-- ENGINEERING ANALYSIS: Structural, Electrical, Mechanical, Plumbing, Fire Protection.
-- CONSTRUCTION MANAGEMENT: Sequencing, materials, quantities.
+CODES & STANDARDS:
+- IBC (International Building Code) - all chapters
+- NEC (National Electrical Code)
+- IPC (International Plumbing Code)
+- IMC (International Mechanical Code)
+- NFPA (all relevant standards)
+- ADA/ANSI accessibility standards
+- ASHRAE standards
+- Local codes and amendments
 
-PROFESSIONAL METHODOLOGY:
-1.  **Assess the Goal:** Understand the user's question and the available data (text and image).
-2.  **Visual First (If Necessary):** If the user's question requires visual information (like counting items, reading a specific callout, or understanding layout) and the provided text seems insufficient, **your first step must be to use the `analyze_blueprint_image_with_vision` tool.** This gives you the necessary visual context.
-3.  **Extract Data:** Use the text (either from the initial context or from the vision tool) to extract specific measurements and data using the `extract_measurements_enhanced` tool.
-4.  **Analyze & Calculate:** Apply appropriate codes and standards using the `comprehensive_..._analysis` tools.
-5.  **Synthesize:** Formulate a professional answer, citing code references, showing calculations, and providing actionable recommendations.
-6.  **Disclose:** Always flag items requiring licensed professional review.
+CAPABILITIES:
+- Read and interpret ANY construction drawing
+- Perform calculations for ANY building system
+- Count/quantify ANY element accurately
+- Apply appropriate codes for ANY situation
+- Provide practical construction guidance
+- Identify potential issues or conflicts
 
-Always approach each analysis as a licensed professional engineer would, with attention to safety, code compliance, and professional responsibility."""
+APPROACH:
+1. Understand exactly what's being asked - could be about any trade or system
+2. Use visual analysis if it helps answer the question better
+3. Apply relevant codes and standards
+4. Perform appropriate calculations
+5. Provide clear, helpful answers
+6. Include code references when relevant
+7. Note when professional review is needed
+
+Answer naturally but thoroughly. You can handle questions about ANYTHING in construction."""
             }
             
-            # Build enhanced message structure
             messages = [system_message]
             
-            # Add user message with professional context
+            # Build user message
             user_message = {"role": "user", "content": []}
             
             if image_url:
@@ -1325,443 +972,94 @@ Always approach each analysis as a licensed professional engineer would, with at
                     "image_url": {"url": image_url, "detail": "high"}
                 })
             
-            # Enhanced document context
-            if document_text:
-                context_summary = f"""
-DOCUMENT ANALYSIS REQUEST:
-Document ID: {document_id or 'Unknown'}
-Content Length: {len(document_text):,} characters
-Analysis Type: Professional Engineering Review
+            # Context with query
+            context = f"""Document: {document_id}
+Text from document:
+{document_text[:3000]}...
 
-DOCUMENT CONTENT (Initial Text Extraction):
-{document_text}
+Question: {prompt}
 
-PROFESSIONAL ANALYSIS REQUEST:
-{prompt}
-
-Please provide a comprehensive professional analysis. Remember to use the `analyze_blueprint_image_with_vision` tool if the initial text is insufficient to answer the user's question about the visual layout or details.
-"""
-                user_message["content"].append({"type": "text", "text": context_summary})
-            else:
-                user_message["content"].append({"type": "text", "text": f"Professional Engineering Query: {prompt}"})
+Provide a comprehensive answer using your deep knowledge of all construction trades and systems."""
             
+            user_message["content"].append({"type": "text", "text": context})
             messages.append(user_message)
             
-            # Enhanced API call with professional parameters
-            response = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    self.executor,
-                    lambda: self.client.chat.completions.create(
-                        model="gpt-4o",  # Use gpt-4o instead of deprecated gpt-4-vision-preview
-                        messages=messages,
-                        tools=self.tools,
-                        tool_choice="auto",
-                        max_tokens=4000,
-                        temperature=0.05,  # Very low temperature for professional accuracy
-                        top_p=0.9,
-                        frequency_penalty=0.1
-                    )
-                ),
-                timeout=120.0  # Extended timeout for complex analysis
+            # Get response
+            response = await asyncio.get_event_loop().run_in_executor(
+                self.executor,
+                lambda: self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    tools=self.tools,
+                    tool_choice="auto",
+                    max_tokens=2500,
+                    temperature=0.3
+                )
             )
             
             assistant_message = response.choices[0].message
-            tools_used = 0
             
-            # Enhanced tool execution with parallel processing
+            # Handle tool calls
             if assistant_message.tool_calls:
                 messages.append(assistant_message)
-                tools_used = len(assistant_message.tool_calls)
                 
-                # Execute tool calls with enhanced error handling
-                tool_tasks = [
-                    self._execute_tool_call_async(tool_call)
-                    for tool_call in assistant_message.tool_calls
-                ]
-                
-                tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
-                
-                # Add tool results to conversation
-                for tool_call, result in zip(assistant_message.tool_calls, tool_results):
-                    if isinstance(result, Exception):
-                        result_content = json.dumps({
-                            "error": f"Tool execution error: {str(result)}",
-                            "tool": tool_call.function.name
-                        })
-                    else:
-                        result_content = result
-                    
+                for tool_call in assistant_message.tool_calls:
+                    result = await self._execute_tool(tool_call)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": result_content
+                        "content": json.dumps(result)
                     })
                 
-                # Get enhanced final response
-                final_response = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        self.executor,
-                        lambda: self.client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=messages,
-                            max_tokens=4000,
-                            temperature=0.05
-                        )
-                    ),
-                    timeout=60.0
+                # Final response
+                final_response = await asyncio.get_event_loop().run_in_executor(
+                    self.executor,
+                    lambda: self.client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=messages,
+                        max_tokens=2500,
+                        temperature=0.3
+                    )
                 )
                 
-                final_content = final_response.choices[0].message.content
+                return final_response.choices[0].message.content
             else:
-                final_content = assistant_message.content
-            
-            # Calculate confidence score based on multiple factors
-            confidence_factors = {
-                "tools_used": min(tools_used / 3, 1.0) * 0.3,  # More tools = higher confidence
-                "document_length": min(len(document_text) / 10000, 1.0) * 0.2,  # More context = higher confidence
-                "image_available": 0.2 if image_url else 0.0,  # Visual analysis adds confidence
-                "response_length": min(len(final_content) / 2000, 1.0) * 0.3  # Detailed response = higher confidence
-            }
-            
-            overall_confidence = sum(confidence_factors.values())
-            
-            return {
-                "ai_response": final_content,
-                "tools_used": tools_used,
-                "confidence": round(overall_confidence, 2),
-                "success": True,
-                "analysis_metadata": {
-                    "document_length": len(document_text),
-                    "image_analyzed": image_url is not None,
-                    "response_length": len(final_content),
-                    "processing_level": "professional_grade"
-                }
-            }
-            
-        except asyncio.TimeoutError:
-            logger.error("Professional analysis timeout")
-            return {
-                "ai_response": "Analysis timeout - please try a more focused question or contact support for complex analysis.",
-                "success": False,
-                "error": "Processing timeout"
-            }
+                return assistant_message.content
+                
         except Exception as e:
-            logger.error(f"Professional AI processing error: {e}")
-            return {
-                "ai_response": f"Professional analysis encountered an error: {str(e)}",
-                "success": False,
-                "error": str(e)
-            }
-
-    async def comprehensive_blueprint_compliance_audit(self, document_id: str, storage_service: StorageService) -> Dict[str, Any]:
-        """Comprehensive blueprint compliance audit with professional-grade analysis"""
+            logger.error(f"Processing error: {e}")
+            return f"Processing error: {str(e)}"
+    
+    async def _execute_tool(self, tool_call) -> Dict[str, Any]:
+        """Execute tool calls for any trade or system"""
         try:
-            logger.info(f"🔍 Starting comprehensive professional compliance audit for {document_id}")
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
             
-            # Load all document assets
-            context_blob = f"{document_id}_context.txt"
-            document_text = await storage_service.download_blob_as_text(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=context_blob
-            )
-            
-            # Load multiple page images if available
-            image_urls = []
-            for page_num in range(1, 6):  # Check up to 5 pages
-                try:
-                    page_blob = f"{document_id}_page_{page_num}.png"
-                    page_bytes = await storage_service.download_blob_as_bytes(
-                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                        blob_name=page_blob
-                    )
-                    page_b64 = base64.b64encode(page_bytes).decode('utf-8')
-                    image_urls.append(f"data:image/png;base64,{page_b64}")
-                except Exception:
-                    break  # No more pages available
-            
-            # Professional audit prompt
-            audit_prompt = """
-            Conduct a COMPREHENSIVE PROFESSIONAL COMPLIANCE AUDIT of this construction document.
-            
-            As a Licensed Professional Engineer, provide a detailed analysis covering:
-
-            🏗️ **DOCUMENT CLASSIFICATION & SCOPE**
-            - Document type and professional discipline
-            - Project scope and complexity assessment
-            - Applicable codes and standards identification
-            - Required professional reviews and approvals
-
-            📐 **TECHNICAL ANALYSIS**
-            - Dimensional verification and measurement validation
-            - Engineering calculations review
-            - Material specifications assessment
-            - System design adequacy evaluation
-
-            📋 **CODE COMPLIANCE VERIFICATION**
-            - IBC compliance (occupancy, construction type, area/height limits)
-            - NFPA fire protection requirements (sprinklers, alarms, egress)
-            - ADA accessibility compliance (doors, ramps, clearances)
-            - Energy code compliance (IECC requirements)
-            - Trade-specific code compliance (NEC, IMC, IPC)
-
-            🚨 **SAFETY & REGULATORY ANALYSIS**
-            - Life safety system adequacy
-            - Structural safety considerations
-            - Fire protection system requirements
-            - Emergency egress evaluation
-            - Accessibility barrier identification
-
-            ⚖️ **PROFESSIONAL LIABILITY ASSESSMENT**
-            - Items requiring professional engineer review
-            - Potential liability exposure areas
-            - Recommended professional consultations
-            - Standard of care compliance evaluation
-
-            📊 **COMPLIANCE SCORING & RECOMMENDATIONS**
-            - Overall compliance rating (0-100%)
-            - Critical issues requiring immediate attention
-            - Major issues requiring professional review
-            - Minor issues and recommendations for improvement
-            - Priority ranking for remediation
-
-            Use all available calculation and compliance tools to provide quantitative analysis.
-            Provide specific code references and industry standard citations.
-            """
-            
-            # Execute comprehensive analysis
-            audit_results = []
-            
-            # Process with each available image for complete analysis
-            for i, image_url in enumerate(image_urls[:3]):  # Analyze up to 3 pages
-                page_result = await self.process_query_with_professional_analysis(
-                    prompt=f"{audit_prompt}\n\n--- ANALYZING PAGE {i+1} ---",
-                    document_text=document_text if i == 0 else "",  # Full text only on first page
-                    image_url=image_url,
-                    document_id=document_id
+            if function_name == "analyze_document_visually":
+                return await self.analyzer.deep_visual_analysis(arguments["image_url"])
+            elif function_name == "extract_measurements":
+                return self.analyzer.extract_all_measurements(arguments["text"])
+            elif function_name == "analyze_building_system":
+                return self.analyzer.analyze_any_system(
+                    arguments["system_type"],
+                    arguments["parameters"]
                 )
-                audit_results.append({
-                    "page": i + 1,
-                    "analysis": page_result["ai_response"],
-                    "tools_used": page_result["tools_used"],
-                    "confidence": page_result.get("confidence", 0.8)
-                })
-            
-            # If no images, do text-only analysis
-            if not image_urls:
-                text_result = await self.process_query_with_professional_analysis(
-                    prompt=audit_prompt,
-                    document_text=document_text,
-                    document_id=document_id
-                )
-                audit_results.append({
-                    "page": "text_only",
-                    "analysis": text_result["ai_response"],
-                    "tools_used": text_result["tools_used"],
-                    "confidence": text_result.get("confidence", 0.7)
-                })
-            
-            # Generate executive summary
-            summary_prompt = f"""
-            Based on the comprehensive compliance audit results, provide an EXECUTIVE SUMMARY:
-
-            **OVERALL COMPLIANCE STATUS:** [Compliant/Issues Found/Major Concerns/Critical Issues]
-            **COMPLIANCE SCORE:** [0-100%]
-            **PROFESSIONAL REVIEW REQUIRED:** [Yes/No]
-
-            **CRITICAL ISSUES:** (Immediate attention required)
-            **MAJOR ISSUES:** (Professional review recommended)  
-            **MINOR ISSUES:** (Improvement opportunities)
-
-            **NEXT STEPS:**
-            **ESTIMATED REMEDIATION EFFORT:**
-            **PROFESSIONAL CONSULTATIONS RECOMMENDED:**
-
-            Audit Results Data:
-            {json.dumps([r["analysis"][:500] + "..." for r in audit_results], indent=2)}
-            """
-            
-            summary_result = await self.process_query_with_professional_analysis(
-                prompt=summary_prompt,
-                document_text="",
-                document_id=document_id
-            )
-            
-            return {
-                "document_id": document_id,
-                "audit_complete": True,
-                "audit_type": "professional_comprehensive",
-                "pages_analyzed": len(audit_results),
-                "total_tools_used": sum(r["tools_used"] for r in audit_results),
-                "average_confidence": sum(r["confidence"] for r in audit_results) / len(audit_results),
-                "detailed_analysis": audit_results,
-                "executive_summary": summary_result["ai_response"],
-                "audit_timestamp": datetime.now().isoformat(),
-                "professional_grade": True,
-                "liability_disclaimer": "This analysis is for informational purposes only. Professional engineer review required for final design approval."
-            }
-            
+            else:
+                return {"error": f"Unknown function: {function_name}"}
+                
         except Exception as e:
-            logger.error(f"❌ Professional compliance audit failed: {e}")
-            return {
-                "document_id": document_id,
-                "audit_complete": False,
-                "error": str(e),
-                "audit_timestamp": datetime.now().isoformat(),
-                "professional_grade": True
-            }
-
-    async def generate_professional_report(self, document_id: str, storage_service: StorageService, 
-                                           report_type: str = "comprehensive") -> Dict[str, Any]:
-        """Generate professional-grade compliance and analysis reports"""
-        try:
-            # Conduct full audit first
-            audit_results = await self.comprehensive_blueprint_compliance_audit(document_id, storage_service)
-            
-            if not audit_results.get("audit_complete"):
-                return {"error": "Unable to complete audit for report generation"}
-            
-            # Generate formal report
-            report_prompt = f"""
-            Generate a formal PROFESSIONAL ENGINEERING REPORT based on the audit results.
-            
-            Format as a professional consulting engineer's report with:
-
-            **EXECUTIVE SUMMARY**
-            **PROJECT INFORMATION**
-            **SCOPE OF REVIEW**
-            **METHODOLOGY**
-            **FINDINGS AND ANALYSIS**
-            **CODE COMPLIANCE STATUS**
-            **RECOMMENDATIONS**
-            **PROFESSIONAL OPINION**
-            **LIMITATIONS AND DISCLAIMERS**
-
-            Use formal engineering language and professional presentation standards.
-            Include specific code references and industry standards.
-            Provide clear action items and priority rankings.
-
-            Base the report on this audit data:
-            {json.dumps(audit_results, indent=2, default=str)[:5000]}...
-            """
-            
-            report_result = await self.process_query_with_professional_analysis(
-                prompt=report_prompt,
-                document_text="",
-                document_id=document_id
-            )
-            
-            return {
-                "document_id": document_id,
-                "report_type": report_type,
-                "report_content": report_result["ai_response"],
-                "based_on_audit": audit_results["audit_timestamp"],
-                "professional_grade": True,
-                "report_timestamp": datetime.now().isoformat(),
-                "disclaimer": "This report represents professional engineering analysis based on available information. Final design approval requires licensed professional engineer review and approval."
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Professional report generation failed: {e}")
-            return {
-                "document_id": document_id,
-                "error": str(e),
-                "report_timestamp": datetime.now().isoformat()
-            }
-
-    def get_professional_capabilities(self) -> Dict[str, Any]:
-        """Return comprehensive list of professional capabilities"""
-        return {
-            "building_codes": [
-                "IBC - International Building Code (All Chapters)",
-                "NFPA 13 - Sprinkler Systems Design and Installation",
-                "NFPA 72 - Fire Alarm and Detection Systems",
-                "NFPA 101 - Life Safety Code",
-                "ADA Standards - Accessibility Guidelines",
-                "NEC - National Electrical Code",
-                "IMC - International Mechanical Code",
-                "IPC - International Plumbing Code",
-                "IECC - International Energy Conservation Code",
-                "AISC 360 - Steel Construction Specification",
-                "ACI 318 - Concrete Design and Construction",
-                "NDS - Wood Construction Standards",
-                "ASCE 7 - Minimum Design Loads and Associated Criteria"
-            ],
-            "engineering_disciplines": [
-                "Structural Engineering (Design and Analysis)",
-                "Electrical Engineering (Power Systems and Controls)",
-                "Mechanical Engineering (HVAC and Building Systems)",
-                "Fire Protection Engineering (Life Safety and Systems)",
-                "Civil Engineering (Site Development and Utilities)",
-                "Architectural Engineering (Building Design Integration)"
-            ],
-            "professional_services": [
-                "Code Compliance Verification",
-                "Professional Engineering Review",
-                "Constructability Analysis",
-                "Value Engineering Assessment",
-                "Risk Assessment and Mitigation",
-                "Professional Liability Evaluation",
-                "Peer Review and Quality Assurance",
-                "Expert Witness Support"
-            ],
-            "analysis_types": [
-                "Comprehensive Blueprint Review",
-                "Code Compliance Audit",
-                "Life Safety Analysis",
-                "Accessibility Compliance Review",
-                "Fire Protection System Design Review",
-                "Structural Adequacy Assessment",
-                "MEP Systems Analysis",
-                "Energy Code Compliance Review"
-            ],
-            "deliverables": [
-                "Professional Engineering Reports",
-                "Code Compliance Matrices",
-                "Calculation Packages",
-                "Professional Recommendations",
-                "Remediation Action Plans",
-                "Professional Opinions and Certifications"
-            ]
-        }
-
+            logger.error(f"Tool error: {e}")
+            return {"error": str(e)}
+    
     async def __aenter__(self):
-        """Async context manager entry"""
         return self
-
+    
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit with cleanup"""
         if hasattr(self, 'executor'):
             self.executor.shutdown(wait=True)
 
-# Enhanced utility functions for professional operations
-def calculate_professional_confidence(factors: Dict[str, float]) -> float:
-    """Calculate professional confidence score with weighted factors"""
-    weights = {
-        "code_compliance": 0.4,
-        "engineering_analysis": 0.3,
-        "documentation_quality": 0.2,
-        "professional_review": 0.1
-    }
-    
-    weighted_score = sum(weights.get(factor, 0.1) * score for factor, score in factors.items())
-    return min(1.0, max(0.0, weighted_score))
 
-def generate_professional_disclaimer() -> str:
-    """Generate professional engineering disclaimer"""
-    return """
-PROFESSIONAL ENGINEERING DISCLAIMER:
-
-This analysis has been performed using professional engineering principles and industry standards. 
-However, this review is based on the information provided and should not be considered a substitute 
-for a comprehensive professional engineering review by a licensed professional engineer.
-
-The analysis is provided for informational purposes only and should be verified by qualified 
-professionals before implementation. No warranty is provided regarding the completeness or 
-accuracy of the analysis.
-
-Final design approval and code compliance verification must be performed by licensed professionals 
-in accordance with applicable state and local regulations.
-"""
-
-# Alias for backward compatibility
-AIService = ProfessionalAIService
+# Backward compatibility
+AIService = EnhancedAIService
+ProfessionalAIService = EnhancedAIService
