@@ -1,7 +1,8 @@
-# app/services/pdf_service.py
+# app/services/pdf_service.py - Enhanced with High Resolution Images
 import logging
 import fitz  # PyMuPDF library
 import json 
+import os
 from typing import List, Dict
 from app.core.config import AppSettings
 from app.services.storage_service import StorageService
@@ -11,7 +12,10 @@ logger = logging.getLogger(__name__)
 class PDFService:
     def __init__(self, settings: AppSettings):
         self.settings = settings
-        logger.info("✅ PDFService initialized successfully.")
+        # Set high DPI for technical drawings - configurable via environment
+        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "300"))  # Default 300 DPI (was 150)
+        self.thumbnail_dpi = int(os.getenv("PDF_THUMBNAIL_DPI", "150"))  # For thumbnails if needed
+        logger.info(f"✅ PDFService initialized with {self.image_dpi} DPI for analysis images")
 
     def _extract_text_from_pdf(self, pdf_bytes: bytes) -> str:
         """Extracts all text from a PDF for general analysis."""
@@ -31,34 +35,79 @@ class PDFService:
             raise
 
     def _extract_page_images(self, pdf_bytes: bytes) -> List[bytes]:
-        """Renders each page of a PDF into a list of PNG image bytes."""
+        """Renders each page of a PDF into high-resolution PNG images for AI analysis."""
         try:
             images = []
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                logger.info(f"🖼️ Rendering {len(doc)} pages as images")
+                logger.info(f"🖼️ Rendering {len(doc)} pages as HIGH RESOLUTION images ({self.image_dpi} DPI)")
+                
                 for page_num, page in enumerate(doc):
                     try:
-                        # Use settings for DPI, with fallback
-                        dpi = getattr(self.settings, 'PDF_PREVIEW_RESOLUTION', 150)
-                        pix = page.get_pixmap(dpi=dpi)
+                        # Use high DPI for better symbol/detail recognition
+                        logger.debug(f"🖼️ Rendering page {page_num + 1} at {self.image_dpi} DPI...")
+                        
+                        # Get pixmap with high DPI - this is the key improvement!
+                        pix = page.get_pixmap(dpi=self.image_dpi)
+                        
+                        # Convert to PNG bytes
                         image_bytes = pix.tobytes("png")
                         images.append(image_bytes)
-                        logger.debug(f"🖼️ Page {page_num + 1}: rendered {len(image_bytes)} bytes")
+                        
+                        # Log the size improvement
+                        estimated_size_mb = len(image_bytes) / (1024 * 1024)
+                        logger.info(f"🖼️ Page {page_num + 1}: {estimated_size_mb:.1f}MB at {self.image_dpi}DPI ({pix.width}x{pix.height}px)")
+                        
+                        # Clean up memory
+                        pix = None
+                        
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to render page {page_num + 1}: {e}")
                         # Continue with other pages
                         continue
             
-            logger.info(f"✅ Rendered {len(images)} page images from PDF")
+            total_size_mb = sum(len(img) for img in images) / (1024 * 1024)
+            logger.info(f"✅ Rendered {len(images)} HIGH-RES page images (Total: {total_size_mb:.1f}MB)")
+            
+            # Warn if images are very large
+            if total_size_mb > 100:
+                logger.warning(f"⚠️ Large image cache: {total_size_mb:.1f}MB. Consider reducing DPI if storage is a concern.")
+            
             return images
+            
         except Exception as e:
             logger.error(f"❌ Failed to extract page images: {e}")
             raise
 
+    def _create_thumbnail_images(self, pdf_bytes: bytes) -> List[bytes]:
+        """Create lower resolution thumbnail images for UI/preview purposes."""
+        try:
+            thumbnails = []
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                logger.info(f"🖼️ Creating thumbnails at {self.thumbnail_dpi} DPI for UI")
+                
+                for page_num, page in enumerate(doc):
+                    try:
+                        # Lower DPI for thumbnails/UI display
+                        pix = page.get_pixmap(dpi=self.thumbnail_dpi)
+                        image_bytes = pix.tobytes("png")
+                        thumbnails.append(image_bytes)
+                        
+                        logger.debug(f"📸 Thumbnail {page_num + 1}: {len(image_bytes)/1024:.0f}KB")
+                        pix = None
+                        
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to create thumbnail for page {page_num + 1}: {e}")
+                        continue
+            
+            logger.info(f"✅ Created {len(thumbnails)} thumbnail images")
+            return thumbnails
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create thumbnails: {e}")
+            return []
+
     def _chunk_document(self, text: str, chunk_size: int = 2500) -> List[Dict[str, str]]:
-        """
-        Break document into numbered chunks with previews for caching.
-        """
+        """Break document into numbered chunks with previews for caching."""
         try:
             logger.info(f"📑 Chunking document into sections of max {chunk_size} characters")
             
@@ -74,11 +123,9 @@ class PDFService:
             paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
             
             if not paragraphs:
-                # If no paragraphs, split by single newlines
                 paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
             
             if not paragraphs:
-                # If still no paragraphs, use the whole text
                 paragraphs = [text.strip()]
             
             chunks = []
@@ -121,16 +168,10 @@ class PDFService:
                 })
             
             logger.info(f"✅ Document chunked into {len(chunks)} sections")
-            
-            # Log chunk sizes for debugging
-            for chunk in chunks[:3]:  # Log first 3 chunks
-                logger.debug(f"📑 Chunk {chunk['chunk_id']}: {len(chunk['content'])} chars - '{chunk['preview'][:50]}...'")
-            
             return chunks
             
         except Exception as e:
             logger.error(f"❌ Failed to chunk document: {e}")
-            # Return a basic chunk on failure
             return [{
                 "chunk_id": 1,
                 "content": text[:2500] if text else "Error processing document",
@@ -144,11 +185,10 @@ class PDFService:
         storage_service: StorageService
     ):
         """
-        Orchestrates the processing of a PDF and saves its text, page images,
-        and generated text chunks to the Azure cache container.
+        Process PDF and save high-resolution images for AI analysis + optional thumbnails.
         """
         try:
-            logger.info(f"🚀 Starting PDF processing for document '{session_id}'")
+            logger.info(f"🚀 Starting HIGH-RESOLUTION PDF processing for document '{session_id}'")
             
             # Validate inputs
             if not session_id or not session_id.strip():
@@ -160,7 +200,8 @@ class PDFService:
             if not storage_service:
                 raise ValueError("Storage service is required")
             
-            logger.info(f"📄 Processing PDF: {len(pdf_bytes)} bytes for document '{session_id}'")
+            pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
+            logger.info(f"📄 Processing PDF: {pdf_size_mb:.1f}MB for document '{session_id}' at {self.image_dpi} DPI")
             
             # 1. Extract full text
             logger.info("🔍 Step 1: Extracting text from PDF...")
@@ -177,10 +218,10 @@ class PDFService:
                 blob_name=text_blob_name,
                 data=full_text.encode('utf-8')
             )
-            logger.info(f"✅ Step 1 complete: Uploaded text context to '{text_blob_name}'")
+            logger.info(f"✅ Step 1 complete: Uploaded text context")
 
-            # 2. Extract and upload page images
-            logger.info("🖼️ Step 2: Extracting page images...")
+            # 2. Extract HIGH-RESOLUTION page images for AI analysis
+            logger.info(f"🖼️ Step 2: Extracting HIGH-RESOLUTION page images ({self.image_dpi} DPI)...")
             page_images = self._extract_page_images(pdf_bytes)
             
             for i, image_bytes in enumerate(page_images):
@@ -190,9 +231,10 @@ class PDFService:
                     blob_name=image_blob_name,
                     data=image_bytes
                 )
-                logger.debug(f"🖼️ Uploaded page {i + 1} image: {len(image_bytes)} bytes")
+                size_mb = len(image_bytes) / (1024 * 1024)
+                logger.debug(f"🖼️ Uploaded HIGH-RES page {i + 1}: {size_mb:.1f}MB")
             
-            logger.info(f"✅ Step 2 complete: Uploaded {len(page_images)} page images")
+            logger.info(f"✅ Step 2 complete: Uploaded {len(page_images)} HIGH-RESOLUTION images")
 
             # 3. Generate and cache chunks
             logger.info("📑 Step 3: Generating text chunks...")
@@ -213,16 +255,45 @@ class PDFService:
                 blob_name=chunks_blob_name,
                 data=chunks_json.encode('utf-8')
             )
-            logger.info(f"✅ Step 3 complete: Cached {len(chunks)} chunks to '{chunks_blob_name}'")
+            logger.info(f"✅ Step 3 complete: Cached {len(chunks)} chunks")
             
-            # Final verification
-            logger.info(f"🎯 PDF processing completed successfully for '{session_id}':")
+            # Optional Step 4: Create lower-res thumbnails for UI if needed
+            create_thumbnails = os.getenv("CREATE_THUMBNAILS", "false").lower() == "true"
+            if create_thumbnails:
+                logger.info(f"🖼️ Step 4: Creating UI thumbnails ({self.thumbnail_dpi} DPI)...")
+                thumbnails = self._create_thumbnail_images(pdf_bytes)
+                
+                for i, thumb_bytes in enumerate(thumbnails):
+                    thumb_blob_name = f"{session_id}_thumb_{i + 1}.png"
+                    await storage_service.upload_file(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=thumb_blob_name,
+                        data=thumb_bytes
+                    )
+                
+                logger.info(f"✅ Step 4 complete: Created {len(thumbnails)} thumbnails")
+            
+            # Final status
+            total_storage_mb = sum(len(img) for img in page_images) / (1024 * 1024)
+            logger.info(f"🎯 HIGH-RESOLUTION PDF processing completed for '{session_id}':")
             logger.info(f"   📄 Text: {len(full_text)} characters")
-            logger.info(f"   🖼️ Images: {len(page_images)} pages")
+            logger.info(f"   🖼️ HIGH-RES Images: {len(page_images)} pages ({total_storage_mb:.1f}MB)")
             logger.info(f"   📑 Chunks: {len(chunks)} sections")
-            logger.info(f"   🆔 Document ID: '{session_id}' is ready for chat!")
+            logger.info(f"   🔍 DPI: {self.image_dpi} (optimized for symbol recognition)")
+            logger.info(f"   🆔 Document ID: '{session_id}' is ready for VISUAL AI analysis!")
             
         except Exception as e:
             logger.error(f"❌ PDF processing failed for '{session_id}': {e}")
             logger.error(f"❌ Full error details: {str(e)}")
             raise Exception(f"PDF processing failed: {str(e)}")
+
+    def get_recommended_dpi_settings(self) -> Dict[str, int]:
+        """Return recommended DPI settings for different use cases"""
+        return {
+            "analysis_dpi": self.image_dpi,
+            "thumbnail_dpi": self.thumbnail_dpi,
+            "recommended_for_blueprints": 300,
+            "recommended_for_text_docs": 200,
+            "recommended_for_thumbnails": 150,
+            "maximum_recommended": 600  # Beyond this, file sizes become very large
+        }
