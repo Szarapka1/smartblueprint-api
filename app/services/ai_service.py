@@ -1,21 +1,21 @@
-# app/services/ai_service.py
+# app/services/ai_service.py - FIXED VERSION
 
 import logging
 import base64
 import re
 import json
-from typing import Optional, List, Dict, Any, Tuple # Added Any, Tuple for tool outputs
+from typing import Optional, List, Dict, Any, Tuple
 from openai import OpenAI, APIError
-from openai.types.chat import ChatCompletionToolParam # Import for tool definition
-import math # Added for UniversalConstructionAnalyzer's math functions
-from datetime import datetime # Added for UniversalConstructionAnalyzer's usage if needed
+from openai.types.chat import ChatCompletionToolParam
+import math
+from datetime import datetime
 
 from app.core.config import AppSettings
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
-# --- UniversalConstructionAnalyzer (copied directly from your provided code) ---
+# Keep your UniversalConstructionAnalyzer exactly as is - it's perfect!
 class UniversalConstructionAnalyzer:
     """Universal calculation and analysis tools for ALL construction trades and document types"""
     
@@ -158,9 +158,6 @@ class UniversalConstructionAnalyzer:
                 # Pressure
                 ("psi", "kpa"): 6.89476, ("kpa", "psi"): 0.145038,
                 ("psi", "bar"): 0.0689476, ("bar", "psi"): 14.5038,
-                
-                # Temperature
-                # Note: Temperature conversions need special handling
                 
                 # Flow
                 ("gpm", "lpm"): 3.78541, ("lpm", "gpm"): 0.264172,
@@ -544,12 +541,27 @@ class UniversalConstructionAnalyzer:
         except Exception as e:
             return {"error": f"Document analysis failed: {str(e)}"}
 
-class EnhancedUniversalAIService:
+
+# FIXED: Proper AI Service Class
+class AIService:
     """AI Service with comprehensive tools for ALL construction trades and document types"""
     
-    def __init__(self, openai_api_key: str):
-        self.openai_api_key = openai_api_key
-        openai.api_key = openai_api_key
+    def __init__(self, settings: AppSettings):
+        self.settings = settings
+        self.openai_api_key = settings.OPENAI_API_KEY
+        
+        if not self.openai_api_key:
+            logger.error("❌ OpenAI API key not provided")
+            raise ValueError("OpenAI API key is required")
+        
+        # Initialize OpenAI client
+        try:
+            self.client = OpenAI(api_key=self.openai_api_key)
+            logger.info("✅ OpenAI client initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+            raise
+        
         self.analyzer = UniversalConstructionAnalyzer()
         
         # Define universal tools that work for ANY construction document
@@ -684,6 +696,8 @@ class EnhancedUniversalAIService:
                 }
             }
         ]
+        
+        logger.info("✅ AI Service initialized with construction analysis tools")
     
     def _execute_tool_call(self, tool_call) -> str:
         """Execute any tool call and return formatted results"""
@@ -716,7 +730,66 @@ class EnhancedUniversalAIService:
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
             return json.dumps({"error": f"Tool execution failed: {str(e)}"})
-    
+
+    # FIXED: This is the method that blueprint_routes.py is trying to call
+    async def get_ai_response(self, prompt: str, document_id: str, storage_service: StorageService, author: str = None) -> str:
+        """
+        Main method for getting AI responses - this is what the routes expect!
+        """
+        try:
+            logger.info(f"🤖 Processing AI request for document {document_id}")
+            
+            # Load document context
+            document_text = ""
+            image_urls = []
+            
+            try:
+                # Get document text
+                context_blob = f"{document_id}_context.txt"
+                document_text = await storage_service.download_blob_as_text(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=context_blob
+                )
+                logger.info(f"📄 Loaded document context: {len(document_text)} characters")
+                
+                # Get page images - try to load first page
+                try:
+                    page_1_blob = f"{document_id}_page_1.png"
+                    page_1_bytes = await storage_service.download_blob_as_bytes(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=page_1_blob
+                    )
+                    # Convert to base64 data URL
+                    page_1_b64 = base64.b64encode(page_1_bytes).decode('utf-8')
+                    image_url = f"data:image/png;base64,{page_1_b64}"
+                    image_urls.append(image_url)
+                    logger.info(f"🖼️ Loaded page 1 image: {len(page_1_bytes)} bytes")
+                except Exception as img_error:
+                    logger.warning(f"⚠️ Could not load page images: {img_error}")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to load document data: {e}")
+                return f"I apologize, but I couldn't access the document data for '{document_id}'. Please make sure the document has been properly uploaded and processed."
+            
+            # Process with vision and tools
+            result = await self.process_query_with_vision_and_tools(
+                prompt=prompt,
+                document_text=document_text,
+                image_url=image_urls[0] if image_urls else None
+            )
+            
+            if result["success"]:
+                logger.info(f"✅ AI response generated successfully, tools used: {result['tools_used']}")
+                return result["ai_response"]
+            else:
+                logger.error(f"❌ AI processing failed: {result.get('error', 'Unknown error')}")
+                return "I apologize, but I encountered an error processing your request. Please try again."
+                
+        except Exception as e:
+            logger.error(f"❌ AI response failed: {e}")
+            return f"I encountered an error: {str(e)}"
+
+    # Keep your existing process_query_with_vision_and_tools method exactly as is - it's perfect!
     async def process_query_with_vision_and_tools(self, prompt: str, document_text: str = "", image_url: str = None) -> Dict[str, Any]:
         """Process any construction-related query with both vision and calculation capabilities"""
         try:
@@ -771,7 +844,7 @@ Be thorough and professional in your analysis."""
             messages.append(user_message)
             
             # Make API call with tools
-            response = openai.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=messages,
                 tools=self.tools,
@@ -798,7 +871,7 @@ Be thorough and professional in your analysis."""
                     })
                 
                 # Get final response with tool results
-                final_response = openai.chat.completions.create(
+                final_response = self.client.chat.completions.create(
                     model="gpt-4-vision-preview", 
                     messages=messages,
                     max_tokens=4000,
@@ -820,5 +893,56 @@ Be thorough and professional in your analysis."""
             return {
                 "ai_response": f"I encountered an error processing your request: {str(e)}",
                 "success": False,
+                "error": str(e)
+            }
+
+    # Add the missing get_document_info method that routes are calling
+    async def get_document_info(self, document_id: str, storage_service: StorageService) -> Dict[str, Any]:
+        """Get information about a processed document"""
+        try:
+            # Check if document context exists
+            context_blob = f"{document_id}_context.txt"
+            
+            try:
+                context_text = await storage_service.download_blob_as_text(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=context_blob
+                )
+            except Exception:
+                return {
+                    "document_id": document_id,
+                    "status": "not_found",
+                    "error": "Document not found or not processed"
+                }
+            
+            # Check for chunks
+            chunks_blob = f"{document_id}_chunks.json"
+            chunks_exist = await storage_service.blob_exists(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=chunks_blob
+            )
+            
+            # Check for page images
+            page_1_blob = f"{document_id}_page_1.png"
+            images_exist = await storage_service.blob_exists(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=page_1_blob
+            )
+            
+            return {
+                "document_id": document_id,
+                "status": "ready" if chunks_exist else "processing",
+                "total_characters": len(context_text),
+                "estimated_tokens": len(context_text) // 4,  # Rough estimate
+                "has_images": images_exist,
+                "has_chunks": chunks_exist,
+                "ready_for_chat": chunks_exist and images_exist
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get document info: {e}")
+            return {
+                "document_id": document_id,
+                "status": "error",
                 "error": str(e)
             }
