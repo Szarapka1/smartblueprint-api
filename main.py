@@ -24,11 +24,10 @@ except ImportError as e:
     PDFService = None
 
 try:
-    # Use the ProfessionalAIService aliased as AIService
-    from app.services.ai_service import AIService
+    from app.services.ai_service import ProfessionalAIService
 except ImportError as e:
     logging.warning(f"AI service import failed: {e}")
-    AIService = None
+    ProfessionalAIService = None
 
 try:
     from app.services.session_service import SessionService
@@ -78,10 +77,10 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️ Storage Service disabled: class not available or connection string missing.")
 
     app.state.ai_service = None
-    if AIService and settings and settings.OPENAI_API_KEY:
-        try:
-            # Initialize the new AIService by passing the entire settings object
-            app.state.ai_service = AIService(settings=settings)
+if ProfessionalAIService and settings and settings.OPENAI_API_KEY:
+    try:
+        # Initialize the ProfessionalAIService by passing the entire settings object
+        app.state.ai_service = ProfessionalAIService(settings=settings)
             logger.info("✅ AI Service initialized")
         except Exception as e:
             logger.error(f"❌ AI Service initialization failed: {e}")
@@ -209,8 +208,8 @@ async def health_check(request: Request):
         "services": {
             "storage": "connected" if hasattr(app_state, 'storage_service') and app_state.storage_service else "disabled",
             "ai": "connected" if hasattr(app_state, 'ai_service') and app_state.ai_service else "disabled",
-            "pdf": "available" if hasattr(app_state, 'pdf_service') and app.state.pdf_service else "disabled",
-            "sessions": "active" if hasattr(app_state, 'session_service') and app.state.session_service else "disabled"
+            "pdf": "available" if hasattr(app_state, 'pdf_service') and app_state.pdf_service else "disabled",
+            "sessions": "active" if hasattr(app_state, 'session_service') and app_state.session_service else "disabled"
         },
         "version": "2.1.0"
     }
