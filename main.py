@@ -142,17 +142,23 @@ cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
-if hasattr(settings, 'CORS_ORIGINS') and settings.CORS_ORIGINS:
-    cors_origins.extend([origin.strip() for origin in settings.CORS_ORIGINS.split(',')])
 
-logger.info(f"🌐 CORS enabled for origins: {list(set(cors_origins))}")
+# If settings.CORS_ORIGINS is a list, extend directly (no .split)
+if hasattr(settings, 'CORS_ORIGINS') and isinstance(settings.CORS_ORIGINS, list):
+    cors_origins.extend(origin.strip() for origin in settings.CORS_ORIGINS if origin.strip())
+
+# Remove duplicates just in case
+cors_origins = list(set(cors_origins))
+
+logger.info(f"🌐 CORS enabled for origins: {cors_origins}")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(set(cors_origins)),
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # --- Robust exception handler ---
 @app.exception_handler(Exception)
