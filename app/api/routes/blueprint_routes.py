@@ -13,6 +13,9 @@ from app.core.config import get_settings
 blueprint_router = APIRouter()
 settings = get_settings()
 
+
+# --- Pydantic Models ---
+
 class DocumentChatRequest(BaseModel):
     document_id: str = Field(..., min_length=3, max_length=50)
     prompt: str = Field(..., min_length=1, max_length=2000)
@@ -25,6 +28,36 @@ class DocumentChatResponse(BaseModel):
     chat_id: str
     timestamp: str
     source_pages: List[int] = []
+
+# FIX: Added Pydantic models for annotations to match frontend expectations
+class Annotation(BaseModel):
+    annotation_id: str
+    document_id: str
+    page_number: int
+    x: float
+    y: float
+    text: str
+    annotation_type: str  # e.g., 'note', 'highlight'
+    author: str
+    is_private: bool
+    timestamp: str
+
+class AnnotationCreate(BaseModel):
+    document_id: str
+    page_number: int
+    x: float
+    y: float
+    text: str
+    annotation_type: str
+    author: str
+    is_private: bool = True
+
+class AnnotationDeleteResponse(BaseModel):
+    status: str
+    deleted_id: str
+
+
+# --- Helper Functions ---
 
 def validate_document_id(document_id: str) -> str:
     """Validate and sanitize document ID for shared use, ensuring no trailing underscores."""
@@ -58,6 +91,9 @@ def validate_admin_access(admin_token: str) -> bool:
         )
     return admin_token == expected_token
 
+
+# --- Chat History Helpers ---
+
 async def load_user_chat_history(document_id: str, author: str, storage_service) -> List[dict]:
     """Load a specific user's private chat history"""
     # Sanitize author name for filename
@@ -84,6 +120,9 @@ async def save_user_chat_history(document_id: str, author: str, chat_history: Li
         blob_name=chat_blob_name,
         data=chat_json.encode('utf-8')
     )
+
+
+# --- Analytics Helpers ---
 
 async def log_all_chat_activity(document_id: str, author: str, prompt: str, ai_response: str, storage_service):
     """SERVICE: Log ALL chat activity from ALL users for analytics"""
@@ -122,6 +161,33 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str, ai_r
         blob_name=activity_blob_name,
         data=activity_json.encode('utf-8')
     )
+
+
+# FIX: Added helper functions to load and save annotations from blob storage
+async def load_annotations(document_id: str, storage_service) -> List[dict]:
+    """Load all annotations for a document."""
+    blob_name = f"{document_id}_annotations.json"
+    try:
+        annotations_data = await storage_service.download_blob_as_text(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=blob_name
+        )
+        return json.loads(annotations_data)
+    except Exception:
+        return []
+
+async def save_annotations(document_id: str, annotations: List[dict], storage_service):
+    """Save all annotations for a document."""
+    blob_name = f"{document_id}_annotations.json"
+    annotations_json = json.dumps(annotations, indent=2, ensure_ascii=False)
+    await storage_service.upload_file(
+        container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+        blob_name=blob_name,
+        data=annotations_json.encode('utf-8')
+    )
+
+
+# --- API Routes ---
 
 @blueprint_router.post("/documents/upload", status_code=201)
 async def upload_shared_document(
@@ -421,7 +487,109 @@ async def list_shared_documents(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
-# SERVICE ADMIN ENDPOINTS - Protected by environment variable
+
+# --- FIX: ADDED ANNOTATION ENDPOINTS ---
+
+@blueprint_router.post("/documents/{document_id}/annotations", response_model=Annotation)
+async def create_annotation(
+    request: Request,
+    document_id: str,
+    annotation_data: AnnotationCreate
+):
+    """Create a new annotation (note or highlight) on a document."""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        all_annotations = await load_annotations(clean_document_id, storage_service)
+        
+        new_annotation = Annotation(
+            annotation_id=str(uuid.uuid4())[:8],
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            **annotation_data.dict()
+        )
+        
+        all_annotations.append(new_annotation.dict())
+        
+        await save_annotations(clean_document_id, all_annotations, storage_service)
+        
+        return new_annotation
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create annotation: {str(e)}")
+
+
+@blueprint_router.get("/documents/{document_id}/annotations")
+async def get_user_visible_annotations(
+    request: Request,
+    document_id: str,
+    author: str
+):
+    """Get all annotations for a document that are visible to the current user."""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        all_annotations = await load_annotations(clean_document_id, storage_service)
+        
+        # User sees their own private annotations and all public annotations
+        visible_annotations = [
+            ann for ann in all_annotations 
+            if not ann.get('is_private') or ann.get('author') == author
+        ]
+        
+        return {
+            "document_id": clean_document_id,
+            "annotations": visible_annotations
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get annotations: {str(e)}")
+
+
+@blueprint_router.delete("/documents/{document_id}/annotations/{annotation_id}", response_model=AnnotationDeleteResponse)
+async def delete_annotation(
+    request: Request,
+    document_id: str,
+    annotation_id: str,
+    author: str  # Sent as a query parameter from the client
+):
+    """Delete an annotation, if the user is the author."""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        all_annotations = await load_annotations(clean_document_id, storage_service)
+        
+        annotation_to_delete = None
+        for ann in all_annotations:
+            if ann.get('annotation_id') == annotation_id:
+                annotation_to_delete = ann
+                break
+        
+        if not annotation_to_delete:
+            raise HTTPException(status_code=404, detail="Annotation not found")
+        
+        if annotation_to_delete.get('author') != author:
+            raise HTTPException(status_code=403, detail="Forbidden: You can only delete your own annotations")
+            
+        updated_annotations = [ann for ann in all_annotations if ann.get('annotation_id') != annotation_id]
+        
+        await save_annotations(clean_document_id, updated_annotations, storage_service)
+        
+        return {"status": "deleted", "deleted_id": annotation_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete annotation: {str(e)}")
+
+
+# --- SERVICE ADMIN ENDPOINTS - Protected by environment variable ---
 
 @blueprint_router.get("/admin/documents/{document_id}/all-chats")
 async def admin_get_all_chats(
