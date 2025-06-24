@@ -1,3 +1,5 @@
+# main.py
+
 import datetime
 import logging
 import uvicorn
@@ -92,8 +94,9 @@ async def lifespan(app: FastAPI):
             
             # Log AI capabilities
             capabilities = app.state.ai_service.get_professional_capabilities()
-            logger.info(f"🤖 AI Service capabilities loaded: {len(capabilities.get('building_codes', []))} building codes, "
-                       f"{len(capabilities.get('engineering_disciplines', []))} disciplines")
+            logger.info(f"🤖 AI Service capabilities loaded:")
+            for category, items in capabilities.items():
+                logger.info(f"   - {category}: {len(items)} features")
         except Exception as e:
             logger.error(f"❌ AI Service initialization failed: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
@@ -132,6 +135,9 @@ async def lifespan(app: FastAPI):
     active_services_str = ', '.join(filter(None, active_services))
     logger.info(f"🎯 Startup complete. Active services: {active_services_str if active_services_str else 'Basic API only'}")
     logger.info("🌐 API is ready for blueprint analysis requests")
+
+    # Store settings in app state
+    app.state.settings = settings
 
     yield
 
