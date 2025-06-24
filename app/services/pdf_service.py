@@ -1,494 +1,441 @@
-# app/services/pdf_service.py - COMPLETE FIXED VERSION
+# app/services/pdf_service.py - HYBRID TEXT + VISUAL PDF PROCESSING
 
 import logging
-import fitz  # PyMuPDF library
-import json 
+import fitz  # PyMuPDF
+import json
 import os
-from typing import List, Dict, Optional
-from app.core.config import AppSettings, get_settings
+import asyncio
+import gc
+from typing import List, Dict, Optional, Any
+from app.core.config import AppSettings
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
 class PDFService:
-    """PDF processing service with high-resolution image generation and text extraction"""
+    """PDF processing service that extracts BOTH text and visual data for comprehensive analysis"""
     
     def __init__(self, settings: AppSettings):
         if not settings:
             raise ValueError("AppSettings instance is required")
         
         self.settings = settings
+        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "200"))
+        self.thumbnail_dpi = int(os.getenv("PDF_THUMBNAIL_DPI", "150"))
+        self.max_pages = int(os.getenv("PDF_MAX_PAGES", "100"))
+        self.batch_size = int(os.getenv("PROCESSING_BATCH_SIZE", "5"))
         
-        # Set high DPI for technical drawings - configurable via environment
-        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "300"))  # Default 300 DPI
-        self.thumbnail_dpi = int(os.getenv("PDF_THUMBNAIL_DPI", "150"))  # For thumbnails
-        self.max_pages = int(os.getenv("PDF_MAX_PAGES", "20"))  # Limit pages to process
-        
-        logger.info(f"✅ PDFService initialized:")
-        logger.info(f"   🖼️ Analysis DPI: {self.image_dpi}")
-        logger.info(f"   📸 Thumbnail DPI: {self.thumbnail_dpi}")
+        logger.info(f"✅ PDFService initialized (Hybrid Mode)")
         logger.info(f"   📄 Max pages: {self.max_pages}")
+        logger.info(f"   🖼️ Image DPI: {self.image_dpi}")
 
-    def _extract_text_from_pdf(self, pdf_bytes: bytes) -> str:
-        """Extract all text from PDF for analysis"""
+    async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
+                                   storage_service: StorageService):
+        """Process PDF extracting both text and visual data"""
         try:
-            full_text = ""
-            
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                logger.info(f"📄 Processing PDF with {len(doc)} pages")
-                
-                # Limit pages to process to avoid timeouts
-                pages_to_process = min(len(doc), self.max_pages)
-                if len(doc) > self.max_pages:
-                    logger.warning(f"⚠️ PDF has {len(doc)} pages, processing only first {self.max_pages}")
-                
-                for page_num in range(pages_to_process):
-                    try:
-                        page = doc[page_num]
-                        page_text = page.get_text()
-                        
-                        if page_text.strip():  # Only add if page has text
-                            full_text += f"\n--- PAGE {page_num + 1} ---\n"
-                            full_text += page_text + "\n"
-                            logger.debug(f"📄 Page {page_num + 1}: extracted {len(page_text)} characters")
-                        else:
-                            logger.debug(f"📄 Page {page_num + 1}: no text found (may be image-based)")
-                    
-                    except Exception as page_error:
-                        logger.warning(f"⚠️ Failed to extract text from page {page_num + 1}: {page_error}")
-                        continue
-            
-            logger.info(f"✅ Extracted {len(full_text):,} total characters from {pages_to_process} pages")
-            return full_text
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to extract text from PDF: {e}")
-            raise RuntimeError(f"PDF text extraction failed: {e}")
-
-    def _extract_page_images(self, pdf_bytes: bytes) -> List[bytes]:
-        """Render PDF pages as high-resolution PNG images for AI analysis"""
-        try:
-            images = []
-            
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                pages_to_process = min(len(doc), self.max_pages)
-                logger.info(f"🖼️ Rendering {pages_to_process} pages as HIGH RESOLUTION images ({self.image_dpi} DPI)")
-                
-                for page_num in range(pages_to_process):
-                    try:
-                        page = doc[page_num]
-                        logger.info(f"🖼️ Rendering page {page_num + 1} at {self.image_dpi} DPI...")
-                        
-                        # Calculate transformation matrix for high DPI
-                        matrix = fitz.Matrix(self.image_dpi / 72, self.image_dpi / 72)  # DPI conversion
-                        
-                        # Get pixmap with high DPI
-                        pix = page.get_pixmap(matrix=matrix)
-                        
-                        # Convert to PNG bytes
-                        image_bytes = pix.tobytes("png")
-                        images.append(image_bytes)
-                        
-                        # Validate and log image details
-                        estimated_size_mb = len(image_bytes) / (1024 * 1024)
-                        is_valid_png = image_bytes.startswith(b'\x89PNG\r\n\x1a\n')
-                        
-                        logger.info(f"🖼️ Page {page_num + 1}: {estimated_size_mb:.1f}MB at {self.image_dpi}DPI ({pix.width}x{pix.height}px)")
-                        
-                        if not is_valid_png:
-                            logger.error(f"❌ Page {page_num + 1} generated invalid PNG!")
-                            images.pop()  # Remove invalid image
-                            continue
-                        
-                        # Clean up memory
-                        pix = None
-                        
-                    except Exception as page_error:
-                        logger.error(f"❌ Failed to render page {page_num + 1}: {page_error}")
-                        continue  # Continue with other pages
-            
-            total_size_mb = sum(len(img) for img in images) / (1024 * 1024)
-            logger.info(f"✅ Rendered {len(images)} HIGH-RES page images (Total: {total_size_mb:.1f}MB)")
-            
-            # Warn if images are very large
-            if total_size_mb > 100:
-                logger.warning(f"⚠️ Large image cache: {total_size_mb:.1f}MB. Consider reducing DPI if storage is a concern.")
-            
-            return images
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to extract page images: {e}")
-            raise RuntimeError(f"PDF image extraction failed: {e}")
-
-    def _create_thumbnail_images(self, pdf_bytes: bytes) -> List[bytes]:
-        """Create lower resolution thumbnails for UI/preview"""
-        try:
-            thumbnails = []
-            
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                pages_to_process = min(len(doc), self.max_pages)
-                logger.info(f"🖼️ Creating thumbnails at {self.thumbnail_dpi} DPI for UI")
-                
-                for page_num in range(pages_to_process):
-                    try:
-                        page = doc[page_num]
-                        
-                        # Lower DPI for thumbnails/UI display
-                        matrix = fitz.Matrix(self.thumbnail_dpi / 72, self.thumbnail_dpi / 72)
-                        pix = page.get_pixmap(matrix=matrix)
-                        image_bytes = pix.tobytes("png")
-                        thumbnails.append(image_bytes)
-                        
-                        logger.debug(f"📸 Thumbnail {page_num + 1}: {len(image_bytes)/1024:.0f}KB")
-                        pix = None
-                        
-                    except Exception as page_error:
-                        logger.warning(f"⚠️ Failed to create thumbnail for page {page_num + 1}: {page_error}")
-                        continue
-            
-            logger.info(f"✅ Created {len(thumbnails)} thumbnail images")
-            return thumbnails
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create thumbnails: {e}")
-            return []
-
-    def _chunk_document(self, text: str, chunk_size: int = 2500) -> List[Dict[str, str]]:
-        """Break document into logical chunks for better AI processing"""
-        try:
-            logger.info(f"📑 Chunking document into sections of max {chunk_size} characters")
-            
-            if not text.strip():
-                logger.warning("⚠️ Empty text provided for chunking")
-                return [{
-                    "chunk_id": 1,
-                    "content": "No text content found in document",
-                    "preview": "No text content found in document",
-                    "type": "empty"
-                }]
-            
-            # Split by page markers first, then by paragraphs
-            page_sections = text.split('--- PAGE')
-            chunks = []
-            chunk_id = 1
-            
-            for i, section in enumerate(page_sections):
-                if not section.strip():
-                    continue
-                
-                # Restore page marker if it was split
-                if i > 0:
-                    section = '--- PAGE' + section
-                
-                # If section is small enough, use as-is
-                if len(section) <= chunk_size:
-                    preview = section.strip()[:200]
-                    if len(section) > 200:
-                        preview += "..."
-                    
-                    chunks.append({
-                        "chunk_id": chunk_id,
-                        "content": section.strip(),
-                        "preview": preview,
-                        "type": "page_section" if "PAGE" in section else "content"
-                    })
-                    chunk_id += 1
-                else:
-                    # Break large sections into smaller chunks
-                    paragraphs = [p.strip() for p in section.split('\n\n') if p.strip()]
-                    current_chunk = ""
-                    
-                    for paragraph in paragraphs:
-                        if len(current_chunk + paragraph) > chunk_size and current_chunk:
-                            # Save current chunk
-                            preview = current_chunk.strip()[:200]
-                            if len(current_chunk) > 200:
-                                preview += "..."
-                            
-                            chunks.append({
-                                "chunk_id": chunk_id,
-                                "content": current_chunk.strip(),
-                                "preview": preview,
-                                "type": "content_chunk"
-                            })
-                            
-                            # Start new chunk
-                            current_chunk = paragraph
-                            chunk_id += 1
-                        else:
-                            # Add to current chunk
-                            if current_chunk:
-                                current_chunk += "\n\n" + paragraph
-                            else:
-                                current_chunk = paragraph
-                    
-                    # Add the final chunk from this section
-                    if current_chunk.strip():
-                        preview = current_chunk.strip()[:200]
-                        if len(current_chunk) > 200:
-                            preview += "..."
-                            
-                        chunks.append({
-                            "chunk_id": chunk_id,
-                            "content": current_chunk.strip(),
-                            "preview": preview,
-                            "type": "content_chunk"
-                        })
-                        chunk_id += 1
-            
-            logger.info(f"✅ Document chunked into {len(chunks)} logical sections")
-            return chunks
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to chunk document: {e}")
-            # Return safe fallback
-            return [{
-                "chunk_id": 1,
-                "content": text[:2500] if text else "Error processing document",
-                "preview": (text[:200] + "...") if len(text) > 200 else text,
-                "type": "fallback"
-            }]
-
-    async def process_and_cache_pdf(
-        self,
-        session_id: str,
-        pdf_bytes: bytes,
-        storage_service: StorageService
-    ):
-        """
-        Complete PDF processing pipeline:
-        1. Extract text content
-        2. Generate high-resolution page images
-        3. Create text chunks for AI processing
-        4. Cache everything to Azure storage
-        """
-        try:
-            logger.info(f"🚀 Starting PDF processing for document '{session_id}'")
-            
-            # Input validation
-            if not session_id or not session_id.strip():
-                raise ValueError("Session ID cannot be empty")
-            
-            if not pdf_bytes or len(pdf_bytes) == 0:
-                raise ValueError("PDF bytes cannot be empty")
-            
-            if not storage_service:
-                raise ValueError("Storage service is required")
-            
+            logger.info(f"🚀 Processing PDF: {session_id}")
             pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
-            logger.info(f"📄 Processing PDF: {pdf_size_mb:.1f}MB for document '{session_id}'")
+            logger.info(f"📄 Size: {pdf_size_mb:.1f}MB")
             
-            # Step 1: Extract full text
-            logger.info("🔍 Step 1: Extracting text from PDF...")
-            try:
-                full_text = self._extract_text_from_pdf(pdf_bytes)
-            except Exception as e:
-                logger.error(f"❌ Text extraction failed: {e}")
-                full_text = f"Document '{session_id}' processed but text extraction failed: {str(e)}"
+            # Step 1: Extract comprehensive data
+            extracted_data = await self._extract_hybrid_data(pdf_bytes)
             
-            if not full_text.strip():
-                logger.warning(f"⚠️ No text extracted from PDF for '{session_id}' - might be image-only")
-                full_text = f"Document '{session_id}' processed but no extractable text found. This may be an image-based PDF."
-            
-            # Save full text context
-            text_blob_name = f"{session_id}_context.txt"
-            await storage_service.upload_file(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=text_blob_name,
-                data=full_text.encode('utf-8')
-            )
-            logger.info(f"✅ Step 1 complete: Uploaded text context ({len(full_text):,} chars)")
-
-            # Step 2: Extract HIGH-RESOLUTION page images
-            logger.info(f"🖼️ Step 2: Extracting HIGH-RESOLUTION page images ({self.image_dpi} DPI)...")
-            try:
-                page_images = self._extract_page_images(pdf_bytes)
-            except Exception as e:
-                logger.error(f"❌ Image extraction failed: {e}")
-                page_images = []
-            
-            uploaded_images = 0
-            for i, image_bytes in enumerate(page_images):
-                try:
-                    image_blob_name = f"{session_id}_page_{i + 1}.png"
-                    
-                    # Validate image before upload
-                    if not image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
-                        logger.error(f"❌ Invalid PNG for page {i + 1}, skipping upload")
-                        continue
-                    
-                    await storage_service.upload_file(
-                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                        blob_name=image_blob_name,
-                        data=image_bytes
-                    )
-                    
-                    size_mb = len(image_bytes) / (1024 * 1024)
-                    logger.info(f"🖼️ ✅ Uploaded HIGH-RES page {i + 1}: {size_mb:.1f}MB")
-                    uploaded_images += 1
-                    
-                except Exception as upload_error:
-                    logger.error(f"❌ Failed to upload page {i + 1}: {upload_error}")
-                    continue
-            
-            logger.info(f"✅ Step 2 complete: Uploaded {uploaded_images}/{len(page_images)} HIGH-RESOLUTION images")
-
-            # Step 3: Generate and cache text chunks
-            logger.info("📑 Step 3: Generating text chunks...")
-            try:
-                chunks = self._chunk_document(full_text)
-            except Exception as e:
-                logger.error(f"❌ Chunking failed: {e}")
-                chunks = [{
-                    "chunk_id": 1,
-                    "content": full_text or f"Document '{session_id}' processed but chunking failed",
-                    "preview": (full_text[:200] + "...") if len(full_text) > 200 else full_text,
-                    "type": "fallback"
-                }]
-            
-            if not chunks:
-                logger.warning(f"⚠️ No chunks generated for '{session_id}', creating default chunk")
-                chunks = [{
-                    "chunk_id": 1,
-                    "content": full_text or f"Document '{session_id}' processed but no content available",
-                    "preview": (full_text[:200] + "...") if len(full_text) > 200 else full_text,
-                    "type": "default"
-                }]
-            
-            chunks_blob_name = f"{session_id}_chunks.json"
-            chunks_json = json.dumps(chunks, indent=2, ensure_ascii=False)
-            await storage_service.upload_file(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=chunks_blob_name,
-                data=chunks_json.encode('utf-8')
-            )
-            logger.info(f"✅ Step 3 complete: Cached {len(chunks)} chunks")
-            
-            # Optional Step 4: Create UI thumbnails if enabled
-            create_thumbnails = os.getenv("CREATE_THUMBNAILS", "false").lower() == "true"
-            thumbnail_count = 0
-            
-            if create_thumbnails:
-                logger.info(f"🖼️ Step 4: Creating UI thumbnails ({self.thumbnail_dpi} DPI)...")
-                try:
-                    thumbnails = self._create_thumbnail_images(pdf_bytes)
-                    
-                    for i, thumb_bytes in enumerate(thumbnails):
-                        try:
-                            thumb_blob_name = f"{session_id}_thumb_{i + 1}.png"
-                            await storage_service.upload_file(
-                                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                                blob_name=thumb_blob_name,
-                                data=thumb_bytes
-                            )
-                            thumbnail_count += 1
-                        except Exception as thumb_error:
-                            logger.warning(f"⚠️ Failed to upload thumbnail {i + 1}: {thumb_error}")
-                    
-                    logger.info(f"✅ Step 4 complete: Created {thumbnail_count} thumbnails")
-                except Exception as e:
-                    logger.warning(f"⚠️ Thumbnail creation failed: {e}")
-            
-            # Step 5: Create processing summary
-            processing_summary = {
-                "document_id": session_id,
-                "processing_timestamp": logger.handlers[0].formatter.formatTime(logging.LogRecord('', 0, '', 0, '', (), None), '%Y-%m-%d %H:%M:%S') if logger.handlers else "unknown",
-                "original_size_mb": round(pdf_size_mb, 2),
-                "text_length": len(full_text),
-                "pages_processed": uploaded_images,
-                "chunks_created": len(chunks),
-                "thumbnails_created": thumbnail_count,
-                "image_dpi": self.image_dpi,
-                "processing_status": "complete"
-            }
-            
-            summary_blob_name = f"{session_id}_processing_summary.json"
-            summary_json = json.dumps(processing_summary, indent=2, ensure_ascii=False)
-            await storage_service.upload_file(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=summary_blob_name,
-                data=summary_json.encode('utf-8')
+            # Step 2: Save text content
+            await self._save_text_content(
+                session_id,
+                extracted_data['text_content'],
+                extracted_data['structured_text'],
+                storage_service
             )
             
-            # Final status log
-            total_storage_mb = sum(len(img) for img in page_images) / (1024 * 1024)
-            logger.info(f"🎯 PDF processing completed for '{session_id}':")
-            logger.info(f"   📄 Text: {len(full_text):,} characters")
-            logger.info(f"   🖼️ HIGH-RES Images: {uploaded_images} pages ({total_storage_mb:.1f}MB)")
-            logger.info(f"   📑 Chunks: {len(chunks)} sections")
-            logger.info(f"   📸 Thumbnails: {thumbnail_count}")
-            logger.info(f"   🔍 DPI: {self.image_dpi} (optimized for AI analysis)")
-            logger.info(f"   🆔 Document '{session_id}' is ready for AI analysis!")
+            # Step 3: Save visual data
+            await self._save_visual_pages(
+                session_id,
+                extracted_data['pages'],
+                storage_service
+            )
+            
+            # Step 4: Save metadata and summaries
+            await self._save_metadata(
+                session_id,
+                extracted_data['metadata'],
+                storage_service
+            )
+            
+            # Step 5: Create searchable chunks
+            await self._create_smart_chunks(
+                session_id,
+                extracted_data,
+                storage_service
+            )
+            
+            logger.info(f"✅ Processing complete for {session_id}")
+            logger.info(f"   📝 Text: {len(extracted_data['text_content'])} chars")
+            logger.info(f"   🖼️ Pages: {extracted_data['metadata']['page_count']}")
             
         except Exception as e:
-            logger.error(f"❌ PDF processing failed for '{session_id}': {e}")
-            logger.error(f"❌ Full error details: {str(e)}")
-            
-            # Try to save error summary
-            try:
-                error_summary = {
-                    "document_id": session_id,
-                    "processing_timestamp": logger.handlers[0].formatter.formatTime(logging.LogRecord('', 0, '', 0, '', (), None), '%Y-%m-%d %H:%M:%S') if logger.handlers else "unknown",
-                    "processing_status": "failed",
-                    "error": str(e),
-                    "error_type": type(e).__name__
-                }
-                
-                error_blob_name = f"{session_id}_processing_error.json"
-                error_json = json.dumps(error_summary, indent=2, ensure_ascii=False)
-                await storage_service.upload_file(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=error_blob_name,
-                    data=error_json.encode('utf-8')
-                )
-            except:
-                pass  # Don't fail if we can't save error summary
-            
+            logger.error(f"❌ Processing failed: {e}")
             raise RuntimeError(f"PDF processing failed: {str(e)}")
 
-    def get_processing_stats(self) -> Dict[str, any]:
-        """Get current processing configuration and stats"""
+    async def _extract_hybrid_data(self, pdf_bytes: bytes) -> Dict[str, Any]:
+        """Extract both text and visual data from PDF"""
+        data = {
+            'text_content': '',
+            'structured_text': {},
+            'pages': [],
+            'metadata': {
+                'page_count': 0,
+                'total_size_mb': 0,
+                'has_text': False,
+                'has_images': False,
+                'drawing_types': set(),
+                'document_info': {}
+            }
+        }
+        
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            # Document metadata
+            data['metadata']['document_info'] = {
+                'title': doc.metadata.get('title', ''),
+                'author': doc.metadata.get('author', ''),
+                'subject': doc.metadata.get('subject', ''),
+                'pages': len(doc)
+            }
+            
+            page_count = min(len(doc), self.max_pages)
+            all_text = []
+            
+            # Process pages in batches
+            for batch_start in range(0, page_count, self.batch_size):
+                batch_end = min(batch_start + self.batch_size, page_count)
+                logger.info(f"📄 Processing pages {batch_start + 1}-{batch_end}")
+                
+                for page_num in range(batch_start, batch_end):
+                    page = doc[page_num]
+                    
+                    # Extract text
+                    page_text = page.get_text()
+                    if page_text.strip():
+                        data['metadata']['has_text'] = True
+                        all_text.append(f"\n--- PAGE {page_num + 1} ---\n{page_text}")
+                        
+                        # Structured text extraction
+                        data['structured_text'][f'page_{page_num + 1}'] = {
+                            'text': page_text,
+                            'tables': self._extract_tables(page),
+                            'annotations': self._extract_annotations(page)
+                        }
+                    
+                    # Extract visual
+                    matrix = fitz.Matrix(self.image_dpi / 72, self.image_dpi / 72)
+                    pix = page.get_pixmap(matrix=matrix)
+                    image_bytes = pix.tobytes("png")
+                    
+                    # Analyze content
+                    drawing_info = self._analyze_page_content(page_text, page_num + 1)
+                    if drawing_info['drawing_type']:
+                        data['metadata']['drawing_types'].add(drawing_info['drawing_type'])
+                    
+                    page_data = {
+                        'page_num': page_num + 1,
+                        'image_bytes': image_bytes,
+                        'size_mb': len(image_bytes) / (1024 * 1024),
+                        'has_text': bool(page_text.strip()),
+                        'text_length': len(page_text),
+                        'drawing_info': drawing_info,
+                        'dimensions': {'width': pix.width, 'height': pix.height}
+                    }
+                    
+                    data['pages'].append(page_data)
+                    data['metadata']['has_images'] = True
+                    
+                    # Cleanup
+                    pix = None
+                
+                gc.collect()
+            
+            # Compile results
+            data['text_content'] = ''.join(all_text)
+            data['metadata']['page_count'] = len(data['pages'])
+            data['metadata']['total_size_mb'] = sum(p['size_mb'] for p in data['pages'])
+            data['metadata']['drawing_types'] = list(data['metadata']['drawing_types'])
+            
+        return data
+
+    def _extract_tables(self, page) -> List[Dict]:
+        """Extract tables from page"""
+        tables = []
+        try:
+            # PyMuPDF table extraction
+            tabs = page.find_tables()
+            for tab in tabs:
+                tables.append({
+                    'rows': tab.extract(),
+                    'bbox': tab.bbox
+                })
+        except:
+            pass
+        return tables
+
+    def _extract_annotations(self, page) -> List[Dict]:
+        """Extract annotations and markup"""
+        annotations = []
+        try:
+            for annot in page.annots():
+                annotations.append({
+                    'type': annot.type[1],
+                    'content': annot.info.get('content', ''),
+                    'author': annot.info.get('title', '')
+                })
+        except:
+            pass
+        return annotations
+
+    def _analyze_page_content(self, text: str, page_num: int) -> Dict[str, Any]:
+        """Analyze page content to identify drawing type and key information"""
+        import re
+        
+        info = {
+            'page_number': page_num,
+            'drawing_type': None,
+            'title': None,
+            'scale': None,
+            'sheet_number': None,
+            'key_elements': []
+        }
+        
+        text_upper = text.upper()
+        
+        # Identify drawing type
+        drawing_patterns = {
+            'floor_plan': ['FLOOR PLAN', 'LEVEL', r'[0-9]+(?:ST|ND|RD|TH)\s+FLOOR'],
+            'electrical': ['ELECTRICAL', 'POWER', 'LIGHTING', 'PANEL'],
+            'plumbing': ['PLUMBING', 'PIPING', 'DRAINAGE', 'WATER'],
+            'mechanical': ['MECHANICAL', 'HVAC', 'DUCTWORK', 'EQUIPMENT'],
+            'structural': ['STRUCTURAL', 'FRAMING', 'FOUNDATION', 'BEAM'],
+            'detail': ['DETAIL', 'SECTION', 'CONNECTION'],
+            'schedule': ['SCHEDULE', 'LEGEND', 'TABLE']
+        }
+        
+        for dtype, patterns in drawing_patterns.items():
+            for pattern in patterns:
+                if isinstance(pattern, str):
+                    if pattern in text_upper:
+                        info['drawing_type'] = dtype
+                        break
+                else:
+                    if re.search(pattern, text_upper):
+                        info['drawing_type'] = dtype
+                        break
+        
+        # Extract key information
+        patterns = {
+            'scale': r'SCALE[\s:]+([^\n]+)',
+            'sheet_number': r'(?:SHEET|DWG)[\s:#]*([A-Z0-9\-\.]+)',
+            'title': r'(?:TITLE|DRAWING)[\s:]+([^\n]+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text_upper)
+            if match:
+                info[key] = match.group(1).strip()
+        
+        # Identify key elements mentioned
+        elements = ['DOOR', 'WINDOW', 'ROOM', 'COLUMN', 'BEAM', 'WALL', 
+                   'EQUIPMENT', 'FIXTURE', 'PANEL', 'DUCT', 'PIPE']
+        info['key_elements'] = [e for e in elements if e in text_upper]
+        
+        return info
+
+    async def _save_text_content(self, session_id: str, full_text: str, 
+                                structured_text: Dict, storage_service: StorageService):
+        """Save text content for fast retrieval"""
+        # Save full text
+        context_blob = f"{session_id}_context.txt"
+        await storage_service.upload_file(
+            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=context_blob,
+            data=full_text.encode('utf-8')
+        )
+        
+        # Save structured text
+        structured_blob = f"{session_id}_structured_text.json"
+        await storage_service.upload_file(
+            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=structured_blob,
+            data=json.dumps(structured_text, ensure_ascii=False).encode('utf-8')
+        )
+        
+        logger.info(f"✅ Saved text content ({len(full_text)} chars)")
+
+    async def _save_visual_pages(self, session_id: str, pages: List[Dict],
+                                storage_service: StorageService):
+        """Save page images efficiently"""
+        total = len(pages)
+        
+        for i in range(0, total, self.batch_size):
+            batch = pages[i:i+self.batch_size]
+            tasks = []
+            
+            for page_data in batch:
+                blob_name = f"{session_id}_page_{page_data['page_num']}.png"
+                task = storage_service.upload_file(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=blob_name,
+                    data=page_data['image_bytes']
+                )
+                tasks.append(task)
+            
+            await asyncio.gather(*tasks)
+            logger.info(f"✅ Uploaded pages {i+1}-{min(i+self.batch_size, total)}")
+
+    async def _save_metadata(self, session_id: str, metadata: Dict,
+                            storage_service: StorageService):
+        """Save comprehensive metadata"""
+        # Visual summary for image analysis
+        visual_summary = {
+            "document_id": session_id,
+            "page_count": metadata['page_count'],
+            "document_type": "blueprint",
+            "drawing_types": metadata['drawing_types'],
+            "has_text": metadata['has_text'],
+            "has_images": metadata['has_images'],
+            "pages": []
+        }
+        
+        # Add page details
+        for page in metadata.get('pages', []):
+            visual_summary['pages'].append({
+                "page_number": page['page_num'],
+                "drawing_type": page['drawing_info'].get('drawing_type'),
+                "sheet_number": page['drawing_info'].get('sheet_number'),
+                "has_text": page['has_text'],
+                "key_elements": page['drawing_info'].get('key_elements', [])
+            })
+        
+        # Save visual summary
+        await storage_service.upload_file(
+            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=f"{session_id}_visual_summary.json",
+            data=json.dumps(visual_summary, ensure_ascii=False).encode('utf-8')
+        )
+        
+        # Save full metadata
+        await storage_service.upload_file(
+            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=f"{session_id}_metadata.json",
+            data=json.dumps(metadata, ensure_ascii=False).encode('utf-8')
+        )
+
+    async def _create_smart_chunks(self, session_id: str, data: Dict,
+                                  storage_service: StorageService):
+        """Create intelligent chunks for fast retrieval"""
+        chunks = []
+        
+        # Create chunks by page with context
+        for page_data in data['pages']:
+            page_num = page_data['page_num']
+            page_text = data['structured_text'].get(f'page_{page_num}', {}).get('text', '')
+            
+            if page_text:
+                chunk = {
+                    "chunk_id": page_num,
+                    "page_number": page_num,
+                    "content": page_text[:2500],  # Limit chunk size
+                    "drawing_type": page_data['drawing_info'].get('drawing_type'),
+                    "key_elements": page_data['drawing_info'].get('key_elements', []),
+                    "has_image": True,
+                    "preview": page_text[:200] + "..." if len(page_text) > 200 else page_text
+                }
+                chunks.append(chunk)
+        
+        # Add a summary chunk
+        summary_chunk = {
+            "chunk_id": 0,
+            "page_number": 0,
+            "content": f"Document contains {data['metadata']['page_count']} pages. Types: {', '.join(data['metadata']['drawing_types'])}",
+            "drawing_type": "summary",
+            "preview": "Document summary"
+        }
+        chunks.insert(0, summary_chunk)
+        
+        # Save chunks
+        chunks_blob = f"{session_id}_chunks.json"
+        await storage_service.upload_file(
+            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=chunks_blob,
+            data=json.dumps(chunks, ensure_ascii=False).encode('utf-8')
+        )
+        
+        logger.info(f"✅ Created {len(chunks)} smart chunks")
+
+    # Keep legacy methods for compatibility
+    def _extract_text_from_pdf(self, pdf_bytes: bytes) -> str:
+        """Legacy text extraction"""
+        try:
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                text = ""
+                for page in doc:
+                    text += page.get_text()
+                return text
+        except:
+            return ""
+
+    def _extract_page_images(self, pdf_bytes: bytes) -> List[bytes]:
+        """Legacy image extraction"""
+        images = []
+        try:
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                for page in doc:
+                    pix = page.get_pixmap()
+                    images.append(pix.tobytes("png"))
+        except:
+            pass
+        return images
+
+    def _chunk_document(self, text: str, chunk_size: int = 2500) -> List[Dict[str, str]]:
+        """Legacy chunking"""
+        if not text:
+            return [{"chunk_id": 1, "content": "No text content", "preview": "No text"}]
+        
+        chunks = []
+        for i in range(0, len(text), chunk_size):
+            chunk_text = text[i:i+chunk_size]
+            chunks.append({
+                "chunk_id": len(chunks) + 1,
+                "content": chunk_text,
+                "preview": chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text,
+                "type": "text"
+            })
+        return chunks
+
+    def get_processing_stats(self) -> Dict[str, Any]:
+        """Get service statistics"""
         return {
-            "service_name": "PDFService",
-            "version": "2.1.0",
-            "configuration": {
-                "image_dpi": self.image_dpi,
-                "thumbnail_dpi": self.thumbnail_dpi,
-                "max_pages": self.max_pages
-            },
+            "service": "PDFService",
+            "mode": "hybrid_processing",
             "capabilities": {
                 "text_extraction": True,
-                "high_res_images": True,
-                "thumbnail_creation": True,
-                "intelligent_chunking": True,
-                "multi_page_support": True
+                "visual_extraction": True,
+                "table_extraction": True,
+                "smart_chunking": True,
+                "max_pages": self.max_pages
             },
-            "recommended_settings": {
-                "blueprints_dpi": 300,
-                "documents_dpi": 200,
-                "thumbnails_dpi": 150,
-                "max_recommended_dpi": 600
+            "configuration": {
+                "image_dpi": self.image_dpi,
+                "batch_size": self.batch_size
             }
         }
 
-    def validate_pdf(self, pdf_bytes: bytes) -> Dict[str, any]:
-        """Validate PDF file and return information"""
+    def validate_pdf(self, pdf_bytes: bytes) -> Dict[str, Any]:
+        """Validate PDF"""
         try:
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 return {
                     "valid": True,
                     "page_count": len(doc),
-                    "size_bytes": len(pdf_bytes),
                     "size_mb": round(len(pdf_bytes) / (1024 * 1024), 2),
-                    "encrypted": doc.needs_pass,
-                    "title": doc.metadata.get("title", ""),
-                    "author": doc.metadata.get("author", ""),
-                    "subject": doc.metadata.get("subject", ""),
-                    "creator": doc.metadata.get("creator", "")
+                    "title": doc.metadata.get("title", "")
                 }
         except Exception as e:
-            return {
-                "valid": False,
-                "error": str(e),
-                "size_bytes": len(pdf_bytes) if pdf_bytes else 0
-            }
+            return {"valid": False, "error": str(e)}
