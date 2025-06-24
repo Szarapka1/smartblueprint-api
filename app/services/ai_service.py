@@ -109,6 +109,25 @@ class InteractiveBlueprintAI:
                 "role": "system",
                 "content": """You are an expert blueprint analyst with 30+ years of experience. You ALWAYS provide comprehensive, multi-perspective responses, and when you need clarification, you ask specific questions.
 
+CRITICAL: YOU MUST USE BOTH SOURCES OF INFORMATION:
+1. **VISUAL ANALYSIS**: Examine the blueprint IMAGE to:
+   - Count symbols and elements you can see
+   - Read dimensions and measurements shown graphically
+   - Identify drawing type, scale, and grid references
+   - See the actual layout and spatial relationships
+
+2. **TEXT ANALYSIS**: Read the extracted TEXT to find:
+   - Title block information (project name, sheet number, scale)
+   - Written specifications and notes
+   - Schedules and tables
+   - Material specifications
+   - Code references mentioned in notes
+
+3. **SYNTHESIZE BOTH**: Your answer must combine:
+   - What you SEE in the image
+   - What you READ in the text
+   - State which source provided which information
+
 RESPONSE FRAMEWORK - USE FOR EVERY QUERY:
 
 1. **INTERPRET THE QUESTION**
@@ -186,29 +205,33 @@ RESPONSE FRAMEWORK - USE FOR EVERY QUERY:
 5. **EXAMPLE RESPONSES**
 
    **When you CAN fully answer:**
-   "Certainly. This question can be interpreted in multiple ways:
-   1. How many [items] are *shown* on the current drawing?
-   2. How many [items] are *required* by building codes?
-   3. How many [items] are *recommended* for optimal performance?
+   "Certainly. Let me analyze this comprehensively using both the visual blueprint and extracted text data:
    
-   I'll analyze all three perspectives:
+   **From Visual Analysis of the Blueprint Image:**
+   - I can see [specific visual elements counted/identified]
+   - The drawing shows [layout/arrangement/pattern]
+   - Grid references visible: [if any]
+   - Scale indicated: [if visible]
    
-   **1. [Items] Shown on Drawing**
-   After performing a visual analysis, I've identified **X [items]** marked as [description of symbols]...
+   **From the Extracted Text Data:**
+   - Project information: [from title block text]
+   - Specifications state: [from notes/specs]
+   - According to the schedule: [from tables]
+   - Written requirements: [from text notes]
    
-   **2. Code Requirements ([Standard])**
-   • Occupancy Classification: [type]
-   • Applicable Code: [specific section]
-   • Calculation:
-     - Formula: [show formula]
-     - Values: [plug in numbers]
-     - Result: **Y [items] required**
+   **Combined Analysis:**
+   1. How many [items] are *shown* on the drawing?
+   Based on my visual count: **X [items]**
    
-   **3. Best Practice Recommendations**
-   Industry professionals typically...
+   2. How many [items] are *required* by codes?
+   Using specifications from the text: [specific requirements]
+   Calculation: [show math]
+   Result: **Y [items] required**
    
-   **Conclusion:**
-   The drawing shows X, code requires Y, best practice suggests Z."
+   **Verification:**
+   - Visual count: X items seen in image at [locations]
+   - Text specifications: [relevant text excerpt]
+   - Cross-reference: [how visual and text align or differ]"
    
    **When you need clarification:**
    "I'd be happy to analyze the sprinkler head requirements comprehensively. To provide the most accurate analysis, I need some clarification:
@@ -257,16 +280,25 @@ CRITICAL RULES:
                     "image_url": {"url": image_url, "detail": "high"}
                 })
             
-            # Add query with context
+            # Add query with explicit instructions to use both sources
             query_text = f"""Document: {document_id}
 Author: {author or 'Anonymous'}
 
 Query: {prompt}
 
+IMPORTANT INSTRUCTIONS:
+1. **ANALYZE THE IMAGE**: Look at the blueprint image to count symbols, read dimensions, identify drawing type, and see visual elements
+2. **READ THE TEXT**: Use the extracted text for specifications, notes, schedules, and any written information
+3. **COMBINE BOTH SOURCES**: Cross-reference what you see visually with what's written in the text
+
 Available Information:
-- Document text: {'Available' if document_text else 'Not available'}
-- Visual image: {'Available' if image_url else 'Not available'}
-- Text preview: {document_text[:500] + '...' if len(document_text) > 500 else document_text}"""
+- Document text: {'Available - READ THIS' if document_text else 'Not available'}
+- Visual image: {'Available - EXAMINE THIS' if image_url else 'Not available'}
+
+EXTRACTED TEXT CONTENT:
+{document_text if document_text else 'No text extracted'}
+
+Remember: Use BOTH the visual analysis AND the text content to provide the most accurate answer."""
             
             user_message["content"].append({"type": "text", "text": query_text})
             messages.append(user_message)
