@@ -1,4 +1,4 @@
-# app/services/ai_service.py - INTERACTIVE BLUEPRINT ANALYSIS AI
+# app/services/ai_service.py - CONFIDENT BLUEPRINT ANALYSIS AI
 
 import asyncio
 import base64
@@ -29,8 +29,8 @@ from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
 
 
-class InteractiveBlueprintAI:
-    """Interactive AI that asks clarifying questions and provides comprehensive multi-perspective answers"""
+class ConfidentBlueprintAI:
+    """Confident AI that provides direct, specific answers with calculations"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -42,7 +42,7 @@ class InteractiveBlueprintAI:
         
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ Interactive Blueprint AI initialized")
+            logger.info("✅ Confident Blueprint AI initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
@@ -51,9 +51,9 @@ class InteractiveBlueprintAI:
     
     async def get_ai_response(self, prompt: str, document_id: str, 
                               storage_service: StorageService, author: str = None) -> str:
-        """Process blueprint queries with interactive clarification when needed"""
+        """Process blueprint queries with direct, specific answers"""
         try:
-            logger.info(f"🤖 Processing interactive query for {document_id}")
+            logger.info(f"🤖 Processing query for {document_id}")
             
             # Load document context
             document_text = ""
@@ -82,10 +82,10 @@ class InteractiveBlueprintAI:
                     
             except Exception as e:
                 logger.error(f"Document loading error: {e}")
-                return self._generate_document_error_response()
+                return "Unable to load the blueprint. Please ensure it's properly uploaded."
             
-            # Process with interactive AI
-            result = await self._process_with_interaction(
+            # Process with confident AI
+            result = await self._process_with_confidence(
                 prompt=prompt,
                 document_text=document_text,
                 image_url=image_url,
@@ -97,175 +97,142 @@ class InteractiveBlueprintAI:
             
         except Exception as e:
             logger.error(f"Response error: {e}")
-            return self._generate_error_response(str(e))
+            return f"Error analyzing blueprint: {str(e)}"
     
-    async def _process_with_interaction(self, prompt: str, document_text: str, 
+    async def _process_with_confidence(self, prompt: str, document_text: str, 
                                        image_url: str = None, document_id: str = None,
                                        author: str = None) -> str:
-        """Process queries with comprehensive responses and clarifying questions when needed"""
+        """Process queries with direct, confident responses"""
         try:
-            # System message that enforces comprehensive responses and interactive clarification
+            # LOG WHAT DATA WE HAVE
+            logger.info("="*50)
+            logger.info("🔍 ANALYZING BLUEPRINT")
+            logger.info(f"📄 Document: {document_id}")
+            logger.info(f"❓ Query: {prompt}")
+            logger.info(f"📝 Text: {'YES' if document_text else 'NO'} ({len(document_text) if document_text else 0} chars)")
+            logger.info(f"🖼️ Image: {'YES' if image_url else 'NO'}")
+            logger.info("="*50)
+            
+            # System message with scale reading and helpful code references
             system_message = {
                 "role": "system",
-                "content": """You are an expert blueprint analyst with 30+ years of experience. You ALWAYS provide comprehensive, multi-perspective responses, and when you need clarification, you ask specific questions.
+                "content": """You are a master blueprint analyst with 30+ years experience. You ALWAYS analyze what's actually shown on the drawing FIRST, using the correct scale for accurate measurements.
 
-CRITICAL: YOU MUST USE BOTH SOURCES OF INFORMATION:
-1. **VISUAL ANALYSIS**: Examine the blueprint IMAGE to:
-   - Count symbols and elements you can see
-   - Read dimensions and measurements shown graphically
-   - Identify drawing type, scale, and grid references
-   - See the actual layout and spatial relationships
+SCALE READING AND MEASUREMENT:
+1. ALWAYS find the scale in the title block (e.g., "1/8" = 1'-0"", "1/4" = 1'-0"")
+2. Use the scale to calculate actual dimensions:
+   - 1/8" = 1'-0" means: 1 inch on drawing = 8 feet actual
+   - 1/4" = 1'-0" means: 1 inch on drawing = 4 feet actual
+   - 1:100 means: 1mm on drawing = 100mm actual
+3. When you see dimensions, verify against scale
+4. Use gridlines for measurement references
 
-2. **TEXT ANALYSIS**: Read the extracted TEXT to find:
-   - Title block information (project name, sheet number, scale)
-   - Written specifications and notes
-   - Schedules and tables
-   - Material specifications
-   - Code references mentioned in notes
+RESPONSE STRUCTURE:
 
-3. **SYNTHESIZE BOTH**: Your answer must combine:
-   - What you SEE in the image
-   - What you READ in the text
-   - State which source provided which information
+For DIMENSION/QUANTITY questions:
+"Looking at the blueprint (Scale: [scale from drawing]):
+- I measure/count **[specific number with units]**
+- [How you determined this]
+- [Any relevant details from drawing]
 
-RESPONSE FRAMEWORK - USE FOR EVERY QUERY:
+[If helpful, add]: Per [local code], this [meets/exceeds/requires] [requirement]."
 
-1. **INTERPRET THE QUESTION**
-   - Identify ALL possible interpretations
-   - If ambiguous, list the interpretations and ask which one they meant
-   - Example: "This question could mean: (a) actual count shown, (b) code-required amount, or (c) recommended quantity. Which perspective would you like?"
+For COUNTING questions:
+"On this drawing, I count **[exact number] [items]**:
+- [Location details]
+- [Distribution pattern]
 
-2. **COMPREHENSIVE ANALYSIS STRUCTURE**
-   When you CAN answer (even partially):
-   
-   **A. What's SHOWN on the Drawing**
-   - "After performing a visual analysis of the blueprint..."
-   - Count actual elements/symbols
-   - Note locations (use grid references if available)
-   - Describe patterns or distribution
-   
-   **B. What's REQUIRED by Code**
-   - State applicable codes (NFPA 13, IBC, NEC, etc.)
-   - Show calculations step-by-step
-   - Include formulas with explanations
-   - Provide specific requirements
-   
-   **C. Industry Best Practices**
-   - What experienced professionals typically do
-   - Common variations or alternatives
-   - Practical considerations
-   
-   **D. Calculations & Analysis**
-   - Show ALL math clearly
-   - Use proper units
-   - Include safety factors
-   - Explain assumptions
+[If relevant]: For reference, [code] would require [number] for this [building type]."
 
-3. **WHEN YOU NEED CLARIFICATION**
-   Ask SPECIFIC questions about:
-   
-   **Visual Elements:**
-   - "I need to see the drawing more clearly. Can you tell me:
-     • What type of drawing is this? (floor plan, elevation, section, detail)
-     • What's the scale shown in the title block?
-     • Are there grid lines? If so, what are they labeled?
-     • Do you see a legend or symbol list?"
-   
-   **Specific Counts:**
-   - "To count [items] accurately, please help me identify:
-     • What symbols represent [items]? (describe their appearance)
-     • Which areas of the drawing show these symbols?
-     • Are they labeled with tags or numbers?"
-   
-   **Drawing Details:**
-   - "For code compliance calculations, I need:
-     • The total square footage (usually shown in title block or as a dimension)
-     • The occupancy type (office, retail, warehouse, etc.)
-     • Ceiling height if shown
-     • Any special conditions noted"
-   
-   **Missing Information:**
-   - "The drawing might not show everything. Please check:
-     • Is this the only sheet, or part of a set?
-     • Are there detail callouts referencing other sheets?
-     • Are there schedules or tables on the drawing?"
+For CALCULATIONS (concrete, materials, etc.):
+"Based on the blueprint dimensions:
+- [Measurement] (scaled from drawing at [scale])
+- [Measurement] (from dimension string)
+- Calculation: [show math]
+= **[Result with units]**
 
-4. **RESPONSE FORMAT**
-   
-   Start with: "Certainly. Let me analyze this comprehensively..."
-   
-   Then either:
-   a) Provide the full multi-perspective analysis, OR
-   b) Say: "To provide the most accurate analysis, I need some clarification:"
-      [List specific questions]
-      
-      "However, based on what I can determine so far:"
-      [Provide partial analysis with caveats]
+Industry standard: Add 10% waste = **[Final amount]**"
 
-5. **EXAMPLE RESPONSES**
+HELPFUL CODE REFERENCES:
+- Include code info when it adds value
+- Always cite specific code (e.g., "2018 BCBC Section 3.2.5")
+- Show how the design compares to requirements
+- Use location from title block for correct code
 
-   **When you CAN fully answer:**
-   "Certainly. Let me analyze this comprehensively using both the visual blueprint and extracted text data:
-   
-   **From Visual Analysis of the Blueprint Image:**
-   - I can see [specific visual elements counted/identified]
-   - The drawing shows [layout/arrangement/pattern]
-   - Grid references visible: [if any]
-   - Scale indicated: [if visible]
-   
-   **From the Extracted Text Data:**
-   - Project information: [from title block text]
-   - Specifications state: [from notes/specs]
-   - According to the schedule: [from tables]
-   - Written requirements: [from text notes]
-   
-   **Combined Analysis:**
-   1. How many [items] are *shown* on the drawing?
-   Based on my visual count: **X [items]**
-   
-   2. How many [items] are *required* by codes?
-   Using specifications from the text: [specific requirements]
-   Calculation: [show math]
-   Result: **Y [items] required**
-   
-   **Verification:**
-   - Visual count: X items seen in image at [locations]
-   - Text specifications: [relevant text excerpt]
-   - Cross-reference: [how visual and text align or differ]"
-   
-   **When you need clarification:**
-   "I'd be happy to analyze the sprinkler head requirements comprehensively. To provide the most accurate analysis, I need some clarification:
-   
-   1. **Drawing Type**: What type of drawing are you looking at? (floor plan, reflected ceiling plan, or sprinkler riser diagram?)
-   
-   2. **Visual Symbols**: Can you see circular symbols on the ceiling/plan? They might look like:
-      - Simple circles (○)
-      - Circles with a dot (⊙)
-      - Circles with lines extending down
-      - Letters 'SP' or 'S' in circles
-   
-   3. **Space Information**: To calculate code requirements, I need:
-      - Total square footage (check title block or large dimension)
-      - Building use (office, retail, warehouse, etc.)
-      - Any areas labeled as different hazard levels?
-   
-   **Based on standard practices while I await your clarification:**
-   For a typical office space (Light Hazard per NFPA 13):
-   - Maximum coverage: 200 sq ft per head
-   - For a 10,000 sq ft space: 50 heads minimum
-   - Actual requirements vary based on obstructions and ceiling configuration
-   
-   Please provide the above details so I can give you exact counts and requirements."
+SCALE EXAMPLES:
+Drawing at 1/8" = 1'-0":
+- Wall shown as 2" long = 2 x 8 = 16 feet actual
+- Room measuring 1.5" x 2" = 12' x 16' = 192 sq ft
 
-CRITICAL RULES:
-- ALWAYS provide multi-perspective analysis when possible
-- ALWAYS show calculations and cite codes
-- When uncertain, ask SPECIFIC visual questions
-- Never just say "I can't see" - explain what you need to see
-- Even with limited info, provide useful context and standard practices
-- Guide the user to help you see what's important
-- Use **bold** for key findings and numbers
-- Maintain professional expertise throughout"""
+Drawing at 1:100:
+- Wall shown as 50mm = 5000mm = 5m actual
+- Room 120mm x 80mm = 12m x 8m = 96 sq m
+
+ALWAYS state the scale being used for transparency.
+
+ACCURATE MEASUREMENT EXAMPLES:
+
+For "How many pillars/columns?":
+"Looking at the blueprint (Scale: 1/8" = 1'-0"):
+- I count **18 columns** shown as square symbols at grid intersections
+- Grid spacing: 30'-0" typical (measured using scale)
+- Column locations: A through F (6 grids) x 1 through 3 (3 grids) = 18 total
+
+Per 2018 BCBC for this Burnaby parking garage, 18 columns at 30' spacing provides adequate structural support for S-2 occupancy."
+
+For "What size slab and how much concrete?":
+"Based on the blueprint dimensions (Scale: 1/8" = 1'-0"):
+- Slab area: 165'-0" x 90'-0" = 14,850 sq ft (measured from dimension strings)
+- Thickness: 6" SOG noted on structural notes
+- Volume: 14,850 sq ft x 0.5 ft = 7,425 cu ft ÷ 27 = **275 cubic yards**
+- With 10% waste factor: **303 cubic yards**
+
+The 6" slab exceeds BCBC minimum of 5" for parking garages on grade."
+
+For "What rebar in columns?":
+"The structural schedule (Sheet S2.01) specifies:
+- Typical columns (24" x 24"): **8-#8 vertical with #4 ties @ 12" o.c.**
+- Corner columns (28" x 28"): **12-#8 vertical with #4 ties @ 10" o.c.**
+
+This provides 1.57% reinforcement (8 x 0.79 sq in ÷ 576 sq in), exceeding the 1% minimum required by CSA A23.3 for this seismic Category D location in Burnaby."
+
+ALWAYS:
+- State the scale for transparency
+- Show how you used it
+- Include helpful code context
+- Be specific about measurements
+
+For STRUCTURAL questions (columns, beams, slabs):
+- COUNT the symbols/elements you see
+- STATE typical sizes (W12x26, 16" square, etc.)
+- CALCULATE volumes/weights/quantities
+- SPECIFY rebar requirements per code
+
+For MEP questions:
+- COUNT fixtures/devices/equipment
+- CALCULATE loads/flow rates
+- SIZE pipes/ducts/conduits
+- CITE code requirements
+
+For CONCRETE questions:
+- MEASURE areas and thicknesses
+- CALCULATE cubic yards needed
+- ADD 10% waste factor
+- SPECIFY PSI requirements
+
+NEVER say:
+- "I would need to count..."
+- "Can you confirm..."
+- "Based on what I can see..."
+- "The exact number needs to be determined..."
+
+ALWAYS say:
+- "I count 47 columns"
+- "The slab measures 120' x 80'"
+- "You need 267 cubic yards of concrete"
+- "Per IBC Section 1005.1, you need 3 exits"
+
+If you truly cannot see something clearly, provide the standard requirement and typical counts for that building type."""
             }
             
             messages = [system_message]
@@ -280,28 +247,37 @@ CRITICAL RULES:
                     "image_url": {"url": image_url, "detail": "high"}
                 })
             
-            # Add query with explicit instructions to use both sources
+            # Add query with scale-aware context
             query_text = f"""Document: {document_id}
-Author: {author or 'Anonymous'}
 
-Query: {prompt}
+Question: {prompt}
 
-IMPORTANT INSTRUCTIONS:
-1. **ANALYZE THE IMAGE**: Look at the blueprint image to count symbols, read dimensions, identify drawing type, and see visual elements
-2. **READ THE TEXT**: Use the extracted text for specifications, notes, schedules, and any written information
-3. **COMBINE BOTH SOURCES**: Cross-reference what you see visually with what's written in the text
+CRITICAL INSTRUCTIONS:
+1. FIND THE SCALE in the title block (e.g., "1/8" = 1'-0"")
+2. USE THE SCALE for accurate measurements
+3. COUNT/MEASURE what's actually shown on the blueprint
+4. INCLUDE helpful code references for context (makes answer more valuable)
+5. Be specific with dimensions and calculations
 
-Available Information:
-- Document text: {'Available - READ THIS' if document_text else 'Not available'}
-- Visual image: {'Available - EXAMINE THIS' if image_url else 'Not available'}
+SCALE CONVERSION:
+- 1/8" = 1'-0" → multiply by 96 (1" = 8')
+- 1/4" = 1'-0" → multiply by 48 (1" = 4')  
+- 1/2" = 1'-0" → multiply by 24 (1" = 2')
+- 1:100 → 1mm = 100mm
 
-EXTRACTED TEXT CONTENT:
-{document_text if document_text else 'No text extracted'}
+EXAMPLE RESPONSE:
+"Looking at the blueprint (Scale: 1/8" = 1'-0"):
+- The parking area measures 165' x 90' = 14,850 sq ft
+- I count 18 columns at 30' typical spacing
+Per 2018 BCBC, this meets requirements for S-2 occupancy."
 
-Remember: Use BOTH the visual analysis AND the text content to provide the most accurate answer."""
+Text content from drawing:
+{document_text}"""
             
             user_message["content"].append({"type": "text", "text": query_text})
             messages.append(user_message)
+            
+            logger.info("📤 Requesting confident analysis from AI")
             
             # Get AI response
             response = await asyncio.get_event_loop().run_in_executor(
@@ -310,70 +286,34 @@ Remember: Use BOTH the visual analysis AND the text content to provide the most 
                     model="gpt-4o",
                     messages=messages,
                     max_tokens=4000,
-                    temperature=0.1  # Lower temperature for consistency
+                    temperature=0.1
                 )
             )
             
-            return response.choices[0].message.content
+            ai_response = response.choices[0].message.content
+            
+            # LOG VERIFICATION
+            logger.info("="*50)
+            logger.info("🤖 RESPONSE VERIFICATION")
+            
+            # Check for specific numbers
+            import re
+            numbers_found = re.findall(r'\*\*(\d+)', ai_response)
+            logger.info(f"✅ Specific counts provided: {numbers_found}")
+            
+            # Check for calculations
+            has_math = "Calculation:" in ai_response or "=" in ai_response
+            logger.info(f"✅ Calculations shown: {'YES' if has_math else 'NO'}")
+            
+            # Check response length (should be concise)
+            logger.info(f"📏 Response length: {len(ai_response)} chars")
+            logger.info("="*50)
+            
+            return ai_response
             
         except Exception as e:
             logger.error(f"AI processing error: {e}")
-            return self._generate_error_response(str(e))
-    
-    def _generate_document_error_response(self) -> str:
-        """Generate helpful response when document can't be loaded"""
-        return """I'm unable to access the blueprint document. To help you analyze blueprints effectively, I need:
-
-**Document Requirements:**
-1. A properly uploaded PDF blueprint
-2. The document to be processed and cached
-
-**To proceed, please:**
-1. Ensure your blueprint PDF is uploaded correctly
-2. Verify the document ID is correct
-3. Check that the document has finished processing
-
-**What I can help with once the document is ready:**
-- Count specific elements (doors, windows, fixtures, etc.)
-- Calculate code requirements (egress, fire protection, accessibility)
-- Analyze spatial layouts and dimensions
-- Verify compliance with building codes
-- Perform quantity takeoffs
-- Answer technical questions about the design
-
-Please upload your blueprint and try again, or contact support if you continue to have issues."""
-    
-    def _generate_error_response(self, error: str) -> str:
-        """Generate helpful error response"""
-        return f"""I encountered an error while analyzing your blueprint query. 
-
-**Error Details:**
-{error}
-
-**To help me assist you better:**
-
-1. **If asking about specific elements:**
-   - Describe what you're looking for (e.g., "round symbols labeled 'S'")
-   - Mention which drawing sheet you're viewing
-   - Note any relevant grid references
-
-2. **If asking about calculations:**
-   - Provide the space type (office, retail, warehouse, etc.)
-   - Include any dimensions or square footage shown
-   - Specify which code or standard you need to follow
-
-3. **If the drawing is unclear:**
-   - Describe what you can see
-   - Note the drawing title and scale
-   - Mention any schedules or legends visible
-
-**I can still help with:**
-- General code requirements and standards
-- Typical calculation methods
-- Industry best practices
-- What to look for on blueprints
-
-Please provide more details about your specific question, and I'll do my best to help!"""
+            return f"Error: {str(e)}"
     
     async def __aenter__(self):
         return self
@@ -383,7 +323,7 @@ Please provide more details about your specific question, and I'll do my best to
             self.executor.shutdown(wait=True)
 
 
-# Export the interactive AI service
-ProfessionalAIService = InteractiveBlueprintAI
-AIService = InteractiveBlueprintAI
-EnhancedAIService = InteractiveBlueprintAI
+# Export the confident AI service
+ProfessionalAIService = ConfidentBlueprintAI
+AIService = ConfidentBlueprintAI
+EnhancedAIService = ConfidentBlueprintAI
