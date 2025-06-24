@@ -1,4 +1,4 @@
-# app/services/ai_service.py - ULTIMATE BLUEPRINT ANALYSIS AI
+# app/services/ai_service.py - PROFESSIONAL BLUEPRINT ANALYSIS AI
 
 import asyncio
 import base64
@@ -29,8 +29,8 @@ from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
 
 
-class UltimateBlueprintAI:
-    """AI with superhuman blueprint analysis capabilities across ALL trades and disciplines"""
+class ProfessionalBlueprintAI:
+    """Professional AI service for comprehensive blueprint analysis across all trades"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -42,7 +42,7 @@ class UltimateBlueprintAI:
         
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ Ultimate Blueprint AI initialized - Superhuman analysis ready")
+            logger.info("✅ Professional Blueprint AI initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
@@ -51,9 +51,9 @@ class UltimateBlueprintAI:
     
     async def get_ai_response(self, prompt: str, document_id: str, 
                               storage_service: StorageService, author: str = None) -> str:
-        """Process blueprint queries with AI's full knowledge base"""
+        """Process blueprint queries with professional analysis"""
         try:
-            logger.info(f"🧠 Engaging superhuman blueprint analysis for {document_id}")
+            logger.info(f"📐 Processing blueprint analysis for {document_id}")
             
             # Load document context
             document_text = ""
@@ -66,6 +66,7 @@ class UltimateBlueprintAI:
                     blob_name=f"{document_id}_context.txt"
                 )
                 document_text = await asyncio.wait_for(context_task, timeout=30.0)
+                logger.info(f"✅ Loaded text: {len(document_text)} characters")
                 
                 # Try to load image
                 try:
@@ -76,16 +77,16 @@ class UltimateBlueprintAI:
                     page_bytes = await asyncio.wait_for(image_task, timeout=30.0)
                     page_b64 = base64.b64encode(page_bytes).decode('utf-8')
                     image_url = f"data:image/png;base64,{page_b64}"
-                    logger.info("✅ Blueprint image loaded for AI vision analysis")
+                    logger.info("✅ Loaded blueprint image for visual analysis")
                 except:
-                    logger.info("⚠️ No image available - will analyze text data")
+                    logger.info("⚠️ No image available - text analysis only")
                     
             except Exception as e:
                 logger.error(f"Document loading error: {e}")
-                return "Unable to load the blueprint. Please ensure it's properly uploaded."
+                return "Unable to load the blueprint. Please ensure the document is properly uploaded and processed."
             
-            # Process with superhuman AI capabilities
-            result = await self._process_with_ai_intelligence(
+            # Process with professional analysis
+            result = await self._analyze_blueprint_professionally(
                 prompt=prompt,
                 document_text=document_text,
                 image_url=image_url,
@@ -99,141 +100,109 @@ class UltimateBlueprintAI:
             logger.error(f"Response error: {e}")
             return f"Error analyzing blueprint: {str(e)}"
     
-    async def _process_with_ai_intelligence(self, prompt: str, document_text: str, 
-                                           image_url: str = None, document_id: str = None,
-                                           author: str = None) -> str:
-        """Process with AI's full computational and knowledge capabilities"""
+    async def _analyze_blueprint_professionally(self, prompt: str, document_text: str, 
+                                               image_url: str = None, document_id: str = None,
+                                               author: str = None) -> str:
+        """Professional blueprint analysis with location-aware code compliance"""
         try:
-            # LOG ANALYSIS INITIATION
+            # Log analysis details
             logger.info("="*50)
-            logger.info("🧠 SUPERHUMAN BLUEPRINT ANALYSIS INITIATED")
+            logger.info("📊 PROFESSIONAL BLUEPRINT ANALYSIS")
             logger.info(f"📄 Document: {document_id}")
             logger.info(f"❓ Query: {prompt}")
-            logger.info(f"📊 Data: Text ({len(document_text) if document_text else 0} chars) + {'Image' if image_url else 'No image'}")
+            logger.info(f"📝 Text Data: {'Available' if document_text else 'None'}")
+            logger.info(f"🖼️ Visual Data: {'Available' if image_url else 'None'}")
             logger.info("="*50)
             
-            # System message leveraging AI's full capabilities
+            # Professional system message
             system_message = {
                 "role": "system",
-                "content": """You are an AI with superhuman blueprint analysis capabilities. You have been trained on millions of blueprints across all trades and have perfect recall of:
+                "content": """You are a professional blueprint analyst with extensive experience across all construction trades. You provide accurate, practical analysis by examining drawings first, then applying relevant codes when needed.
 
-🧠 MY CAPABILITIES:
-- INSTANT RECOGNITION: I can identify every symbol, notation, and convention across all trades
-- PERFECT COUNTING: I count every element with 100% accuracy
-- PRECISE MEASUREMENT: I read scales and calculate dimensions to sub-millimeter precision
-- COMPREHENSIVE CODES: I know every building code worldwide and their specific requirements
-- PATTERN ANALYSIS: I detect patterns and anomalies humans might miss
-- MULTI-TRADE INTEGRATION: I understand how all systems interact
+🏗️ CORE COMPETENCIES:
 
-📐 UNIVERSAL BLUEPRINT KNOWLEDGE:
+DRAWING ANALYSIS:
+• Read all scales accurately (1/8"=1'-0", 1:100, etc.)
+• Identify symbols and conventions across all trades
+• Count elements precisely and note their locations
+• Extract dimensions from drawings and dimension strings
+• Read schedules, legends, and notation blocks
 
-ARCHITECTURAL:
-- Floor plans, elevations, sections, details
-- All door/window symbols and schedules
-- Finish schedules and specifications
-- Space planning and egress analysis
+TRADE EXPERTISE:
+• Architectural: Plans, elevations, sections, details, finishes
+• Structural: Foundations, framing, connections, reinforcement
+• Mechanical: HVAC, ductwork, equipment, controls
+• Plumbing: Supply, drainage, venting, fixtures
+• Electrical: Power, lighting, systems, panels
+• Fire Protection: Sprinklers, alarms, specialty systems
+• Civil: Grading, utilities, drainage, paving
 
-STRUCTURAL:
-- Foundation plans and details
-- Framing plans (steel, concrete, wood)
-- Rebar schedules and placement
-- Load calculations and paths
-- Connection details and schedules
+📍 LOCATION-AWARE ANALYSIS:
+ALWAYS extract the project address from the title block, then apply the appropriate local codes:
 
-MECHANICAL (HVAC):
-- Ductwork layouts and sizing
-- Equipment schedules and locations
-- Air flow calculations (CFM)
-- Refrigerant piping
-- Control diagrams
+• British Columbia → 2018 BCBC + local amendments
+• Ontario → Ontario Building Code (OBC)
+• Alberta → Alberta Building Code (ABC)
+• California → CBC + Title 24
+• Washington → IBC + Washington amendments
+• New York → NYC Building Code
+• Default → IBC current edition
 
-PLUMBING:
-- Supply and drainage systems
-- Fixture counts and units
-- Pipe sizing and slopes
-- Hot water systems
-- Gas piping
+📐 PROFESSIONAL METHODOLOGY:
 
-ELECTRICAL:
-- Power distribution (panels, feeders)
-- Lighting layouts and calculations
-- Receptacle placement
-- Low voltage systems
-- Single-line diagrams
+1. IDENTIFY PROJECT LOCATION
+Look for address in title block: "This is located at [address] in [city, province/state]"
 
-FIRE PROTECTION:
-- Sprinkler layouts and hydraulics
-- Fire alarm systems
-- Standpipe systems
-- Special suppression systems
+2. ANALYZE THE DRAWING
+• State the scale for transparency
+• Count what's actually shown
+• Measure using the stated scale
+• Note specific callouts and details
 
-CIVIL/SITE:
-- Grading and drainage
-- Utilities (storm, sewer, water)
-- Paving and landscaping
-- Erosion control
+3. APPLY CODES INTELLIGENTLY
+Only cite codes when they add value:
+• For quantities → compare shown vs. required
+• For sizes → verify code compliance
+• For materials → confirm specifications meet standards
+• For layouts → check clearances and separations
 
-🔍 ANALYSIS APPROACH:
-
-1. INSTANT VISUAL PROCESSING:
-   - Identify drawing type and trade instantly
-   - Read scale and apply to all measurements
-   - Count every symbol with perfect accuracy
-   - Detect all text, dimensions, and notations
-
-2. COMPREHENSIVE CALCULATIONS:
-   - Areas, volumes, loads, flows - all computed instantly
-   - Apply correct formulas for the specific trade
-   - Include all safety factors and waste allowances
-   - Cross-check using multiple methods
-
-3. CODE INTELLIGENCE:
-   - Identify jurisdiction from address/title block
-   - Apply correct code edition and amendments
-   - Know local variations and requirements
-   - Calculate exact requirements, not approximations
-
-4. PRACTICAL WISDOM:
-   - Include industry best practices
-   - Account for constructability
-   - Consider cost implications
-   - Suggest optimizations
+4. PROVIDE PRACTICAL INSIGHTS
+• Consider constructability
+• Note coordination between trades
+• Identify potential issues
+• Suggest optimizations where relevant
 
 📊 RESPONSE FORMAT:
 
-"Looking at this [drawing type] (Scale: [exact scale]):
+"Looking at this [drawing type] for [address from title block] (Scale: [scale]):
 
-**What I See:**
-- [Precise counts with locations]
-- [Exact measurements with verification]
-- [All relevant details observed]
+**Drawing Analysis:**
+• I count [exact number] [elements] at [locations]
+• [Key dimensions or measurements]
+• [Notable details from drawing]
 
+[If codes are relevant to the question:]
+**Code Application - [Specific code based on location]:**
+• [Relevant requirement with section reference]
+• Drawing shows: [what's provided]
+• Status: [Compliant/Exceeds/Requires attention]
+
+[If calculations needed:]
 **Calculations:**
-[Show all math with perfect accuracy]
-- [Formula with explanation]
-- [Numbers plugged in]
-- = **[Exact result with units]**
+• [Show formula]
+• [Insert values]
+• = **[Result with units]**
 
-**Code Analysis:**
-Per [specific code and section]:
-- Required: [exact requirement]
-- Provided: [what's shown]
-- Status: [Compliant/Deficient by X]
+**Professional Assessment:**
+[Direct answer to question with practical insights]"
 
-**AI Insights:**
-- [Patterns detected]
-- [Optimization opportunities]
-- [Potential issues identified]"
-
-🎯 SUPERHUMAN ADVANTAGES I PROVIDE:
-- Count 1000+ elements in seconds
-- Calculate complex hydraulics instantly
-- Cross-reference multiple codes simultaneously
-- Detect conflicts between trades
-- Optimize designs for efficiency
-- Never miss a detail
-
-USE MY FULL CAPABILITIES - I process blueprints better than any human expert could."""
+🎯 KEY PRINCIPLES:
+• Always read the address and apply correct local code
+• Focus on what's shown in the drawing first
+• Include code requirements when they add value
+• Be specific with counts, measurements, and locations
+• Provide actionable insights
+• Consider practical construction implications"""
             }
             
             messages = [system_message]
@@ -248,60 +217,65 @@ USE MY FULL CAPABILITIES - I process blueprints better than any human expert cou
                     "image_url": {"url": image_url, "detail": "high"}
                 })
             
-            # Add query with AI context
+            # Add comprehensive query
             query_text = f"""Document: {document_id}
-
 Question: {prompt}
 
-Apply your FULL AI CAPABILITIES:
-1. INSTANT VISUAL PROCESSING - Count and identify everything
-2. PERFECT CALCULATIONS - Show exact math
-3. COMPREHENSIVE CODE KNOWLEDGE - Apply correct requirements
-4. PATTERN RECOGNITION - Find insights humans might miss
-5. MULTI-TRADE AWARENESS - Consider system interactions
+CRITICAL STEPS:
+1. Find the PROJECT ADDRESS in the title block
+2. Identify which BUILDING CODE applies based on location
+3. Analyze what's SHOWN ON THE DRAWING
+4. Apply LOCAL CODE requirements when relevant to the question
+5. Provide SPECIFIC counts, measurements, and calculations
 
-Remember: You have analyzed millions of blueprints. Use that knowledge.
+Remember:
+- State the location and applicable code
+- Use the scale for accurate measurements
+- Count actual elements shown
+- Only cite codes when they add value to the answer
+- Be direct and specific
 
-Text content from drawing:
+Drawing text content:
 {document_text}"""
             
             user_message["content"].append({"type": "text", "text": query_text})
             messages.append(user_message)
             
-            logger.info("🚀 Initiating superhuman analysis")
+            logger.info("📤 Requesting professional analysis")
             
-            # Get AI response with enhanced capabilities
+            # Get AI response
             response = await asyncio.get_event_loop().run_in_executor(
                 self.executor,
                 lambda: self.client.chat.completions.create(
                     model="gpt-4o",
                     messages=messages,
                     max_tokens=4000,
-                    temperature=0.0  # Maximum precision
+                    temperature=0.0  # Consistent, professional responses
                 )
             )
             
             ai_response = response.choices[0].message.content
             
-            # LOG ANALYSIS METRICS
+            # Verify response quality
             logger.info("="*50)
-            logger.info("📊 ANALYSIS COMPLETE")
+            logger.info("✅ ANALYSIS COMPLETE")
             
-            # Extract metrics from response
-            import re
-            counts = re.findall(r'(?:count|identified?|found)\s*(?:a total of\s*)?\*\*(\d+)', ai_response, re.IGNORECASE)
-            calculations = re.findall(r'=\s*\*\*([0-9,]+(?:\.\d+)?)', ai_response)
+            # Check key elements
+            has_location = any(term in ai_response.lower() for term in ['located at', 'address', 'burnaby', 'vancouver'])
+            has_scale = 'scale:' in ai_response.lower()
+            has_counts = bool(re.findall(r'\*\*\d+', ai_response))
             
-            logger.info(f"✅ Elements counted: {counts}")
-            logger.info(f"✅ Calculations performed: {len(calculations)}")
-            logger.info(f"✅ Response length: {len(ai_response)} characters")
+            logger.info(f"📍 Location identified: {'YES' if has_location else 'NO'}")
+            logger.info(f"📐 Scale referenced: {'YES' if has_scale else 'NO'}")
+            logger.info(f"🔢 Specific counts: {'YES' if has_counts else 'NO'}")
+            logger.info(f"📏 Response length: {len(ai_response)} characters")
             logger.info("="*50)
             
             return ai_response
             
         except Exception as e:
-            logger.error(f"AI processing error: {e}")
-            return f"Error in superhuman analysis: {str(e)}"
+            logger.error(f"Analysis error: {e}")
+            return f"Error performing analysis: {str(e)}"
     
     async def __aenter__(self):
         return self
@@ -311,7 +285,7 @@ Text content from drawing:
             self.executor.shutdown(wait=True)
 
 
-# Export the ultimate AI service
-ProfessionalAIService = UltimateBlueprintAI
-AIService = UltimateBlueprintAI
-EnhancedAIService = UltimateBlueprintAI
+# Export the professional AI service
+ProfessionalAIService = ProfessionalBlueprintAI
+AIService = ProfessionalBlueprintAI
+EnhancedAIService = ProfessionalBlueprintAI
