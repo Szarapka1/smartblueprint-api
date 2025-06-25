@@ -68,7 +68,9 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 try:
     settings = get_settings()
     logger.info("✅ Settings loaded successfully")
-    logger.info(f"🔧 Environment: {settings.ENVIRONMENT}")
+    # Get environment safely with fallback
+    environment = getattr(settings, 'ENVIRONMENT', os.getenv('ENVIRONMENT', 'production'))
+    logger.info(f"🔧 Environment: {environment}")
 except Exception as e:
     logger.error(f"❌ Settings failed to load: {e}")
     settings = None
@@ -84,8 +86,13 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 SMART BLUEPRINT API - PROFESSIONAL EDITION")
     logger.info("="*60)
     logger.info(f"📅 Starting at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"🔧 Environment: {settings.ENVIRONMENT}")
-    logger.info(f"🐍 Debug Mode: {'ON' if settings.DEBUG else 'OFF'}")
+    
+    # Get environment safely
+    environment = getattr(settings, 'ENVIRONMENT', os.getenv('ENVIRONMENT', 'production'))
+    debug_mode = getattr(settings, 'DEBUG', False)
+    
+    logger.info(f"🔧 Environment: {environment}")
+    logger.info(f"🐍 Debug Mode: {'ON' if debug_mode else 'OFF'}")
     
     # Initialize service states
     app.state.storage_service = None
@@ -93,9 +100,11 @@ async def lifespan(app: FastAPI):
     app.state.pdf_service = None
     app.state.session_service = None
     app.state.settings = settings
+    app.state.environment = environment
     
     # --- 1. Initialize Storage Service (Required) ---
-    if StorageService and settings.AZURE_STORAGE_CONNECTION_STRING:
+    azure_storage_conn = getattr(settings, 'AZURE_STORAGE_CONNECTION_STRING', None)
+    if StorageService and azure_storage_conn:
         try:
             logger.info("📦 Initializing Storage Service...")
             storage_service = StorageService(settings)
@@ -118,7 +127,8 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING is required")
 
     # --- 2. Initialize AI Service (Required) ---
-    if ProfessionalBlueprintAI and settings.OPENAI_API_KEY:
+    openai_key = getattr(settings, 'OPENAI_API_KEY', None)
+    if ProfessionalBlueprintAI and openai_key:
         try:
             logger.info("🤖 Initializing Professional AI Service...")
             ai_service = ProfessionalBlueprintAI(settings)
@@ -183,6 +193,9 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️  Session Service disabled")
 
     # --- Startup Summary ---
+    host = getattr(settings, 'HOST', '0.0.0.0')
+    port = getattr(settings, 'PORT', 8000)
+    
     logger.info("="*60)
     logger.info("🎯 STARTUP COMPLETE - SYSTEM STATUS")
     logger.info("="*60)
@@ -192,7 +205,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"{'✅' if app.state.session_service else '⚠️ '} Session Service: {'ACTIVE' if app.state.session_service else 'DISABLED'}")
     logger.info("="*60)
     logger.info("🌐 API Ready for Blueprint Analysis")
-    logger.info(f"📍 Access docs at: http://{settings.HOST}:{settings.PORT}/docs")
+    logger.info(f"📍 Access docs at: http://{host}:{port}/docs")
     logger.info("="*60)
 
     yield
@@ -267,15 +280,19 @@ cors_origins = [
 
 # Add any additional origins from settings
 if hasattr(settings, 'CORS_ORIGINS'):
-    if isinstance(settings.CORS_ORIGINS, str):
-        cors_origins.extend([origin.strip() for origin in settings.CORS_ORIGINS.split(',') if origin.strip()])
-    elif isinstance(settings.CORS_ORIGINS, list):
-        cors_origins.extend(settings.CORS_ORIGINS)
+    cors_value = getattr(settings, 'CORS_ORIGINS', '')
+    if isinstance(cors_value, str) and cors_value:
+        cors_origins.extend([origin.strip() for origin in cors_value.split(',') if origin.strip()])
+    elif isinstance(cors_value, list):
+        cors_origins.extend(cors_value)
+
+# Always allow all origins in production for now
+cors_origins.append("*")
 
 # Deduplicate origins
 cors_origins = list(set(cors_origins))
 
-logger.info(f"🌐 CORS enabled for {len(cors_origins)} origins")
+logger.info(f"🌐 CORS enabled for origins: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -295,7 +312,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.debug(f"Traceback: {traceback.format_exc()}")
     
     # Provide detailed error in debug mode only
-    error_detail = str(exc) if settings.DEBUG else "An internal server error occurred"
+    debug_mode = getattr(settings, 'DEBUG', False)
+    error_detail = str(exc) if debug_mode else "An internal server error occurred"
     
     return JSONResponse(
         status_code=500,
@@ -425,11 +443,14 @@ async def health_check(request: Request):
         if service.get('status') != 'disabled'
     )
     
+    # Get environment safely
+    environment = getattr(app_state, 'environment', 'production')
+    
     return {
         "status": "healthy" if all_healthy else "degraded",
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "version": "2.2.0",
-        "environment": settings.ENVIRONMENT,
+        "environment": environment,
         "services": services_status,
         "uptime_seconds": int((datetime.datetime.now() - app.state.get('start_time', datetime.datetime.now())).total_seconds())
     }
@@ -439,10 +460,14 @@ async def system_status(request: Request):
     """Detailed system status and capabilities"""
     app_state = request.app.state
     
+    # Get environment and debug mode safely
+    environment = getattr(app_state, 'environment', 'production')
+    debug_mode = getattr(settings, 'DEBUG', False) if settings else False
+    
     system_info = {
         "api_version": "2.2.0",
-        "environment": settings.ENVIRONMENT,
-        "debug_mode": settings.DEBUG,
+        "environment": environment,
+        "debug_mode": debug_mode,
         "timestamp": datetime.datetime.utcnow().isoformat()
     }
     
@@ -488,9 +513,10 @@ app.state.start_time = datetime.datetime.now()
 
 # --- Development Server ---
 if __name__ == "__main__":
-    host = settings.HOST
-    port = settings.PORT
-    reload = settings.DEBUG
+    # Get host and port safely with defaults
+    host = getattr(settings, 'HOST', '0.0.0.0') if settings else '0.0.0.0'
+    port = getattr(settings, 'PORT', 8000) if settings else 8000
+    reload = getattr(settings, 'DEBUG', False) if settings else False
     
     logger.info("="*60)
     logger.info(f"🚀 Starting development server at http://{host}:{port}")
