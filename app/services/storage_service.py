@@ -2,10 +2,11 @@
 
 import logging
 import asyncio
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, AsyncGenerator
 from app.core.config import AppSettings
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.storage.blob import BlobPrefix
 
 logger = logging.getLogger(__name__)
 
@@ -156,25 +157,151 @@ class StorageService:
                     continue
             raise ValueError(f"Could not decode blob '{blob_name}' with any supported encoding")
 
-    async def list_blobs(self, container_name: str, prefix: str = "") -> List[str]:
-        """List blob names in a container with optional prefix filter"""
+    async def list_blobs(self, container_name: str, prefix: str = "", suffix: str = "") -> List[str]:
+        """
+        List blob names in a container with optional prefix and suffix filters.
+        Optimized for performance with server-side filtering.
+        """
         try:
             container_client = (self.cache_container_client 
                               if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
                               else self.main_container_client)
             
             blob_names = []
+            
+            # Use prefix for server-side filtering (very efficient)
             list_kwargs = {"name_starts_with": prefix} if prefix else {}
             
+            # List blobs with prefix filter
             async for blob in container_client.list_blobs(**list_kwargs):
+                # Apply suffix filter client-side if needed
+                if suffix and not blob.name.endswith(suffix):
+                    continue
                 blob_names.append(blob.name)
             
-            logger.debug(f"✅ Listed {len(blob_names)} blobs from '{container_name}'")
+            logger.debug(f"✅ Listed {len(blob_names)} blobs from '{container_name}' "
+                        f"(prefix='{prefix}', suffix='{suffix}')")
             return blob_names
             
         except Exception as e:
             logger.error(f"❌ Failed to list blobs: {e}")
             raise RuntimeError(f"Blob listing failed: {e}")
+
+    async def list_blobs_generator(self, container_name: str, prefix: str = "", 
+                                  suffix: str = "", batch_size: int = 100) -> AsyncGenerator[List[str], None]:
+        """
+        List blobs as an async generator for memory-efficient processing of large containers.
+        Yields batches of blob names.
+        """
+        try:
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
+            
+            list_kwargs = {"name_starts_with": prefix} if prefix else {}
+            batch = []
+            count = 0
+            
+            async for blob in container_client.list_blobs(**list_kwargs):
+                # Apply suffix filter if needed
+                if suffix and not blob.name.endswith(suffix):
+                    continue
+                    
+                batch.append(blob.name)
+                count += 1
+                
+                # Yield batch when it reaches the size limit
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+            
+            # Yield remaining items
+            if batch:
+                yield batch
+                
+            logger.debug(f"✅ Streamed {count} blobs from '{container_name}' "
+                        f"(prefix='{prefix}', suffix='{suffix}')")
+                        
+        except Exception as e:
+            logger.error(f"❌ Failed to stream blobs: {e}")
+            raise RuntimeError(f"Blob streaming failed: {e}")
+
+    async def list_document_ids(self, container_name: str) -> List[str]:
+        """
+        Efficiently list all document IDs by finding _context.txt files.
+        Optimized specifically for the document listing use case.
+        """
+        try:
+            # Use suffix filter to only get context files
+            context_files = await self.list_blobs(
+                container_name=container_name,
+                suffix="_context.txt"
+            )
+            
+            # Extract document IDs from filenames
+            document_ids = []
+            for filename in context_files:
+                # Remove _context.txt to get document ID
+                if filename.endswith("_context.txt"):
+                    doc_id = filename[:-12]  # Remove "_context.txt" (12 chars)
+                    document_ids.append(doc_id)
+            
+            logger.info(f"✅ Found {len(document_ids)} documents in '{container_name}'")
+            return document_ids
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list document IDs: {e}")
+            raise RuntimeError(f"Document listing failed: {e}")
+
+    async def list_blobs_by_page(self, container_name: str, prefix: str = "", 
+                                suffix: str = "", page_size: int = 100, 
+                                continuation_token: str = None) -> Dict[str, Any]:
+        """
+        List blobs with pagination support for very large containers.
+        Returns results and a continuation token for the next page.
+        """
+        try:
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
+            
+            blob_names = []
+            
+            # Configure pagination
+            list_kwargs = {
+                "results_per_page": page_size,
+                "name_starts_with": prefix if prefix else None
+            }
+            
+            # List one page of blobs
+            page_iter = container_client.list_blobs(**list_kwargs).by_page(
+                continuation_token=continuation_token
+            )
+            
+            # Get the first (and only) page
+            async for page in page_iter:
+                async for blob in page:
+                    # Apply suffix filter if needed
+                    if suffix and not blob.name.endswith(suffix):
+                        continue
+                    blob_names.append(blob.name)
+                
+                # Get continuation token for next page
+                next_token = page_iter.continuation_token
+                break  # Only process one page
+            else:
+                next_token = None
+            
+            return {
+                "blobs": blob_names,
+                "continuation_token": next_token,
+                "has_more": next_token is not None,
+                "page_size": len(blob_names)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list blobs by page: {e}")
+            raise RuntimeError(f"Paged blob listing failed: {e}")
 
     async def blob_exists(self, container_name: str, blob_name: str) -> bool:
         """Check if a blob exists - optimized version"""
@@ -314,8 +441,11 @@ class StorageService:
             logger.error(f"❌ Failed to copy blob: {e}")
             return False
 
-    async def get_container_stats(self, container_name: str) -> Dict[str, Any]:
-        """Get statistics about a container - optimized version"""
+    async def get_container_stats(self, container_name: str, 
+                                 max_files_to_scan: int = 1000) -> Dict[str, Any]:
+        """
+        Get statistics about a container - optimized version with sampling for large containers
+        """
         try:
             container_client = (self.cache_container_client 
                               if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
@@ -324,24 +454,40 @@ class StorageService:
             total_size = 0
             file_types = {}
             blob_count = 0
+            scanned_count = 0
             
-            # Use async iteration for efficiency
+            # Use async iteration for efficiency with a limit
             async for blob in container_client.list_blobs():
                 blob_count += 1
-                total_size += blob.size
                 
-                # Count file types
-                if "." in blob.name:
-                    ext = blob.name.split(".")[-1].lower()
-                    file_types[ext] = file_types.get(ext, 0) + 1
-                else:
-                    file_types["no_extension"] = file_types.get("no_extension", 0) + 1
+                # Only scan details for first N files to avoid timeout
+                if scanned_count < max_files_to_scan:
+                    scanned_count += 1
+                    total_size += blob.size
+                    
+                    # Count file types
+                    if "." in blob.name:
+                        ext = blob.name.split(".")[-1].lower()
+                        file_types[ext] = file_types.get(ext, 0) + 1
+                    else:
+                        file_types["no_extension"] = file_types.get("no_extension", 0) + 1
+            
+            # Estimate total size if we didn't scan all files
+            if blob_count > scanned_count:
+                avg_size = total_size / scanned_count
+                estimated_total_size = avg_size * blob_count
+                is_estimated = True
+            else:
+                estimated_total_size = total_size
+                is_estimated = False
             
             return {
                 "container_name": container_name,
                 "total_blobs": blob_count,
-                "total_size_bytes": total_size,
-                "total_size_mb": round(total_size / (1024 * 1024), 2),
+                "scanned_blobs": scanned_count,
+                "total_size_bytes": int(estimated_total_size),
+                "total_size_mb": round(estimated_total_size / (1024 * 1024), 2),
+                "is_size_estimated": is_estimated,
                 "file_types": file_types,
                 "success": True
             }
@@ -353,6 +499,62 @@ class StorageService:
                 "error": str(e),
                 "success": False
             }
+
+    async def delete_document_files(self, document_id: str) -> Dict[str, int]:
+        """
+        Delete all files associated with a document ID.
+        Returns count of deleted files by type.
+        """
+        try:
+            deleted_counts = {
+                "pdfs": 0,
+                "pages": 0,
+                "metadata": 0,
+                "annotations": 0,
+                "chats": 0,
+                "total": 0
+            }
+            
+            # Delete from main container (original PDF)
+            try:
+                await self.delete_blob(self.settings.AZURE_CONTAINER_NAME, f"{document_id}.pdf")
+                deleted_counts["pdfs"] = 1
+            except:
+                pass
+            
+            # List all files for this document in cache container
+            cache_files = await self.list_blobs(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                prefix=f"{document_id}_"
+            )
+            
+            # Delete all cache files
+            for filename in cache_files:
+                try:
+                    await self.delete_blob(self.settings.AZURE_CACHE_CONTAINER_NAME, filename)
+                    deleted_counts["total"] += 1
+                    
+                    # Categorize deleted files
+                    if "_page_" in filename:
+                        deleted_counts["pages"] += 1
+                    elif filename.endswith(("_metadata.json", "_context.txt", "_document_index.json")):
+                        deleted_counts["metadata"] += 1
+                    elif "_annotations.json" in filename:
+                        deleted_counts["annotations"] += 1
+                    elif "_chat" in filename or "_all_chats.json" in filename:
+                        deleted_counts["chats"] += 1
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to delete {filename}: {e}")
+            
+            deleted_counts["total"] += deleted_counts["pdfs"]
+            
+            logger.info(f"✅ Deleted {deleted_counts['total']} files for document '{document_id}'")
+            return deleted_counts
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to delete document files: {e}")
+            raise RuntimeError(f"Document deletion failed: {e}")
 
     def get_connection_info(self) -> Dict[str, Any]:
         """Get information about the storage connection (safe for logging)"""
@@ -366,7 +568,9 @@ class StorageService:
                 "chunk_size": "4MB streaming, 32MB single",
                 "parallel_downloads": "Supported",
                 "parallel_uploads": "Supported",
-                "pre_created_clients": True
+                "pre_created_clients": True,
+                "server_side_filtering": True,
+                "pagination_support": True
             },
             "has_connection_string": bool(self.settings.AZURE_STORAGE_CONNECTION_STRING),
             "connection_string_length": len(self.settings.AZURE_STORAGE_CONNECTION_STRING) if self.settings.AZURE_STORAGE_CONNECTION_STRING else 0
