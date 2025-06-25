@@ -446,13 +446,17 @@ async def health_check(request: Request):
     # Get environment safely
     environment = getattr(app_state, 'environment', 'production')
     
+    # Calculate uptime
+    start_time = getattr(app.state, 'start_time', datetime.datetime.now())
+    uptime_seconds = int((datetime.datetime.now() - start_time).total_seconds())
+    
     return {
         "status": "healthy" if all_healthy else "degraded",
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "version": "2.2.0",
         "environment": environment,
         "services": services_status,
-        "uptime_seconds": int((datetime.datetime.now() - app.state.get('start_time', datetime.datetime.now())).total_seconds())
+        "uptime_seconds": uptime_seconds
     }
 
 @app.get("/api/v1/system/status", tags=["General"])
