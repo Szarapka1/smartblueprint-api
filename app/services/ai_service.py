@@ -1,5 +1,6 @@
 # app/services/ai_service.py - OPTIMIZED FOR LARGE MULTI-PAGE DOCUMENTS
 
+import os
 import asyncio
 import base64
 import json
