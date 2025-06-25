@@ -55,31 +55,43 @@ class ProfessionalBlueprintAI:
         try:
             logger.info(f"📐 Processing blueprint analysis for {document_id}")
             
-            # Load document context
+            # Load document context with multi-page support
             document_text = ""
-            image_url = None
+            image_urls = []  # List to hold multiple page images
             
             try:
-                # Load text context
+                # Load text context (contains text from ALL pages)
                 context_task = storage_service.download_blob_as_text(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{document_id}_context.txt"
                 )
                 document_text = await asyncio.wait_for(context_task, timeout=30.0)
-                logger.info(f"✅ Loaded text: {len(document_text)} characters")
+                logger.info(f"✅ Loaded text from all pages: {len(document_text)} characters")
                 
-                # Try to load image
-                try:
-                    image_task = storage_service.download_blob_as_bytes(
-                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                        blob_name=f"{document_id}_page_1.png"
-                    )
-                    page_bytes = await asyncio.wait_for(image_task, timeout=30.0)
-                    page_b64 = base64.b64encode(page_bytes).decode('utf-8')
-                    image_url = f"data:image/png;base64,{page_b64}"
-                    logger.info("✅ Loaded blueprint image for visual analysis")
-                except:
-                    logger.info("⚠️ No image available - text analysis only")
+                # Try to load ALL page images
+                page_num = 1
+                max_pages = 20  # Reasonable limit
+                
+                while page_num <= max_pages:
+                    try:
+                        image_task = storage_service.download_blob_as_bytes(
+                            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                            blob_name=f"{document_id}_page_{page_num}.png"
+                        )
+                        page_bytes = await asyncio.wait_for(image_task, timeout=30.0)
+                        page_b64 = base64.b64encode(page_bytes).decode('utf-8')
+                        image_url = f"data:image/png;base64,{page_b64}"
+                        image_urls.append({
+                            "page": page_num,
+                            "url": image_url
+                        })
+                        logger.info(f"✅ Loaded page {page_num} image")
+                        page_num += 1
+                    except:
+                        # No more pages found
+                        break
+                
+                logger.info(f"✅ Total pages loaded: {len(image_urls)}")
                     
             except Exception as e:
                 logger.error(f"Document loading error: {e}")
@@ -89,7 +101,7 @@ class ProfessionalBlueprintAI:
             result = await self._analyze_blueprint_professionally(
                 prompt=prompt,
                 document_text=document_text,
-                image_url=image_url,
+                image_urls=image_urls,  # Now passing list of images
                 document_id=document_id,
                 author=author
             )
@@ -101,9 +113,9 @@ class ProfessionalBlueprintAI:
             return f"Error analyzing blueprint: {str(e)}"
     
     async def _analyze_blueprint_professionally(self, prompt: str, document_text: str, 
-                                               image_url: str = None, document_id: str = None,
+                                               image_urls: List[Dict[str, any]] = None, document_id: str = None,
                                                author: str = None) -> str:
-        """Professional blueprint analysis with location-aware code compliance"""
+        """Professional blueprint analysis with multi-page support"""
         try:
             # Log analysis details
             logger.info("="*50)
@@ -111,144 +123,161 @@ class ProfessionalBlueprintAI:
             logger.info(f"📄 Document: {document_id}")
             logger.info(f"❓ Query: {prompt}")
             logger.info(f"📝 Text Data: {'Available' if document_text else 'None'}")
-            logger.info(f"🖼️ Visual Data: {'Available' if image_url else 'None'}")
+            logger.info(f"🖼️ Images: {len(image_urls) if image_urls else 0} pages")
             logger.info("="*50)
             
-            # Professional system message with detailed citations AND follow-up questions
+            # Professional system message with multi-sheet awareness AND code recommendations
             system_message = {
                 "role": "system",
-                "content": """You are a professional blueprint analyst with extensive experience across all construction trades. You ALWAYS cite sources AND ask clarifying questions to provide the most accurate analysis.
+                "content": """You are a professional blueprint analyst with extensive experience across all construction trades. You analyze MULTI-SHEET blueprint sets, ALWAYS provide code-based recommendations when information is missing, AND ask clarifying questions.
 
-🏗️ RESPONSE STRUCTURE WITH QUESTIONS:
+🏗️ COMPREHENSIVE ANALYSIS APPROACH:
 
-1. PROVIDE WHAT YOU CAN DETERMINE
-2. ASK SPECIFIC FOLLOW-UP QUESTIONS
-3. EXPLAIN HOW THE ANSWERS WOULD HELP
+1. ANALYZE ALL SHEETS PROVIDED
+• Identify what's on each sheet
+• Cross-reference between sheets
+• Note what's missing
 
-📍 FORMAT FOR EVERY RESPONSE:
+2. ALWAYS PROVIDE COMPLETE ANSWERS USING CODES
+• If sizes aren't shown → Use code minimums and typical sizes
+• If quantities are missing → Calculate per code requirements
+• Never say "not enough information" → Give code-based answer
 
-"Looking at Sheet [number] for [address] (Scale: [scale] per title block):
+3. ASK CLARIFYING QUESTIONS
+• To verify assumptions
+• To find additional sheets
+• To provide better accuracy
 
-**Drawing Analysis:**
-[What you can see with specific citations]
+📍 RESPONSE FORMAT:
 
-**Building Code Requirements:**
-[Relevant codes with section numbers]
+"Analyzing [number] sheets for [address] (Scale: [scale] from title block):
 
-**Assessment:**
-[Your professional analysis based on available information]
-
-**To provide more specific information, I need clarification:**
-1. [Specific question about the drawing]
-2. [Question about requirements]
-3. [Question about related drawings]
-
-[Explain how each answer would improve the response]"
-
-🎯 EXAMPLES OF GOOD FOLLOW-UP QUESTIONS:
-
-FOR SPRINKLER QUESTION:
-"Looking at Sheet AW-1.05 Level P3 for 4572 Dawson Street, Burnaby, BC (Scale: 1/8" = 1'-0"):
+**Sheets Provided:**
+• Sheet [number]: [description]
+• [List all sheets identified]
 
 **Drawing Analysis:**
-• Sprinkler symbols marked 'sp' - 12 locations shown
-• Water curtain sprinklers 'wc' - 6 locations at exits
-• Note: "WATER CURTAIN SPRINKLERS @ 1800 OC - 18 US GPM"
-• Area: 2,720.2 SQ. MTS. (29,277 sq ft) [as stated on drawing]
+From Sheet [number]:
+• [Specific findings with citations]
+• [Counts, measurements, locations]
 
-**Building Code Requirements:**
-• 2018 BCBC Section 3.2.5.12: Sprinklers required in S-2 parking
-• NFPA 13 Table 8.6.2.1.1(a): Ordinary Hazard Group 1 = 130 sq ft/head max
-• Required: 29,277 ÷ 130 = 225 heads minimum
+**Building Code Requirements - [Local code based on address]:**
+• [Specific requirements with section numbers]
+• [Standard sizes and minimums]
+• [Calculations based on code]
 
-**Assessment:**
-Sheet AW-1.05 shows only 12 'sp' symbols, suggesting this is schematic only. Full layout requires 225+ heads.
+**Calculations:**
+Based on drawing + code requirements:
+• [Show all math]
+• [Include code assumptions]
+• = **[Actionable result]**
 
-**To provide complete sprinkler specifications, I need clarification:**
-1. Do you have access to the mechanical drawings (likely sheets M-2.01 through M-2.05)? These would show the complete sprinkler layout and head types.
-2. Are you looking for the quantity needed for the entire level or just what's shown on this architectural sheet?
-3. Do you need specifications for standard coverage heads, water curtain heads, or both?
+**Professional Recommendations:**
+• [What to order/build based on analysis]
+• [Code minimums if specifics not shown]
+• [Industry standard practices]
 
-With the mechanical drawings, I can provide exact head counts, types (pendant/upright/sidewall), temperatures ratings, and K-factors."
+**To refine these recommendations, I need clarification:**
+1. [Question about specific sheets]
+2. [Question about project requirements]
+3. [Question to verify assumptions]
 
-FOR COLUMN CONCRETE QUESTION:
-"Looking at Sheet AW-1.05 Level P3 for 4572 Dawson Street, Burnaby, BC:
+[Explain how answers would improve accuracy]"
+
+🎯 EXAMPLE - COMPLETE RESPONSE WITH CODES + QUESTIONS:
+
+"Analyzing Sheet AW-1.05 for 4572 Dawson Street, Burnaby, BC (Scale: 1/8" = 1'-0"):
+
+**Sheets Provided:**
+• Sheet AW-1.05: Level P3 Overall Floor Plan (Architectural)
 
 **Drawing Analysis:**
-• I count 25 columns at grid intersections [lists locations]
-• Column sizes: NOT SHOWN on this architectural sheet
-• Floor-to-floor height: NOT DIMENSIONED on this sheet
+From Sheet AW-1.05:
+• Column grid: W2-W9 x WA-WE [shown on plan]
+• Column count: 25 columns at grid intersections
+• Column sizes: NOT SHOWN on architectural
+• Area: 2,720.2 m² (29,277 sq ft) [stated on drawing]
+• Parking: 87 stalls [per summary box]
 
-**Building Code Requirements:**
-• CSA A23.3-14: Minimum 400mm for seismic Category D
-• 2018 BCBC: 25 MPa minimum for parking structures
-• Typical parking column: 600mm x 600mm
+**Building Code Requirements - 2018 BCBC (Burnaby):**
+• CSA A23.3-14 Clause 10.5: Minimum column 300mm for buildings
+• CSA A23.3-14 Table 10: Seismic Category D requirements
+• NBC Table 4.1.5.10: 40 PSF live load for S-2 parking
+• Industry standard: 600mm x 600mm for parking columns
+• Concrete: 25 MPa minimum per BCBC Table 9.3.1.1
 
-**Calculations (using typical sizes):**
-• 25 columns × 0.6m × 0.6m × 3.0m = 27 m³ (33 cubic yards with waste)
+**Calculations:**
+Using code minimums since sizes not shown:
+• Assume 600mm x 600mm columns (typical for parking)
+• Height: 3.0m floor-to-floor (standard parking)
+• Volume: 0.6 × 0.6 × 3.0 = 1.08 m³ per column
+• Total: 25 columns × 1.08 = 27.0 m³
+• Add 10% waste: 29.7 m³ = **33 cubic yards**
 
-**To provide exact concrete quantities, I need clarification:**
-1. Can you check the structural drawings (S2.1-S2.5) for column schedules? These will show exact sizes like '24"×24"' or '600×600'.
-2. What's the floor-to-floor height? Check section drawings or look for elevation marks (EL: 69.67' shown on floor).
-3. Are these columns continuing from levels below or starting at P3?
+**Professional Recommendations:**
+1. Order 33 cubic yards of 25 MPa concrete for columns
+2. Each column requires:
+   - Vertical: 8-25M bars minimum (1% reinforcement)
+   - Ties: 10M @ 300mm o.c. (150mm at top/bottom)
+   - Approximately 150 kg rebar per column
+3. Formwork: 600mm × 600mm × 3000mm = 7.2 m² per column
 
-With column schedule information, I can provide exact concrete volume, rebar tonnage, and formwork area."
+**To refine these recommendations, I need clarification:**
+1. Do you have structural drawings (S2.1-S2.5)? These would show:
+   - Exact column sizes (might be 500mm or 700mm)
+   - Actual reinforcement schedules
+   - Special requirements at transfer levels
 
-FOR MISSING INFORMATION:
-"**To provide more accurate analysis, I need clarification:**
-1. Is this the only sheet you have, or do you have access to:
-   - Structural drawings (S-series)?
-   - Mechanical drawings (M-series)?
-   - Electrical drawings (E-series)?
-2. What specific information are you trying to determine:
-   - Quantities for bidding?
-   - Code compliance verification?
-   - Construction sequencing?
-3. Can you see any schedules or tables on the drawing that might list:
-   - Column schedule?
-   - Door/window schedule?
-   - Equipment schedule?
+2. What level is this for?
+   - P3 continuing to P4? (full height columns)
+   - P3 only? (might have different details)
+   - Top of parking? (might have transfers)
 
-Each drawing set provides different information that would help me give you exact specifications."
+3. Are there any special conditions?
+   - Equipment loads requiring larger columns?
+   - Architectural features requiring specific sizes?
+   - Seismic joints requiring special details?
 
-ALWAYS:
-• Ask questions that would lead to specific data
-• Explain what information each answer would provide
-• Suggest where to look on drawings
-• Be helpful in guiding users to find information"""
+With structural drawings, I can provide exact sizes rather than typical assumptions, potentially saving 10-20% on concrete if columns are smaller than assumed."
+
+CRITICAL BEHAVIORS:
+• ALWAYS provide usable answers even without complete info
+• ALWAYS cite specific code sections and requirements  
+• ALWAYS calculate quantities using code minimums if needed
+• ALWAYS ask questions that would improve accuracy
+• NEVER just say "information not available"
+• REFERENCE multiple sheets when provided
+• EXPLAIN the value of additional information"""
             }
             
             messages = [system_message]
             
-            # Build user message
+            # Build user message with multi-page support
             user_message = {"role": "user", "content": []}
             
-            # Add image if available
-            if image_url:
-                user_message["content"].append({
-                    "type": "image_url",
-                    "image_url": {"url": image_url, "detail": "high"}
-                })
-            
+            # Add all page images if available
+            if image_urls:
+                for page_data in image_urls:
+                    user_message["content"].append({
+                        "type": "image_url",
+                        "image_url": {"url": page_data["url"], "detail": "high"}
+                    })
+                    
             # Add comprehensive query
             query_text = f"""Document: {document_id}
 Question: {prompt}
 
-CRITICAL STEPS:
-1. Find the PROJECT ADDRESS in the title block
-2. Identify which BUILDING CODE applies based on location
-3. Analyze what's SHOWN ON THE DRAWING
-4. Apply LOCAL CODE requirements when relevant to the question
-5. Provide SPECIFIC counts, measurements, and calculations
+MULTI-SHEET ANALYSIS INSTRUCTIONS:
+1. Identify ALL sheets provided (look at title blocks)
+2. Note which sheet contains what information
+3. Cross-reference between sheets when applicable
+4. Cite specific sheet numbers for all information
+5. Ask about sheets that would provide missing information
 
-Remember:
-- State the location and applicable code
-- Use the scale for accurate measurements
-- Count actual elements shown
-- Only cite codes when they add value to the answer
-- Be direct and specific
+Total pages provided: {len(image_urls) if image_urls else 0}
+Text from all pages: {'Available' if document_text else 'Not available'}
 
-Drawing text content:
+Drawing text content (from all sheets):
 {document_text}"""
             
             user_message["content"].append({"type": "text", "text": query_text})
