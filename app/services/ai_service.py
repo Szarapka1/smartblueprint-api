@@ -1,4 +1,4 @@
-# app/services/ai_service.py - OPTIMIZED FOR LARGE MULTI-PAGE DOCUMENTS
+# app/services/ai_service.py - WITH GRID-BASED HIGHLIGHTING
 
 import os
 import asyncio
@@ -30,10 +30,30 @@ except ImportError as e:
 # Internal imports
 from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
+from app.models.schemas import VisualElement, GridReference, DrawingGrid
+
+
+@dataclass
+class GridSystem:
+    """Represents a drawing's grid system"""
+    x_labels: List[str] = field(default_factory=list)
+    y_labels: List[str] = field(default_factory=list)
+    x_spacing: Dict[str, float] = field(default_factory=dict)
+    y_spacing: Dict[str, float] = field(default_factory=dict)
+    scale: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "x_labels": self.x_labels,
+            "y_labels": self.y_labels,
+            "x_spacing": self.x_spacing,
+            "y_spacing": self.y_spacing,
+            "scale": self.scale
+        }
 
 
 class ProfessionalBlueprintAI:
-    """Professional AI service optimized for large multi-page blueprint analysis"""
+    """Professional AI service with grid-based visual element highlighting"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -45,7 +65,7 @@ class ProfessionalBlueprintAI:
         
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ Professional Blueprint AI initialized")
+            logger.info("✅ Professional Blueprint AI initialized with highlighting support")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
@@ -59,15 +79,29 @@ class ProfessionalBlueprintAI:
         self.image_quality = int(os.getenv("AI_IMAGE_QUALITY", "85"))
         self.max_image_dimension = int(os.getenv("AI_MAX_IMAGE_DIMENSION", "2000"))
         
+        # Grid detection patterns
+        self.grid_patterns = {
+            'structural': r'([A-Z]\d+|W\d+|[A-Z]+\d*)',
+            'architectural': r'([A-Z]\.?\d+|\d+\.?\d*|[A-Z]-[A-Z])',
+            'coordinate': r'([A-Z]+)-([A-Z]+\d*|\d+)'
+        }
+        
         logger.info(f"   📄 Max pages: {self.max_pages_to_load}")
         logger.info(f"   📦 Batch size: {self.batch_size}")
         logger.info(f"   🖼️ Image quality: {self.image_quality}%")
+        logger.info(f"   🎯 Grid highlighting: Enabled")
     
     async def get_ai_response(self, prompt: str, document_id: str, 
-                              storage_service: StorageService, author: str = None) -> str:
-        """Process blueprint queries with optimized multi-page support"""
+                              storage_service: StorageService, 
+                              author: str = None,
+                              current_page: Optional[int] = None,
+                              request_highlights: bool = True) -> Dict[str, Any]:
+        """Process blueprint queries with optional grid-based highlighting"""
         try:
             logger.info(f"📐 Processing blueprint analysis for {document_id}")
+            logger.info(f"   📄 Current page: {current_page}")
+            logger.info(f"   🎯 Highlights requested: {request_highlights}")
+            
             analysis_start = asyncio.get_event_loop().time()
             
             # Load document context and metadata
@@ -75,7 +109,7 @@ class ProfessionalBlueprintAI:
             metadata = None
             
             try:
-                # Load text context (contains text from ALL pages)
+                # Load text context
                 context_task = storage_service.download_blob_as_text(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{document_id}_context.txt"
@@ -83,7 +117,7 @@ class ProfessionalBlueprintAI:
                 document_text = await asyncio.wait_for(context_task, timeout=30.0)
                 logger.info(f"✅ Loaded text from all pages: {len(document_text)} characters")
                 
-                # Try to load metadata for optimization
+                # Load metadata
                 try:
                     metadata_task = storage_service.download_blob_as_text(
                         container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
@@ -97,25 +131,37 @@ class ProfessionalBlueprintAI:
                     
             except Exception as e:
                 logger.error(f"Document loading error: {e}")
-                return "Unable to load the blueprint. Please ensure the document is properly uploaded and processed."
+                return {
+                    "ai_response": "Unable to load the blueprint. Please ensure the document is properly uploaded and processed.",
+                    "visual_highlights": None
+                }
             
-            # Load ALL page images efficiently
-            image_urls = await self._load_all_pages_optimized(
-                document_id, 
-                storage_service, 
-                metadata
-            )
+            # Determine if we need visual analysis
+            needs_visual_analysis = self._needs_visual_highlighting(prompt, current_page, request_highlights)
+            
+            if needs_visual_analysis and current_page:
+                # Load specific page for visual analysis
+                page_images = await self._load_specific_page(
+                    document_id, current_page, storage_service
+                )
+            else:
+                # Load all pages for comprehensive analysis
+                page_images = await self._load_all_pages_optimized(
+                    document_id, storage_service, metadata
+                )
             
             loading_time = asyncio.get_event_loop().time() - analysis_start
             logger.info(f"⏱️ Document loaded in {loading_time:.2f}s")
             
             # Process with professional analysis
-            result = await self._analyze_blueprint_professionally(
+            result = await self._analyze_blueprint_with_highlighting(
                 prompt=prompt,
                 document_text=document_text,
-                image_urls=image_urls,
+                image_urls=page_images,
                 document_id=document_id,
-                author=author
+                author=author,
+                current_page=current_page,
+                request_highlights=request_highlights and needs_visual_analysis
             )
             
             total_time = asyncio.get_event_loop().time() - analysis_start
@@ -125,7 +171,382 @@ class ProfessionalBlueprintAI:
             
         except Exception as e:
             logger.error(f"Response error: {e}")
-            return f"Error analyzing blueprint: {str(e)}"
+            return {
+                "ai_response": f"Error analyzing blueprint: {str(e)}",
+                "visual_highlights": None
+            }
+    
+    def _needs_visual_highlighting(self, prompt: str, current_page: Optional[int], 
+                                  request_highlights: bool) -> bool:
+        """Determine if the query needs visual highlighting"""
+        if not request_highlights or not current_page:
+            return False
+        
+        # Keywords that indicate visual search
+        visual_keywords = [
+            'show', 'highlight', 'where', 'locate', 'find', 'identify',
+            'point out', 'mark', 'indicate', 'display', 'circle'
+        ]
+        
+        # Element types that can be highlighted
+        element_keywords = [
+            'column', 'beam', 'outlet', 'window', 'door', 'sprinkler',
+            'duct', 'pipe', 'equipment', 'fixture', 'panel', 'valve',
+            'switch', 'light', 'vent', 'drain', 'wall', 'opening'
+        ]
+        
+        prompt_lower = prompt.lower()
+        
+        # Check if prompt contains visual request
+        has_visual_keyword = any(keyword in prompt_lower for keyword in visual_keywords)
+        has_element_keyword = any(keyword in prompt_lower for keyword in element_keywords)
+        
+        return has_visual_keyword or has_element_keyword
+    
+    async def _load_specific_page(self, document_id: str, page_num: int,
+                                 storage_service: StorageService) -> List[Dict[str, any]]:
+        """Load a specific page for visual analysis"""
+        try:
+            page_data = await self._load_single_page_optimized(
+                document_id, page_num, storage_service
+            )
+            
+            if page_data:
+                logger.info(f"✅ Loaded page {page_num} for visual analysis")
+                return [page_data]
+            else:
+                logger.warning(f"⚠️ Could not load page {page_num}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error loading page {page_num}: {e}")
+            return []
+    
+    async def _analyze_blueprint_with_highlighting(self, prompt: str, document_text: str, 
+                                                  image_urls: List[Dict[str, any]], 
+                                                  document_id: str,
+                                                  author: str,
+                                                  current_page: Optional[int],
+                                                  request_highlights: bool) -> Dict[str, Any]:
+        """Analyze blueprint with optional grid-based highlighting"""
+        try:
+            logger.info("="*50)
+            logger.info("📊 PROFESSIONAL BLUEPRINT ANALYSIS WITH HIGHLIGHTING")
+            logger.info(f"📄 Document: {document_id}")
+            logger.info(f"❓ Query: {prompt}")
+            logger.info(f"🎯 Current Page: {current_page}")
+            logger.info(f"✨ Highlights Requested: {request_highlights}")
+            logger.info("="*50)
+            
+            # Enhanced system message for grid-based highlighting
+            system_message = self._get_enhanced_system_message(request_highlights, current_page)
+            
+            messages = [system_message]
+            
+            # Build user message
+            user_message = {"role": "user", "content": []}
+            
+            # Add page images
+            if image_urls:
+                for page_data in image_urls:
+                    user_message["content"].append({
+                        "type": "image_url",
+                        "image_url": {"url": page_data["url"], "detail": "high"}
+                    })
+            
+            # Build comprehensive query
+            query_text = self._build_query_text(
+                prompt, document_id, document_text, 
+                current_page, request_highlights, len(image_urls)
+            )
+            
+            user_message["content"].append({"type": "text", "text": query_text})
+            messages.append(user_message)
+            
+            logger.info("📤 Requesting professional analysis with grid detection")
+            
+            # Get AI response
+            response = await self._get_ai_completion(messages)
+            
+            # Parse response for visual elements if requested
+            if request_highlights and current_page:
+                parsed_response = self._parse_response_with_highlights(response, current_page)
+            else:
+                parsed_response = {
+                    "ai_response": response,
+                    "visual_highlights": None,
+                    "drawing_grid": None,
+                    "highlight_summary": None,
+                    "current_page": current_page
+                }
+            
+            return parsed_response
+            
+        except Exception as e:
+            logger.error(f"Analysis error: {e}")
+            return {
+                "ai_response": f"Error performing analysis: {str(e)}",
+                "visual_highlights": None
+            }
+    
+    def _get_enhanced_system_message(self, request_highlights: bool, 
+                                    current_page: Optional[int]) -> Dict[str, str]:
+        """Get system message with grid highlighting instructions"""
+        
+        base_message = """You are a professional blueprint analyst with extensive experience across all construction trades. You analyze MULTI-SHEET blueprint sets, ALWAYS provide code-based recommendations when information is missing, AND ask clarifying questions."""
+        
+        highlighting_instructions = """
+
+🎯 VISUAL ELEMENT IDENTIFICATION AND GRID HIGHLIGHTING:
+
+When asked to show/highlight/identify specific elements on a drawing:
+
+1. IDENTIFY GRID SYSTEM
+• Look for grid lines with labels (e.g., A, B, C... or 1, 2, 3... or W1, W2...)
+• Note grid intersections (e.g., A-1, B-2, W2-WA)
+• Identify scale from title block
+
+2. LOCATE ELEMENTS USING GRID REFERENCES
+• For each requested element, provide its grid location
+• Use format: "Column at W2-WA" or "Outlet near grid B-3"
+• Be specific about grid intersections or areas
+
+3. PROVIDE STRUCTURED OUTPUT FOR HIGHLIGHTING
+When identifying elements for highlighting, include:
+```
+VISUAL_ELEMENTS:
+- Element: [type] at grid [reference]
+  Label: [identifier or description]
+  Size: [dimensions if shown]
+```
+
+4. GRID SYSTEM INFORMATION
+If grid system is visible, provide:
+```
+GRID_SYSTEM:
+X-axis: [list of horizontal grid labels]
+Y-axis: [list of vertical grid labels]
+Scale: [drawing scale]
+```
+
+Example for columns:
+```
+VISUAL_ELEMENTS:
+- Element: Column at grid W2-WA
+  Label: C-101
+  Size: 600x600mm
+- Element: Column at grid W3-WC
+  Label: C-102
+  Size: 600x600mm
+
+GRID_SYSTEM:
+X-axis: W1, W2, W3, W4, W5
+Y-axis: WA, WB, WC, WD, WE
+Scale: 1/8" = 1'-0"
+```"""
+        
+        comprehensive_instructions = """
+
+📍 COMPREHENSIVE ANALYSIS APPROACH:
+
+1. ANALYZE ALL SHEETS PROVIDED
+• Identify what's on each sheet
+• Cross-reference between sheets
+• Note what's missing
+
+2. ALWAYS PROVIDE COMPLETE ANSWERS USING CODES
+• If sizes aren't shown → Use code minimums and typical sizes
+• If quantities are missing → Calculate per code requirements
+• Never say "not enough information" → Give code-based answer
+
+3. ASK CLARIFYING QUESTIONS
+• To verify assumptions
+• To find additional sheets
+• To provide better accuracy"""
+        
+        if request_highlights and current_page:
+            return {
+                "role": "system",
+                "content": base_message + highlighting_instructions + comprehensive_instructions
+            }
+        else:
+            return {
+                "role": "system",
+                "content": base_message + comprehensive_instructions
+            }
+    
+    def _build_query_text(self, prompt: str, document_id: str, document_text: str,
+                         current_page: Optional[int], request_highlights: bool,
+                         image_count: int) -> str:
+        """Build the query text with appropriate context"""
+        
+        base_query = f"""Document: {document_id}
+Question: {prompt}"""
+        
+        if request_highlights and current_page:
+            highlight_context = f"""
+
+VISUAL HIGHLIGHTING REQUEST:
+- Current page: {current_page}
+- Identify and locate elements using grid references
+- Provide structured VISUAL_ELEMENTS and GRID_SYSTEM sections
+- Be specific about grid locations for each element"""
+        else:
+            highlight_context = """
+
+Note: If this query is about locating specific elements, please specify which page you're viewing for visual highlighting."""
+        
+        context = f"""{base_query}{highlight_context}
+
+Total pages provided: {image_count}
+Text from all pages: {'Available' if document_text else 'Not available'}
+
+Drawing text content (from all sheets):
+{document_text}"""
+        
+        return context
+    
+    async def _get_ai_completion(self, messages: List[Dict]) -> str:
+        """Get completion from OpenAI"""
+        max_retries = 2
+        retry_count = 0
+        
+        while retry_count <= max_retries:
+            try:
+                response = await asyncio.get_event_loop().run_in_executor(
+                    self.executor,
+                    lambda: self.client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=messages,
+                        max_tokens=4000,
+                        temperature=0.0
+                    )
+                )
+                
+                return response.choices[0].message.content
+                
+            except Exception as e:
+                retry_count += 1
+                if retry_count <= max_retries:
+                    logger.warning(f"Retry {retry_count}/{max_retries}: {e}")
+                else:
+                    raise
+    
+    def _parse_response_with_highlights(self, response: str, current_page: int) -> Dict[str, Any]:
+        """Parse AI response to extract visual elements and grid information"""
+        
+        # Extract visual elements section
+        visual_elements = []
+        grid_system = None
+        
+        # Look for VISUAL_ELEMENTS section
+        visual_match = re.search(r'VISUAL_ELEMENTS:(.*?)(?=GRID_SYSTEM:|$)', response, re.DOTALL)
+        if visual_match:
+            elements_text = visual_match.group(1)
+            visual_elements = self._parse_visual_elements(elements_text)
+        
+        # Look for GRID_SYSTEM section
+        grid_match = re.search(r'GRID_SYSTEM:(.*?)(?=\n\n|$)', response, re.DOTALL)
+        if grid_match:
+            grid_text = grid_match.group(1)
+            grid_system = self._parse_grid_system(grid_text)
+        
+        # Clean the response text (remove structured sections)
+        clean_response = response
+        if visual_match:
+            clean_response = clean_response.replace(visual_match.group(0), '')
+        if grid_match:
+            clean_response = clean_response.replace(grid_match.group(0), '')
+        
+        # Create highlight summary
+        highlight_summary = {}
+        if visual_elements:
+            for element in visual_elements:
+                elem_type = element.element_type
+                highlight_summary[elem_type] = highlight_summary.get(elem_type, 0) + 1
+        
+        return {
+            "ai_response": clean_response.strip(),
+            "visual_highlights": visual_elements if visual_elements else None,
+            "drawing_grid": grid_system,
+            "highlight_summary": highlight_summary if highlight_summary else None,
+            "current_page": current_page
+        }
+    
+    def _parse_visual_elements(self, elements_text: str) -> List[VisualElement]:
+        """Parse visual elements from structured text"""
+        elements = []
+        
+        # Pattern to match element entries
+        element_pattern = r'- Element: (.+?) at grid (.+?)(?:\n\s+Label: (.+?))?(?:\n\s+Size: (.+?))?'
+        
+        matches = re.finditer(element_pattern, elements_text)
+        
+        for i, match in enumerate(matches):
+            element_type = match.group(1).lower().replace(' ', '_')
+            grid_ref = match.group(2).strip()
+            label = match.group(3).strip() if match.group(3) else f"{element_type}_{i+1}"
+            size = match.group(4).strip() if match.group(4) else None
+            
+            # Parse grid reference
+            grid_parts = grid_ref.split('-')
+            if len(grid_parts) == 2:
+                x_grid, y_grid = grid_parts
+            else:
+                x_grid = grid_ref
+                y_grid = None
+            
+            element = VisualElement(
+                element_id=f"{element_type}_{i+1}",
+                element_type=element_type,
+                grid_location=GridReference(
+                    grid_ref=grid_ref,
+                    x_grid=x_grid,
+                    y_grid=y_grid
+                ),
+                label=label,
+                dimensions=size,
+                confidence=0.9
+            )
+            
+            elements.append(element)
+        
+        logger.info(f"📍 Parsed {len(elements)} visual elements")
+        return elements
+    
+    def _parse_grid_system(self, grid_text: str) -> DrawingGrid:
+        """Parse grid system information"""
+        x_labels = []
+        y_labels = []
+        scale = None
+        
+        # Parse X-axis
+        x_match = re.search(r'X-axis:\s*(.+)', grid_text)
+        if x_match:
+            x_labels = [label.strip() for label in x_match.group(1).split(',')]
+        
+        # Parse Y-axis
+        y_match = re.search(r'Y-axis:\s*(.+)', grid_text)
+        if y_match:
+            y_labels = [label.strip() for label in y_match.group(1).split(',')]
+        
+        # Parse scale
+        scale_match = re.search(r'Scale:\s*(.+)', grid_text)
+        if scale_match:
+            scale = scale_match.group(1).strip()
+        
+        if x_labels or y_labels:
+            grid = DrawingGrid(
+                x_labels=x_labels,
+                y_labels=y_labels,
+                scale=scale
+            )
+            logger.info(f"📐 Parsed grid system: {len(x_labels)}x{len(y_labels)}")
+            return grid
+        
+        return None
+    
+    # --- Keep all existing methods from original file ---
     
     async def _load_all_pages_optimized(self, document_id: str, 
                                        storage_service: StorageService,
@@ -293,249 +714,6 @@ class ProfessionalBlueprintAI:
             logger.error(f"Image compression failed: {e}")
             return image_bytes
     
-    async def _analyze_blueprint_professionally(self, prompt: str, document_text: str, 
-                                               image_urls: List[Dict[str, any]] = None, 
-                                               document_id: str = None,
-                                               author: str = None) -> str:
-        """Professional blueprint analysis with optimized multi-page support"""
-        try:
-            # Log analysis details
-            logger.info("="*50)
-            logger.info("📊 PROFESSIONAL BLUEPRINT ANALYSIS")
-            logger.info(f"📄 Document: {document_id}")
-            logger.info(f"❓ Query: {prompt}")
-            logger.info(f"📝 Text Data: {'Available' if document_text else 'None'}")
-            logger.info(f"🖼️ Images: {len(image_urls) if image_urls else 0} pages")
-            
-            # Calculate total image size
-            if image_urls:
-                total_size_mb = sum(img.get('size_kb', 0) for img in image_urls) / 1024
-                logger.info(f"💾 Total image size: {total_size_mb:.1f}MB")
-            
-            logger.info("="*50)
-            
-            # Professional system message (keeping your exact message)
-            system_message = {
-                "role": "system",
-                "content": """You are a professional blueprint analyst with extensive experience across all construction trades. You analyze MULTI-SHEET blueprint sets, ALWAYS provide code-based recommendations when information is missing, AND ask clarifying questions.
-
-🏗️ COMPREHENSIVE ANALYSIS APPROACH:
-
-1. ANALYZE ALL SHEETS PROVIDED
-• Identify what's on each sheet
-• Cross-reference between sheets
-• Note what's missing
-
-2. ALWAYS PROVIDE COMPLETE ANSWERS USING CODES
-• If sizes aren't shown → Use code minimums and typical sizes
-• If quantities are missing → Calculate per code requirements
-• Never say "not enough information" → Give code-based answer
-
-3. ASK CLARIFYING QUESTIONS
-• To verify assumptions
-• To find additional sheets
-• To provide better accuracy
-
-📍 RESPONSE FORMAT:
-
-"Analyzing [number] sheets for [address] (Scale: [scale] from title block):
-
-**Sheets Provided:**
-• Sheet [number]: [description]
-• [List all sheets identified]
-
-**Drawing Analysis:**
-From Sheet [number]:
-• [Specific findings with citations]
-• [Counts, measurements, locations]
-
-**Building Code Requirements - [Local code based on address]:**
-• [Specific requirements with section numbers]
-• [Standard sizes and minimums]
-• [Calculations based on code]
-
-**Calculations:**
-Based on drawing + code requirements:
-• [Show all math]
-• [Include code assumptions]
-• = **[Actionable result]**
-
-**Professional Recommendations:**
-• [What to order/build based on analysis]
-• [Code minimums if specifics not shown]
-• [Industry standard practices]
-
-**To refine these recommendations, I need clarification:**
-1. [Question about specific sheets]
-2. [Question about project requirements]
-3. [Question to verify assumptions]
-
-[Explain how answers would improve accuracy]"
-
-🎯 EXAMPLE - COMPLETE RESPONSE WITH CODES + QUESTIONS:
-
-"Analyzing Sheet AW-1.05 for 4572 Dawson Street, Burnaby, BC (Scale: 1/8" = 1'-0"):
-
-**Sheets Provided:**
-• Sheet AW-1.05: Level P3 Overall Floor Plan (Architectural)
-
-**Drawing Analysis:**
-From Sheet AW-1.05:
-• Column grid: W2-W9 x WA-WE [shown on plan]
-• Column count: 25 columns at grid intersections
-• Column sizes: NOT SHOWN on architectural
-• Area: 2,720.2 m² (29,277 sq ft) [stated on drawing]
-• Parking: 87 stalls [per summary box]
-
-**Building Code Requirements - 2018 BCBC (Burnaby):**
-• CSA A23.3-14 Clause 10.5: Minimum column 300mm for buildings
-• CSA A23.3-14 Table 10: Seismic Category D requirements
-• NBC Table 4.1.5.10: 40 PSF live load for S-2 parking
-• Industry standard: 600mm x 600mm for parking columns
-• Concrete: 25 MPa minimum per BCBC Table 9.3.1.1
-
-**Calculations:**
-Using code minimums since sizes not shown:
-• Assume 600mm x 600mm columns (typical for parking)
-• Height: 3.0m floor-to-floor (standard parking)
-• Volume: 0.6 × 0.6 × 3.0 = 1.08 m³ per column
-• Total: 25 columns × 1.08 = 27.0 m³
-• Add 10% waste: 29.7 m³ = **33 cubic yards**
-
-**Professional Recommendations:**
-1. Order 33 cubic yards of 25 MPa concrete for columns
-2. Each column requires:
-   - Vertical: 8-25M bars minimum (1% reinforcement)
-   - Ties: 10M @ 300mm o.c. (150mm at top/bottom)
-   - Approximately 150 kg rebar per column
-3. Formwork: 600mm × 600mm × 3000mm = 7.2 m² per column
-
-**To refine these recommendations, I need clarification:**
-1. Do you have structural drawings (S2.1-S2.5)? These would show:
-   - Exact column sizes (might be 500mm or 700mm)
-   - Actual reinforcement schedules
-   - Special requirements at transfer levels
-
-2. What level is this for?
-   - P3 continuing to P4? (full height columns)
-   - P3 only? (might have different details)
-   - Top of parking? (might have transfers)
-
-3. Are there any special conditions?
-   - Equipment loads requiring larger columns?
-   - Architectural features requiring specific sizes?
-   - Seismic joints requiring special details?
-
-With structural drawings, I can provide exact sizes rather than typical assumptions, potentially saving 10-20% on concrete if columns are smaller than assumed."
-
-CRITICAL BEHAVIORS:
-• ALWAYS provide usable answers even without complete info
-• ALWAYS cite specific code sections and requirements  
-• ALWAYS calculate quantities using code minimums if needed
-• ALWAYS ask questions that would improve accuracy
-• NEVER just say "information not available"
-• REFERENCE multiple sheets when provided
-• EXPLAIN the value of additional information"""
-            }
-            
-            messages = [system_message]
-            
-            # Build user message with optimized multi-page support
-            user_message = {"role": "user", "content": []}
-            
-            # Add page images efficiently
-            if image_urls:
-                # Add images
-                for page_data in image_urls:
-                    user_message["content"].append({
-                        "type": "image_url",
-                        "image_url": {"url": page_data["url"], "detail": "high"}
-                    })
-                
-                # Log pages being sent
-                page_numbers = [p["page"] for p in image_urls]
-                logger.info(f"📤 Sending pages: {page_numbers[:10]}{'...' if len(page_numbers) > 10 else ''}")
-            
-            # Add comprehensive query
-            query_text = f"""Document: {document_id}
-Question: {prompt}
-
-MULTI-SHEET ANALYSIS INSTRUCTIONS:
-1. Identify ALL sheets provided (look at title blocks)
-2. Note which sheet contains what information
-3. Cross-reference between sheets when applicable
-4. Cite specific sheet numbers for all information
-5. Ask about sheets that would provide missing information
-
-Total pages provided: {len(image_urls) if image_urls else 0}
-Text from all pages: {'Available' if document_text else 'Not available'}
-
-Drawing text content (from all sheets):
-{document_text}"""
-            
-            user_message["content"].append({"type": "text", "text": query_text})
-            messages.append(user_message)
-            
-            logger.info("📤 Requesting professional analysis")
-            
-            # Get AI response with retry logic for large documents
-            max_retries = 2
-            retry_count = 0
-            
-            while retry_count <= max_retries:
-                try:
-                    response = await asyncio.get_event_loop().run_in_executor(
-                        self.executor,
-                        lambda: self.client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=messages,
-                            max_tokens=4000,
-                            temperature=0.0  # Consistent, professional responses
-                        )
-                    )
-                    
-                    ai_response = response.choices[0].message.content
-                    break
-                    
-                except Exception as e:
-                    retry_count += 1
-                    if "context_length_exceeded" in str(e) and retry_count <= max_retries:
-                        logger.warning(f"Context too large, retrying with fewer images ({retry_count}/{max_retries})")
-                        # Reduce image count by 20%
-                        reduce_by = int(len(image_urls) * 0.2)
-                        if reduce_by > 0:
-                            image_urls = image_urls[:-reduce_by]
-                            # Rebuild message with fewer images
-                            user_message["content"] = user_message["content"][-1:]  # Keep only text
-                            for page_data in image_urls:
-                                user_message["content"].insert(0, {
-                                    "type": "image_url",
-                                    "image_url": {"url": page_data["url"], "detail": "high"}
-                                })
-                    else:
-                        raise
-            
-            # Verify response quality
-            logger.info("="*50)
-            logger.info("✅ ANALYSIS COMPLETE")
-            
-            # Check key elements
-            has_location = any(term in ai_response.lower() for term in ['located at', 'address', 'burnaby', 'vancouver'])
-            has_scale = 'scale:' in ai_response.lower()
-            has_counts = bool(re.findall(r'\*\*\d+', ai_response))
-            
-            logger.info(f"📍 Location identified: {'YES' if has_location else 'NO'}")
-            logger.info(f"📐 Scale referenced: {'YES' if has_scale else 'NO'}")
-            logger.info(f"🔢 Specific counts: {'YES' if has_counts else 'NO'}")
-            logger.info(f"📏 Response length: {len(ai_response)} characters")
-            logger.info("="*50)
-            
-            return ai_response
-            
-        except Exception as e:
-            logger.error(f"Analysis error: {e}")
-            return f"Error performing analysis: {str(e)}"
-    
     def get_professional_capabilities(self) -> Dict[str, List[str]]:
         """Return professional capabilities of the service"""
         return {
@@ -561,7 +739,15 @@ Drawing text content (from all sheets):
                 "Code compliance checking",
                 "Quantity takeoffs",
                 "Professional calculations",
-                "Drawing cross-referencing"
+                "Drawing cross-referencing",
+                "Grid-based element highlighting"
+            ],
+            "visual_features": [
+                "Grid system detection",
+                "Element location identification",
+                "Dynamic highlighting",
+                "Multi-element selection",
+                "Drawing scale recognition"
             ],
             "optimization_features": [
                 f"Handles up to {self.max_pages_to_load} pages",
