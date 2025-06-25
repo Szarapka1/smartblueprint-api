@@ -1,44 +1,26 @@
-# app/api/routes/annotation_routes.py
+# app/api/routes/annotation_routes.py - MULTI-PAGE HIGHLIGHT STORAGE
 
 from fastapi import APIRouter, Request, HTTPException, Header, Query
 from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
+from typing import Optional, List, Dict
+from datetime import datetime, timedelta
 import json
 import uuid
 import os
 import re
+import logging
 from app.core.config import get_settings
+from app.models.schemas import Annotation, AnnotationResponse
 
 annotation_router = APIRouter()
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
-class CreateAnnotationRequest(BaseModel):
-    page_number: int
-    x: float
-    y: float
-    text: str
-    annotation_type: str = "note"  # note, issue, question, highlight, etc.
-    author: str
-
-class AnnotationResponse(BaseModel):
-    id: str
-    document_id: str
-    page_number: int
-    x: float
-    y: float
-    text: str
-    annotation_type: str
-    author: str
-    is_private: bool
-    created_at: str
-    updated_at: Optional[str] = None
-    published_at: Optional[str] = None
+# --- Helper Functions ---
 
 def validate_document_id(document_id: str) -> str:
     """Validate document ID"""
-    import re
-    clean_id = re.sub(r'[^a-zA-Z0-9_-]', '_', document_id.strip())
+    clean_id = re.sub(r'[^a-zA-Z0-9_-]', '_', document_id.strip()).strip('_')
     
     if not clean_id or len(clean_id) < 3:
         raise HTTPException(
@@ -59,8 +41,8 @@ def validate_admin_access(admin_token: str) -> bool:
     return admin_token == expected_token
 
 async def load_all_annotations(document_id: str, storage_service) -> List[dict]:
-    """Load ALL annotations for the service - both private and public"""
-    annotations_blob_name = f"{document_id}_annotations.json"  # FIXED: unified naming
+    """Load ALL annotations including AI highlights"""
+    annotations_blob_name = f"{document_id}_annotations.json"
     
     try:
         annotations_data = await storage_service.download_blob_as_text(
@@ -72,8 +54,8 @@ async def load_all_annotations(document_id: str, storage_service) -> List[dict]:
         return []
 
 async def save_all_annotations(document_id: str, annotations: List[dict], storage_service):
-    """Save ALL annotations - service has access to everything"""
-    annotations_blob_name = f"{document_id}_annotations.json"  # FIXED: unified naming
+    """Save ALL annotations including AI highlights"""
+    annotations_blob_name = f"{document_id}_annotations.json"
     annotations_json = json.dumps(annotations, indent=2, ensure_ascii=False)
     
     await storage_service.upload_file(
@@ -82,81 +64,211 @@ async def save_all_annotations(document_id: str, annotations: List[dict], storag
         data=annotations_json.encode('utf-8')
     )
 
-async def log_user_activity(document_id: str, activity_type: str, author: str, details: dict, storage_service):
-    """Log all user activity for service analytics"""
-    activity_blob_name = f"{document_id}_all_chats.json"  # FIXED: unified naming
+async def clear_expired_highlights(annotations: List[dict]) -> List[dict]:
+    """Remove expired AI highlights"""
+    current_time = datetime.utcnow()
+    active_annotations = []
     
-    try:
-        activity_data = await storage_service.download_blob_as_text(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=activity_blob_name
-        )
-        activities = json.loads(activity_data)
-    except:
-        activities = []
+    for ann in annotations:
+        # Skip if it has an expiry time that's passed
+        if ann.get("expires_at"):
+            try:
+                expires = datetime.fromisoformat(ann["expires_at"].replace('Z', '+00:00'))
+                if expires < current_time:
+                    continue
+            except:
+                pass
+        active_annotations.append(ann)
     
-    new_activity = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "type": activity_type,
-        "author": author,
-        "details": details,
-        "document_id": document_id
-    }
-    
-    activities.append(new_activity)
-    
-    # Keep configurable number of activities
-    max_activities = getattr(settings, 'MAX_ACTIVITY_LOGS', 1000)  # FIXED: use settings
-    if len(activities) > max_activities:
-        activities = activities[-max_activities:]
-    
-    activity_json = json.dumps(activities, indent=2, ensure_ascii=False)
-    await storage_service.upload_file(
-        container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-        blob_name=activity_blob_name,
-        data=activity_json.encode('utf-8')
-    )
+    return active_annotations
 
-def filter_user_visible_annotations(annotations: List[dict], requesting_author: str) -> List[dict]:
-    """Filter what the user can see: their private + everyone's public"""
-    visible = []
-    for annotation in annotations:
-        # Show public annotations to everyone
-        if not annotation.get("is_private", True):
-            visible.append(annotation)
-        # Show private annotations only to their author
-        elif annotation.get("author") == requesting_author:
-            visible.append(annotation)
-    return visible
+async def get_active_highlights_for_session(document_id: str, query_session_id: str, 
+                                          storage_service) -> List[dict]:
+    """Get all highlights for a specific query session"""
+    all_annotations = await load_all_annotations(document_id, storage_service)
+    
+    # Filter to just this query session
+    session_highlights = [
+        ann for ann in all_annotations 
+        if ann.get("query_session_id") == query_session_id
+    ]
+    
+    return session_highlights
+
+# --- NEW: Multi-Page Highlight Management ---
+
+@annotation_router.post("/documents/{document_id}/highlights/create-batch")
+async def create_highlight_batch(
+    request: Request,
+    document_id: str,
+    highlights: List[Annotation]
+):
+    """Create multiple highlights across pages from AI analysis"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        # Generate query session ID if not provided
+        query_session_id = highlights[0].query_session_id if highlights else str(uuid.uuid4())
+        
+        # Load existing annotations
+        all_annotations = await load_all_annotations(clean_document_id, storage_service)
+        
+        # Clear old highlights from previous queries by this user
+        # Keep only non-AI highlights and highlights from other query sessions
+        filtered_annotations = [
+            ann for ann in all_annotations
+            if ann.get("annotation_type") != "ai_highlight" or 
+               ann.get("query_session_id") != query_session_id
+        ]
+        
+        # Add new highlights
+        created_highlights = []
+        for highlight in highlights:
+            new_annotation = highlight.dict()
+            new_annotation["annotation_id"] = str(uuid.uuid4())[:8]
+            new_annotation["created_at"] = datetime.utcnow().isoformat() + "Z"
+            new_annotation["document_id"] = clean_document_id
+            new_annotation["query_session_id"] = query_session_id
+            
+            filtered_annotations.append(new_annotation)
+            created_highlights.append(new_annotation)
+        
+        # Save all annotations
+        await save_all_annotations(clean_document_id, filtered_annotations, storage_service)
+        
+        # Log the activity
+        logger.info(f"Created {len(highlights)} highlights for document {clean_document_id}, session {query_session_id}")
+        
+        return {
+            "status": "success",
+            "query_session_id": query_session_id,
+            "highlights_created": len(created_highlights),
+            "pages_affected": list(set(h.page_number for h in highlights))
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to create highlight batch: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create highlights: {str(e)}")
+
+@annotation_router.get("/documents/{document_id}/highlights/active")
+async def get_active_highlights(
+    request: Request,
+    document_id: str,
+    query_session_id: str = Query(..., description="Query session to get highlights for"),
+    page_number: Optional[int] = Query(None, description="Filter by specific page")
+):
+    """Get active highlights for current query session"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        # Get highlights for this session
+        session_highlights = await get_active_highlights_for_session(
+            clean_document_id, query_session_id, storage_service
+        )
+        
+        # Filter by page if requested
+        if page_number is not None:
+            session_highlights = [
+                h for h in session_highlights 
+                if h.get("page_number") == page_number
+            ]
+        
+        # Group by page for summary
+        highlights_by_page = {}
+        for highlight in session_highlights:
+            page = highlight.get("page_number", 0)
+            if page not in highlights_by_page:
+                highlights_by_page[page] = []
+            highlights_by_page[page].append(highlight)
+        
+        return {
+            "document_id": clean_document_id,
+            "query_session_id": query_session_id,
+            "total_highlights": len(session_highlights),
+            "highlights": session_highlights,
+            "pages_with_highlights": sorted(highlights_by_page.keys()),
+            "highlights_by_page": {
+                page: len(items) for page, items in highlights_by_page.items()
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get active highlights: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get highlights: {str(e)}")
+
+@annotation_router.delete("/documents/{document_id}/highlights/clear")
+async def clear_highlight_session(
+    request: Request,
+    document_id: str,
+    query_session_id: str = Query(..., description="Query session to clear")
+):
+    """Clear all highlights from a specific query session"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        # Load all annotations
+        all_annotations = await load_all_annotations(clean_document_id, storage_service)
+        
+        # Remove highlights from this session
+        initial_count = len(all_annotations)
+        filtered_annotations = [
+            ann for ann in all_annotations
+            if ann.get("query_session_id") != query_session_id
+        ]
+        removed_count = initial_count - len(filtered_annotations)
+        
+        # Save updated annotations
+        await save_all_annotations(clean_document_id, filtered_annotations, storage_service)
+        
+        logger.info(f"Cleared {removed_count} highlights from session {query_session_id}")
+        
+        return {
+            "status": "success",
+            "query_session_id": query_session_id,
+            "highlights_removed": removed_count
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear highlight session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear highlights: {str(e)}")
+
+# --- EXISTING ENDPOINTS (Updated for compatibility) ---
 
 @annotation_router.get("/documents/{document_id}/annotations")
 async def get_user_visible_annotations(
     request: Request, 
     document_id: str,
-    author: str = Query(...)  # Query parameter: who is requesting?
+    author: str = Query(...),
+    include_highlights: bool = Query(True, description="Include AI highlights")
 ):
     """
-    USER VIEW: Returns only annotations the user should see
-    SERVICE: Logs the request and has access to ALL data
+    Get annotations visible to user INCLUDING active AI highlights
     """
     try:
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
         
-        # SERVICE: Load ALL annotations (you have everything)
+        # Load ALL annotations
         all_annotations = await load_all_annotations(clean_document_id, storage_service)
         
-        # SERVICE: Log this request for analytics
-        await log_user_activity(
-            document_id=clean_document_id,
-            activity_type="view_annotations",
-            author=author,
-            details={"total_annotations_available": len(all_annotations)},
-            storage_service=storage_service
-        )
+        # Clear expired highlights
+        all_annotations = await clear_expired_highlights(all_annotations)
         
-        # USER: Filter to what they're allowed to see
-        visible_annotations = filter_user_visible_annotations(all_annotations, author)
+        # Filter to what user can see
+        visible_annotations = []
+        for annotation in all_annotations:
+            # Include AI highlights if requested
+            if annotation.get("annotation_type") == "ai_highlight" and include_highlights:
+                visible_annotations.append(annotation)
+            # Include public annotations
+            elif not annotation.get("is_private", True):
+                visible_annotations.append(annotation)
+            # Include user's private annotations
+            elif annotation.get("author") == author:
+                visible_annotations.append(annotation)
         
         return {
             "document_id": clean_document_id,
@@ -172,11 +284,10 @@ async def get_user_visible_annotations(
 async def create_annotation(
     request: Request,
     document_id: str,
-    annotation_request: CreateAnnotationRequest
+    annotation: Annotation
 ):
     """
-    USER: Creates annotation (private by default)
-    SERVICE: Stores everything and logs all activity
+    Create annotation (can be user annotation OR AI highlight)
     """
     try:
         clean_document_id = validate_document_id(document_id)
@@ -194,196 +305,49 @@ async def create_annotation(
                 detail=f"Document '{clean_document_id}' not found"
             )
         
-        # Validate input
-        if len(annotation_request.text.strip()) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Annotation text cannot be empty"
-            )
-        
-        if annotation_request.page_number < 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Page number must be greater than 0"
-            )
-        
-        # SERVICE: Load all existing annotations
+        # Load existing annotations
         all_annotations = await load_all_annotations(clean_document_id, storage_service)
         
         # Create new annotation
-        annotation_id = str(uuid.uuid4())[:8]
-        current_time = datetime.utcnow().isoformat() + "Z"
+        new_annotation = annotation.dict()
+        new_annotation["annotation_id"] = str(uuid.uuid4())[:8]
+        new_annotation["document_id"] = clean_document_id
+        new_annotation["created_at"] = datetime.utcnow().isoformat() + "Z"
         
-        new_annotation = {
-            "id": annotation_id,
-            "document_id": clean_document_id,
-            "page_number": annotation_request.page_number,
-            "x": annotation_request.x,
-            "y": annotation_request.y,
-            "text": annotation_request.text.strip(),
-            "annotation_type": annotation_request.annotation_type,
-            "author": annotation_request.author,
-            "is_private": True,  # Always private by default
-            "created_at": current_time,
-            "updated_at": None,
-            "published_at": None
-        }
+        # If it's an AI highlight and no expiry set, expire after 24 hours
+        if annotation.annotation_type == "ai_highlight" and not annotation.expires_at:
+            expiry = datetime.utcnow() + timedelta(hours=24)
+            new_annotation["expires_at"] = expiry.isoformat() + "Z"
         
-        # SERVICE: Store everything
+        # Add to annotations
         all_annotations.append(new_annotation)
         await save_all_annotations(clean_document_id, all_annotations, storage_service)
         
-        # SERVICE: Log this activity
-        await log_user_activity(
+        return AnnotationResponse(
+            annotation_id=new_annotation["annotation_id"],
             document_id=clean_document_id,
-            activity_type="create_annotation",
-            author=annotation_request.author,
-            details={
-                "annotation_id": annotation_id,
-                "annotation_type": annotation_request.annotation_type,
-                "page_number": annotation_request.page_number,
-                "text_length": len(annotation_request.text)
-            },
-            storage_service=storage_service
+            page_number=annotation.page_number,
+            element_type=annotation.element_type,
+            grid_reference=annotation.grid_reference,
+            query_session_id=annotation.query_session_id,
+            created_at=new_annotation["created_at"]
         )
-        
-        return AnnotationResponse(**new_annotation)
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create annotation: {str(e)}")
 
-@annotation_router.post("/documents/{document_id}/annotations/{annotation_id}/publish")
-async def publish_annotation(
-    request: Request,
-    document_id: str,
-    annotation_id: str,
-    author: str = Query(...)  # Query parameter
-):
-    """
-    USER: Publishes their private annotation to make it visible to others
-    SERVICE: Tracks all publishing activity
-    """
-    try:
-        clean_document_id = validate_document_id(document_id)
-        storage_service = request.app.state.storage_service
-        
-        # SERVICE: Load all annotations
-        all_annotations = await load_all_annotations(clean_document_id, storage_service)
-        
-        # Find the annotation
-        annotation_to_publish = None
-        annotation_index = None
-        
-        for i, annotation in enumerate(all_annotations):
-            if annotation.get("id") == annotation_id:
-                annotation_to_publish = annotation
-                annotation_index = i
-                break
-        
-        if not annotation_to_publish:
-            raise HTTPException(status_code=404, detail="Annotation not found")
-        
-        # Verify the user owns this annotation
-        if annotation_to_publish.get("author") != author:
-            raise HTTPException(status_code=403, detail="You can only publish your own annotations")
-        
-        # Already public?
-        if not annotation_to_publish.get("is_private", True):
-            raise HTTPException(status_code=400, detail="Annotation is already public")
-        
-        # Publish it
-        current_time = datetime.utcnow().isoformat() + "Z"
-        annotation_to_publish["is_private"] = False
-        annotation_to_publish["published_at"] = current_time
-        
-        # SERVICE: Save everything
-        all_annotations[annotation_index] = annotation_to_publish
-        await save_all_annotations(clean_document_id, all_annotations, storage_service)
-        
-        # SERVICE: Log publishing activity
-        await log_user_activity(
-            document_id=clean_document_id,
-            activity_type="publish_annotation",
-            author=author,
-            details={
-                "annotation_id": annotation_id,
-                "annotation_type": annotation_to_publish.get("annotation_type"),
-                "published_at": current_time
-            },
-            storage_service=storage_service
-        )
-        
-        return {
-            "message": "Annotation published successfully",
-            "annotation_id": annotation_id,
-            "published_at": current_time
-        }
+# --- ADMIN ENDPOINTS ---
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to publish annotation: {str(e)}")
-
-# SERVICE ADMIN ENDPOINTS - Protected by environment variable
-
-@annotation_router.get("/admin/documents/{document_id}/all-annotations")
-async def admin_get_all_annotations(
+@annotation_router.get("/admin/documents/{document_id}/all-highlights")
+async def admin_get_all_highlights(
     request: Request,
     document_id: str,
     admin_token: str = Header(None, alias="X-Admin-Token")
 ):
     """
-    SERVICE ADMIN: Get ALL annotations from ALL users (private + public)
-    Use this for analytics, moderation, backups, etc.
-    """
-    try:
-        # Validate admin access
-        if not admin_token:
-            raise HTTPException(status_code=401, detail="Admin token required")
-        
-        validate_admin_access(admin_token)
-        
-        clean_document_id = validate_document_id(document_id)
-        storage_service = request.app.state.storage_service
-        
-        # SERVICE: Get ALL annotations from ALL users
-        all_annotations = await load_all_annotations(clean_document_id, storage_service)
-        
-        # Analytics data
-        analytics = {
-            "total_annotations": len(all_annotations),
-            "private_annotations": len([a for a in all_annotations if a.get("is_private", True)]),
-            "public_annotations": len([a for a in all_annotations if not a.get("is_private", True)]),
-            "unique_authors": len(set(a.get("author") for a in all_annotations)),
-            "annotation_types": {}
-        }
-        
-        # Count annotation types
-        for annotation in all_annotations:
-            ann_type = annotation.get("annotation_type", "unknown")
-            analytics["annotation_types"][ann_type] = analytics["annotation_types"].get(ann_type, 0) + 1
-        
-        return {
-            "document_id": clean_document_id,
-            "all_annotations": all_annotations,  # Everything from everyone
-            "analytics": analytics
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Admin access failed: {str(e)}")
-
-@annotation_router.get("/admin/documents/{document_id}/activity")
-async def admin_get_all_activity(
-    request: Request,
-    document_id: str,
-    admin_token: str = Header(None, alias="X-Admin-Token")
-):
-    """
-    SERVICE ADMIN: Get complete activity log for analytics
+    ADMIN: Get ALL highlights across all sessions for analytics
     """
     try:
         if not admin_token:
@@ -394,22 +358,43 @@ async def admin_get_all_activity(
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
         
-        activity_blob_name = f"{clean_document_id}_all_chats.json"
-        try:
-            activity_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=activity_blob_name
-            )
-            activities = json.loads(activity_data)
-        except:
-            activities = []
+        # Get ALL annotations
+        all_annotations = await load_all_annotations(clean_document_id, storage_service)
+        
+        # Filter to just AI highlights
+        all_highlights = [
+            ann for ann in all_annotations 
+            if ann.get("annotation_type") == "ai_highlight"
+        ]
+        
+        # Group by query session
+        sessions = {}
+        for highlight in all_highlights:
+            session_id = highlight.get("query_session_id", "unknown")
+            if session_id not in sessions:
+                sessions[session_id] = {
+                    "highlights": [],
+                    "pages": set(),
+                    "element_types": set(),
+                    "created_at": highlight.get("created_at")
+                }
+            sessions[session_id]["highlights"].append(highlight)
+            sessions[session_id]["pages"].add(highlight.get("page_number"))
+            sessions[session_id]["element_types"].add(highlight.get("element_type"))
+        
+        # Convert sets to lists for JSON
+        for session in sessions.values():
+            session["pages"] = sorted(list(session["pages"]))
+            session["element_types"] = sorted(list(session["element_types"]))
+            session["highlight_count"] = len(session["highlights"])
         
         return {
             "document_id": clean_document_id,
-            "total_activities": len(activities),
-            "activities": activities
+            "total_highlights": len(all_highlights),
+            "total_sessions": len(sessions),
+            "sessions": sessions
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
