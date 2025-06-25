@@ -10,6 +10,9 @@ from PIL import Image
 import io
 from typing import List, Dict, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from collections import defaultdict
+
 from app.core.config import AppSettings
 from app.services.storage_service import StorageService
 
@@ -24,13 +27,17 @@ class PDFService:
         
         self.settings = settings
         
-        # Optimized settings for large documents
-        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "200"))
-        self.ai_image_dpi = int(os.getenv("PDF_AI_DPI", "150"))  # Lower DPI for AI processing
+        # OPTIMIZED SETTINGS - Lower DPI for reasonable file sizes
+        self.image_dpi = int(os.getenv("PDF_IMAGE_DPI", "150"))  # Down from 200
+        self.ai_image_dpi = int(os.getenv("PDF_AI_DPI", "100"))  # Down from 150
         self.thumbnail_dpi = int(os.getenv("PDF_THUMBNAIL_DPI", "72"))
-        self.max_pages = int(os.getenv("PDF_MAX_PAGES", "500"))  # Support up to 500 pages
-        self.batch_size = int(os.getenv("PDF_BATCH_SIZE", "5"))  # Process 5 pages at a time
-        self.max_workers = int(os.getenv("PDF_MAX_WORKERS", "4"))  # Parallel processing threads
+        self.max_pages = int(os.getenv("PDF_MAX_PAGES", "500"))
+        self.batch_size = int(os.getenv("PDF_BATCH_SIZE", "5"))
+        self.max_workers = int(os.getenv("PDF_MAX_WORKERS", "4"))
+        
+        # Image optimization settings
+        self.png_compression_level = int(os.getenv("PDF_PNG_COMPRESSION", "6"))  # 0-9, 6 is balanced
+        self.jpeg_quality = int(os.getenv("PDF_JPEG_QUALITY", "85"))  # For thumbnails
         self.ai_image_quality = int(os.getenv("PDF_AI_IMAGE_QUALITY", "85"))
         self.ai_max_dimension = int(os.getenv("PDF_AI_MAX_DIMENSION", "3000"))
         
@@ -39,14 +46,16 @@ class PDFService:
         
         logger.info(f"✅ PDFService initialized (Optimized for Large Documents)")
         logger.info(f"   📄 Max pages: {self.max_pages}")
-        logger.info(f"   🖼️ Storage DPI: {self.image_dpi}")
-        logger.info(f"   🤖 AI DPI: {self.ai_image_dpi}")
+        logger.info(f"   🖼️ Storage DPI: {self.image_dpi} (optimized)")
+        logger.info(f"   🤖 AI DPI: {self.ai_image_dpi} (optimized)")
+        logger.info(f"   🖼️ Thumbnail DPI: {self.thumbnail_dpi}")
         logger.info(f"   📦 Batch size: {self.batch_size}")
         logger.info(f"   ⚡ Parallel workers: {self.max_workers}")
+        logger.info(f"   🗜️ PNG compression: Level {self.png_compression_level}")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService):
-        """Process large PDFs efficiently with streaming and parallel operations"""
+        """Process large PDFs efficiently with optimized image generation"""
         try:
             logger.info(f"🚀 Starting optimized PDF processing for: {session_id}")
             pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
@@ -75,11 +84,18 @@ class PDFService:
                         'has_images': True,
                         'has_tables': False,
                         'has_forms': False
+                    },
+                    'optimization_stats': {
+                        'total_storage_size_mb': 0,
+                        'total_ai_size_mb': 0,
+                        'average_page_size_mb': 0
                     }
                 }
                 
                 # Process pages in batches
                 all_text_parts = []
+                total_storage_size = 0
+                total_ai_size = 0
                 
                 for batch_start in range(0, pages_to_process, self.batch_size):
                     batch_end = min(batch_start + self.batch_size, pages_to_process)
@@ -97,6 +113,10 @@ class PDFService:
                         if page_result['success']:
                             all_text_parts.append(page_result['text'])
                             metadata['page_details'].append(page_result['metadata'])
+                            
+                            # Track sizes
+                            total_storage_size += page_result['metadata'].get('image_sizes', {}).get('storage', 0)
+                            total_ai_size += page_result['metadata'].get('image_sizes', {}).get('ai', 0)
                             
                             # Update extraction summary
                             if page_result['text'].strip():
@@ -120,9 +140,12 @@ class PDFService:
                     session_id, metadata['page_details'], full_text, storage_service
                 )
                 
-                # Update metadata with processing time
+                # Update metadata with processing time and optimization stats
                 processing_end = asyncio.get_event_loop().time()
                 metadata['processing_time'] = round(processing_end - processing_start, 2)
+                metadata['optimization_stats']['total_storage_size_mb'] = round(total_storage_size / 1024, 2)
+                metadata['optimization_stats']['total_ai_size_mb'] = round(total_ai_size / 1024, 2)
+                metadata['optimization_stats']['average_page_size_mb'] = round((total_storage_size / pages_to_process) / 1024, 2)
                 
                 # Save metadata
                 await storage_service.upload_file(
@@ -139,6 +162,9 @@ class PDFService:
                 logger.info(f"   🖼️ Pages processed: {pages_to_process}")
                 logger.info(f"   ⏱️ Processing time: {metadata['processing_time']}s")
                 logger.info(f"   💾 Pages/second: {pages_to_process/metadata['processing_time']:.2f}")
+                logger.info(f"   📊 Storage size: {metadata['optimization_stats']['total_storage_size_mb']:.1f}MB")
+                logger.info(f"   📊 AI size: {metadata['optimization_stats']['total_ai_size_mb']:.1f}MB")
+                logger.info(f"   📊 Avg page size: {metadata['optimization_stats']['average_page_size_mb']:.1f}MB")
                 
         except Exception as e:
             logger.error(f"❌ Processing failed: {e}")
@@ -174,7 +200,7 @@ class PDFService:
 
     async def _process_single_page(self, page, page_num: int, session_id: str, 
                                   storage_service: StorageService) -> Dict[str, Any]:
-        """Process a single page with text extraction and image generation"""
+        """Process a single page with optimized image generation"""
         try:
             page_actual = page_num + 1
             
@@ -198,31 +224,31 @@ class PDFService:
             except:
                 pass
             
-            # Generate images in parallel
+            # Generate images in parallel with OPTIMIZED settings
             image_tasks = []
             
-            # High quality image for storage
+            # High quality image for storage (with compression)
             image_task = asyncio.get_event_loop().run_in_executor(
                 self.executor,
-                self._generate_page_image,
-                page, self.image_dpi
+                self._generate_page_image_optimized,
+                page, self.image_dpi, 'storage'
             )
             image_tasks.append(('storage', image_task))
             
             # Optimized image for AI
             ai_image_task = asyncio.get_event_loop().run_in_executor(
                 self.executor,
-                self._generate_page_image,
-                page, self.ai_image_dpi
+                self._generate_page_image_optimized,
+                page, self.ai_image_dpi, 'ai'
             )
             image_tasks.append(('ai', ai_image_task))
             
-            # Thumbnail for UI
-            if page_actual <= 10:  # Only create thumbnails for first 10 pages
+            # Thumbnail for UI (only for first 10 pages)
+            if page_actual <= 10:
                 thumb_task = asyncio.get_event_loop().run_in_executor(
                     self.executor,
-                    self._generate_page_image,
-                    page, self.thumbnail_dpi
+                    self._generate_page_image_optimized,
+                    page, self.thumbnail_dpi, 'thumbnail'
                 )
                 image_tasks.append(('thumbnail', thumb_task))
             
@@ -248,12 +274,10 @@ class PDFService:
             
             # Upload AI optimized image
             if 'ai' in image_results:
-                # Further optimize for AI
-                ai_optimized = await self._optimize_image_for_ai(image_results['ai'])
                 upload_task = storage_service.upload_file(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{session_id}_page_{page_actual}_ai.png",
-                    data=ai_optimized
+                    data=image_results['ai']
                 )
                 upload_tasks.append(upload_task)
             
@@ -269,7 +293,7 @@ class PDFService:
             # Wait for uploads to complete
             await asyncio.gather(*upload_tasks)
             
-            # Prepare page metadata
+            # Prepare page metadata with size tracking
             page_metadata = {
                 'page_number': page_actual,
                 'text_length': len(page_text),
@@ -282,9 +306,15 @@ class PDFService:
                 'key_elements': page_analysis.get('key_elements', []),
                 'image_sizes': {
                     'storage': len(image_results.get('storage', b'')) / 1024,  # KB
-                    'ai': len(image_results.get('ai', b'')) / 1024
+                    'ai': len(image_results.get('ai', b'')) / 1024,  # KB
+                    'thumbnail': len(image_results.get('thumbnail', b'')) / 1024 if 'thumbnail' in image_results else 0
                 }
             }
+            
+            # Log compression results
+            if 'storage' in image_results:
+                logger.debug(f"Page {page_actual} - Storage: {page_metadata['image_sizes']['storage']:.1f}KB, "
+                           f"AI: {page_metadata['image_sizes']['ai']:.1f}KB")
             
             # Format text for storage
             formatted_text = f"\n--- PAGE {page_actual} ---\n"
@@ -312,16 +342,53 @@ class PDFService:
                 'metadata': {}
             }
 
-    def _generate_page_image(self, page, dpi: int) -> bytes:
-        """Generate page image at specified DPI"""
-        matrix = fitz.Matrix(dpi / 72, dpi / 72)
-        pix = page.get_pixmap(matrix=matrix)
-        image_bytes = pix.tobytes("png")
-        pix = None  # Clean up
-        return image_bytes
+    def _generate_page_image_optimized(self, page, dpi: int, image_type: str) -> bytes:
+        """Generate optimized page image with proper compression"""
+        try:
+            # Create transformation matrix
+            matrix = fitz.Matrix(dpi / 72, dpi / 72)
+            
+            # Generate pixmap
+            pix = page.get_pixmap(matrix=matrix, alpha=False)  # No alpha for smaller files
+            
+            # Convert based on image type
+            if image_type == 'thumbnail':
+                # Thumbnails as JPEG for smallest size
+                img_data = pix.pil_tobytes(format="JPEG", optimize=True, quality=self.jpeg_quality)
+            elif image_type == 'ai':
+                # AI images need balance of quality and size
+                # First get as PIL image for further optimization
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                
+                # Resize if too large
+                if max(img.size) > self.ai_max_dimension:
+                    img.thumbnail((self.ai_max_dimension, self.ai_max_dimension), Image.Resampling.LANCZOS)
+                
+                # Save as optimized PNG
+                output = io.BytesIO()
+                img.save(output, format='PNG', optimize=True, compress_level=self.png_compression_level)
+                img_data = output.getvalue()
+            else:
+                # Storage images - compressed PNG
+                # Use PyMuPDF's built-in PNG compression
+                img_data = pix.tobytes(output="png", compress_level=self.png_compression_level)
+            
+            # Clean up
+            pix = None
+            
+            return img_data
+            
+        except Exception as e:
+            logger.error(f"Image generation error for {image_type}: {e}")
+            # Fallback to basic generation
+            matrix = fitz.Matrix(dpi / 72, dpi / 72)
+            pix = page.get_pixmap(matrix=matrix)
+            img_data = pix.tobytes("png")
+            pix = None
+            return img_data
 
     async def _optimize_image_for_ai(self, image_bytes: bytes) -> bytes:
-        """Optimize image for AI processing - reduce size while maintaining readability"""
+        """Further optimize image for AI processing if needed"""
         return await asyncio.get_event_loop().run_in_executor(
             self.executor,
             self._compress_image,
@@ -557,7 +624,8 @@ class PDFService:
             },
             'content_summary': metadata['extraction_summary'],
             'drawing_types_found': {},
-            'sheets_found': []
+            'sheets_found': [],
+            'optimization_summary': metadata['optimization_stats']
         }
         
         # Summarize drawing types
@@ -603,7 +671,7 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "2.0.0",
+            "version": "2.1.0",
             "mode": "optimized_large_document_processing",
             "capabilities": {
                 "max_pages": self.max_pages,
@@ -619,6 +687,11 @@ class PDFService:
                     "storage": self.image_dpi,
                     "ai_processing": self.ai_image_dpi,
                     "thumbnails": self.thumbnail_dpi
+                },
+                "compression": {
+                    "png_level": self.png_compression_level,
+                    "jpeg_quality": self.jpeg_quality,
+                    "ai_image_quality": self.ai_image_quality
                 }
             }
         }
