@@ -1,4 +1,4 @@
-# app/services/ai_service.py - PROFESSIONAL BLUEPRINT ANALYSIS AI
+# app/services/ai_service.py - OPTIMIZED FOR LARGE MULTI-PAGE DOCUMENTS
 
 import asyncio
 import base64
@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 from collections import defaultdict
+from PIL import Image
+import io
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ from app.services.storage_service import StorageService
 
 
 class ProfessionalBlueprintAI:
-    """Professional AI service for comprehensive blueprint analysis across all trades"""
+    """Professional AI service optimized for large multi-page blueprint analysis"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -47,17 +49,29 @@ class ProfessionalBlueprintAI:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
         
+        # Thread pool for parallel operations
         self.executor = ThreadPoolExecutor(max_workers=4)
+        
+        # Configuration for optimization
+        self.max_pages_to_load = int(os.getenv("AI_MAX_PAGES", "100"))
+        self.batch_size = int(os.getenv("AI_BATCH_SIZE", "10"))
+        self.image_quality = int(os.getenv("AI_IMAGE_QUALITY", "85"))
+        self.max_image_dimension = int(os.getenv("AI_MAX_IMAGE_DIMENSION", "2000"))
+        
+        logger.info(f"   📄 Max pages: {self.max_pages_to_load}")
+        logger.info(f"   📦 Batch size: {self.batch_size}")
+        logger.info(f"   🖼️ Image quality: {self.image_quality}%")
     
     async def get_ai_response(self, prompt: str, document_id: str, 
                               storage_service: StorageService, author: str = None) -> str:
-        """Process blueprint queries with professional analysis"""
+        """Process blueprint queries with optimized multi-page support"""
         try:
             logger.info(f"📐 Processing blueprint analysis for {document_id}")
+            analysis_start = asyncio.get_event_loop().time()
             
-            # Load document context with multi-page support
+            # Load document context and metadata
             document_text = ""
-            image_urls = []  # List to hold multiple page images
+            metadata = None
             
             try:
                 # Load text context (contains text from ALL pages)
@@ -68,43 +82,43 @@ class ProfessionalBlueprintAI:
                 document_text = await asyncio.wait_for(context_task, timeout=30.0)
                 logger.info(f"✅ Loaded text from all pages: {len(document_text)} characters")
                 
-                # Try to load ALL page images
-                page_num = 1
-                max_pages = 20  # Reasonable limit
-                
-                while page_num <= max_pages:
-                    try:
-                        image_task = storage_service.download_blob_as_bytes(
-                            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                            blob_name=f"{document_id}_page_{page_num}.png"
-                        )
-                        page_bytes = await asyncio.wait_for(image_task, timeout=30.0)
-                        page_b64 = base64.b64encode(page_bytes).decode('utf-8')
-                        image_url = f"data:image/png;base64,{page_b64}"
-                        image_urls.append({
-                            "page": page_num,
-                            "url": image_url
-                        })
-                        logger.info(f"✅ Loaded page {page_num} image")
-                        page_num += 1
-                    except:
-                        # No more pages found
-                        break
-                
-                logger.info(f"✅ Total pages loaded: {len(image_urls)}")
+                # Try to load metadata for optimization
+                try:
+                    metadata_task = storage_service.download_blob_as_text(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=f"{document_id}_metadata.json"
+                    )
+                    metadata_text = await asyncio.wait_for(metadata_task, timeout=10.0)
+                    metadata = json.loads(metadata_text)
+                    logger.info(f"✅ Loaded metadata: {metadata.get('page_count', 0)} pages")
+                except:
+                    logger.info("ℹ️ No metadata found, will discover pages")
                     
             except Exception as e:
                 logger.error(f"Document loading error: {e}")
                 return "Unable to load the blueprint. Please ensure the document is properly uploaded and processed."
             
+            # Load ALL page images efficiently
+            image_urls = await self._load_all_pages_optimized(
+                document_id, 
+                storage_service, 
+                metadata
+            )
+            
+            loading_time = asyncio.get_event_loop().time() - analysis_start
+            logger.info(f"⏱️ Document loaded in {loading_time:.2f}s")
+            
             # Process with professional analysis
             result = await self._analyze_blueprint_professionally(
                 prompt=prompt,
                 document_text=document_text,
-                image_urls=image_urls,  # Now passing list of images
+                image_urls=image_urls,
                 document_id=document_id,
                 author=author
             )
+            
+            total_time = asyncio.get_event_loop().time() - analysis_start
+            logger.info(f"✅ Analysis complete in {total_time:.2f}s")
             
             return result
             
@@ -112,10 +126,177 @@ class ProfessionalBlueprintAI:
             logger.error(f"Response error: {e}")
             return f"Error analyzing blueprint: {str(e)}"
     
+    async def _load_all_pages_optimized(self, document_id: str, 
+                                       storage_service: StorageService,
+                                       metadata: Optional[Dict] = None) -> List[Dict[str, any]]:
+        """Load all pages with optimizations for large documents"""
+        try:
+            # Determine total pages
+            if metadata and 'page_count' in metadata:
+                total_pages = metadata['page_count']
+            else:
+                # Discover pages by checking what exists
+                total_pages = await self._discover_page_count(document_id, storage_service)
+            
+            pages_to_load = min(total_pages, self.max_pages_to_load)
+            logger.info(f"📄 Loading {pages_to_load} pages (total: {total_pages})")
+            
+            all_page_urls = []
+            
+            # Process pages in batches for efficiency
+            for batch_start in range(0, pages_to_load, self.batch_size):
+                batch_end = min(batch_start + self.batch_size, pages_to_load)
+                
+                # Create tasks for parallel loading
+                tasks = []
+                for page_num in range(batch_start + 1, batch_end + 1):
+                    task = self._load_single_page_optimized(
+                        document_id, page_num, storage_service
+                    )
+                    tasks.append(task)
+                
+                # Execute batch in parallel
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Process results
+                for i, result in enumerate(batch_results):
+                    if isinstance(result, dict) and not isinstance(result, Exception):
+                        all_page_urls.append(result)
+                    else:
+                        logger.warning(f"Failed to load page {batch_start + i + 1}: {result}")
+                
+                logger.info(f"✅ Loaded batch: pages {batch_start + 1}-{batch_end}")
+            
+            logger.info(f"✅ Successfully loaded {len(all_page_urls)} pages")
+            return all_page_urls
+            
+        except Exception as e:
+            logger.error(f"Error loading pages: {e}")
+            return []
+    
+    async def _discover_page_count(self, document_id: str, storage_service: StorageService) -> int:
+        """Discover how many pages exist for a document"""
+        # Check for AI-optimized images first, then regular images
+        page_count = 0
+        
+        # Binary search for efficiency
+        low, high = 1, 200  # Assume max 200 pages
+        
+        while low <= high:
+            mid = (low + high) // 2
+            
+            # Check if this page exists
+            exists = await storage_service.blob_exists(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{document_id}_page_{mid}_ai.png"
+            )
+            
+            if not exists:
+                # Try regular image
+                exists = await storage_service.blob_exists(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=f"{document_id}_page_{mid}.png"
+                )
+            
+            if exists:
+                page_count = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        
+        logger.info(f"📄 Discovered {page_count} pages for document")
+        return page_count
+    
+    async def _load_single_page_optimized(self, document_id: str, page_num: int, 
+                                         storage_service: StorageService) -> Optional[Dict]:
+        """Load a single page with optimization"""
+        try:
+            # Try AI-optimized version first
+            blob_name = f"{document_id}_page_{page_num}_ai.png"
+            
+            try:
+                image_bytes = await storage_service.download_blob_as_bytes(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=blob_name
+                )
+            except:
+                # Fall back to regular image
+                blob_name = f"{document_id}_page_{page_num}.png"
+                image_bytes = await storage_service.download_blob_as_bytes(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=blob_name
+                )
+                
+                # Optimize on the fly if needed
+                image_bytes = await self._optimize_image_for_ai(image_bytes)
+            
+            # Convert to base64
+            image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+            
+            return {
+                "page": page_num,
+                "url": f"data:image/png;base64,{image_b64}",
+                "size_kb": len(image_bytes) / 1024
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to load page {page_num}: {e}")
+            return None
+    
+    async def _optimize_image_for_ai(self, image_bytes: bytes) -> bytes:
+        """Optimize image for AI processing to reduce memory usage"""
+        return await asyncio.get_event_loop().run_in_executor(
+            self.executor,
+            self._compress_image,
+            image_bytes
+        )
+    
+    def _compress_image(self, image_bytes: bytes) -> bytes:
+        """Compress image while maintaining readability"""
+        try:
+            # Open image
+            img = Image.open(io.BytesIO(image_bytes))
+            
+            # Convert RGBA to RGB if necessary
+            if img.mode == 'RGBA':
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[3])
+                img = background
+            
+            # Resize if too large
+            if max(img.size) > self.max_image_dimension:
+                img.thumbnail(
+                    (self.max_image_dimension, self.max_image_dimension), 
+                    Image.Resampling.LANCZOS
+                )
+            
+            # Save with optimization
+            output = io.BytesIO()
+            img.save(
+                output, 
+                format='JPEG', 
+                quality=self.image_quality, 
+                optimize=True
+            )
+            
+            compressed = output.getvalue()
+            
+            # Log compression
+            compression_ratio = (1 - len(compressed) / len(image_bytes)) * 100
+            if compression_ratio > 0:
+                logger.debug(f"Image compressed by {compression_ratio:.1f}%")
+            
+            return compressed
+            
+        except Exception as e:
+            logger.error(f"Image compression failed: {e}")
+            return image_bytes
+    
     async def _analyze_blueprint_professionally(self, prompt: str, document_text: str, 
-                                               image_urls: List[Dict[str, any]] = None, document_id: str = None,
+                                               image_urls: List[Dict[str, any]] = None, 
+                                               document_id: str = None,
                                                author: str = None) -> str:
-        """Professional blueprint analysis with multi-page support"""
+        """Professional blueprint analysis with optimized multi-page support"""
         try:
             # Log analysis details
             logger.info("="*50)
@@ -124,9 +305,15 @@ class ProfessionalBlueprintAI:
             logger.info(f"❓ Query: {prompt}")
             logger.info(f"📝 Text Data: {'Available' if document_text else 'None'}")
             logger.info(f"🖼️ Images: {len(image_urls) if image_urls else 0} pages")
+            
+            # Calculate total image size
+            if image_urls:
+                total_size_mb = sum(img.get('size_kb', 0) for img in image_urls) / 1024
+                logger.info(f"💾 Total image size: {total_size_mb:.1f}MB")
+            
             logger.info("="*50)
             
-            # Professional system message with multi-sheet awareness AND code recommendations
+            # Professional system message (keeping your exact message)
             system_message = {
                 "role": "system",
                 "content": """You are a professional blueprint analyst with extensive experience across all construction trades. You analyze MULTI-SHEET blueprint sets, ALWAYS provide code-based recommendations when information is missing, AND ask clarifying questions.
@@ -252,17 +439,22 @@ CRITICAL BEHAVIORS:
             
             messages = [system_message]
             
-            # Build user message with multi-page support
+            # Build user message with optimized multi-page support
             user_message = {"role": "user", "content": []}
             
-            # Add all page images if available
+            # Add page images efficiently
             if image_urls:
+                # Add images
                 for page_data in image_urls:
                     user_message["content"].append({
                         "type": "image_url",
                         "image_url": {"url": page_data["url"], "detail": "high"}
                     })
-                    
+                
+                # Log pages being sent
+                page_numbers = [p["page"] for p in image_urls]
+                logger.info(f"📤 Sending pages: {page_numbers[:10]}{'...' if len(page_numbers) > 10 else ''}")
+            
             # Add comprehensive query
             query_text = f"""Document: {document_id}
 Question: {prompt}
@@ -285,18 +477,42 @@ Drawing text content (from all sheets):
             
             logger.info("📤 Requesting professional analysis")
             
-            # Get AI response
-            response = await asyncio.get_event_loop().run_in_executor(
-                self.executor,
-                lambda: self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=messages,
-                    max_tokens=4000,
-                    temperature=0.0  # Consistent, professional responses
-                )
-            )
+            # Get AI response with retry logic for large documents
+            max_retries = 2
+            retry_count = 0
             
-            ai_response = response.choices[0].message.content
+            while retry_count <= max_retries:
+                try:
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        self.executor,
+                        lambda: self.client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=messages,
+                            max_tokens=4000,
+                            temperature=0.0  # Consistent, professional responses
+                        )
+                    )
+                    
+                    ai_response = response.choices[0].message.content
+                    break
+                    
+                except Exception as e:
+                    retry_count += 1
+                    if "context_length_exceeded" in str(e) and retry_count <= max_retries:
+                        logger.warning(f"Context too large, retrying with fewer images ({retry_count}/{max_retries})")
+                        # Reduce image count by 20%
+                        reduce_by = int(len(image_urls) * 0.2)
+                        if reduce_by > 0:
+                            image_urls = image_urls[:-reduce_by]
+                            # Rebuild message with fewer images
+                            user_message["content"] = user_message["content"][-1:]  # Keep only text
+                            for page_data in image_urls:
+                                user_message["content"].insert(0, {
+                                    "type": "image_url",
+                                    "image_url": {"url": page_data["url"], "detail": "high"}
+                                })
+                    else:
+                        raise
             
             # Verify response quality
             logger.info("="*50)
@@ -318,6 +534,42 @@ Drawing text content (from all sheets):
         except Exception as e:
             logger.error(f"Analysis error: {e}")
             return f"Error performing analysis: {str(e)}"
+    
+    def get_professional_capabilities(self) -> Dict[str, List[str]]:
+        """Return professional capabilities of the service"""
+        return {
+            "building_codes": [
+                "2018 BCBC (British Columbia Building Code)",
+                "NBC (National Building Code of Canada)",
+                "CSA Standards",
+                "NFPA Standards",
+                "Local Municipal Codes"
+            ],
+            "engineering_disciplines": [
+                "Architectural",
+                "Structural", 
+                "Mechanical (HVAC)",
+                "Electrical",
+                "Plumbing",
+                "Fire Protection",
+                "Civil/Site"
+            ],
+            "analysis_features": [
+                "Multi-page document support",
+                "Cross-trade coordination",
+                "Code compliance checking",
+                "Quantity takeoffs",
+                "Professional calculations",
+                "Drawing cross-referencing"
+            ],
+            "optimization_features": [
+                f"Handles up to {self.max_pages_to_load} pages",
+                f"Parallel loading in batches of {self.batch_size}",
+                "Image compression for efficiency",
+                "Automatic retry on context limits",
+                "Optimized for large documents"
+            ]
+        }
     
     async def __aenter__(self):
         return self
