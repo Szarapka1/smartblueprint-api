@@ -1,4 +1,4 @@
-# app/services/storage_service.py - OPTIMIZED VERSION
+# app/services/storage_service.py - OPTIMIZED FOR LARGE DOCUMENTS
 
 import logging
 import asyncio
@@ -10,7 +10,7 @@ from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 logger = logging.getLogger(__name__)
 
 class StorageService:
-    """Azure Blob Storage service optimized for blueprint handling"""
+    """Azure Blob Storage service optimized for large blueprint handling"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -19,17 +19,26 @@ class StorageService:
             raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
         
         try:
+            # Create blob service client with optimized settings
             self.blob_service_client = BlobServiceClient.from_connection_string(
-                settings.AZURE_STORAGE_CONNECTION_STRING
+                settings.AZURE_STORAGE_CONNECTION_STRING,
+                max_single_get_size=32*1024*1024,  # 32MB chunks for large files
+                max_chunk_get_size=4*1024*1024     # 4MB chunks for streaming
             )
-            # Pre-create container clients for performance
+            
+            # Pre-create container clients for better performance
             self.main_container_client = self.blob_service_client.get_container_client(
                 settings.AZURE_CONTAINER_NAME
             )
             self.cache_container_client = self.blob_service_client.get_container_client(
                 settings.AZURE_CACHE_CONTAINER_NAME
             )
-            logger.info("✅ StorageService initialized with optimized clients")
+            
+            logger.info("✅ StorageService initialized with optimized settings")
+            logger.info(f"   📦 Main container: {settings.AZURE_CONTAINER_NAME}")
+            logger.info(f"   💾 Cache container: {settings.AZURE_CACHE_CONTAINER_NAME}")
+            logger.info(f"   🚀 Chunk size: 4MB (streaming), 32MB (single)")
+            
         except Exception as e:
             logger.critical(f"❌ Failed to initialize Azure Blob Storage client: {e}")
             raise ValueError(f"Azure Storage initialization failed: {e}")
@@ -57,7 +66,7 @@ class StorageService:
         logger.info("✅ All Azure Storage containers verified successfully")
 
     async def upload_file(self, container_name: str, blob_name: str, data: bytes) -> str:
-        """Upload data to Azure Blob Storage with optimizations"""
+        """Upload data to Azure Blob Storage with optimized settings"""
         if not blob_name or not blob_name.strip():
             raise ValueError("Blob name cannot be empty")
         
@@ -65,24 +74,26 @@ class StorageService:
             raise ValueError("Data must be bytes")
         
         try:
-            # Use pre-created container clients for performance
+            # Use pre-created container clients for better performance
             container_client = (self.cache_container_client 
                               if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
                               else self.main_container_client)
             
             blob_client = container_client.get_blob_client(blob=blob_name)
             
-            # For large files (>4MB), use optimized upload
+            # For large files (>4MB), use optimized upload settings
             if len(data) > 4 * 1024 * 1024:
                 await blob_client.upload_blob(
                     data, 
                     overwrite=True,
-                    max_concurrency=4  # Parallel upload for speed
+                    max_concurrency=4,  # Parallel upload chunks
+                    validate_content=False  # Skip MD5 validation for speed
                 )
+                logger.info(f"✅ Uploaded large file '{blob_name}' ({len(data)/1024/1024:.1f}MB) with parallel chunks")
             else:
                 await blob_client.upload_blob(data, overwrite=True)
+                logger.debug(f"✅ Uploaded '{blob_name}' ({len(data)/1024:.1f}KB)")
             
-            logger.info(f"✅ Uploaded '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
             return blob_client.url
             
         except Exception as e:
@@ -101,8 +112,21 @@ class StorageService:
             
             blob_client = container_client.get_blob_client(blob=blob_name)
             
-            # Stream download for memory efficiency
-            download_stream = await blob_client.download_blob()
+            # Get blob properties first to check size
+            try:
+                properties = await blob_client.get_blob_properties()
+                blob_size_mb = properties.size / (1024 * 1024)
+                
+                if blob_size_mb > 10:  # Large file
+                    logger.info(f"⬇️ Downloading large blob '{blob_name}' ({blob_size_mb:.1f}MB) with streaming")
+                else:
+                    logger.debug(f"⬇️ Downloading blob '{blob_name}' ({blob_size_mb:.1f}MB)")
+                    
+            except:
+                logger.debug(f"⬇️ Downloading blob '{blob_name}'")
+            
+            # Stream download for efficiency
+            download_stream = await blob_client.download_blob(max_concurrency=4)
             data = await download_stream.readall()
             
             logger.debug(f"✅ Downloaded '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
@@ -117,15 +141,16 @@ class StorageService:
 
     async def download_blob_as_text(self, container_name: str, blob_name: str, 
                                    encoding: str = "utf-8") -> str:
-        """Download blob content as text"""
+        """Download blob content as text with encoding handling"""
         blob_bytes = await self.download_blob_as_bytes(container_name, blob_name)
         
         try:
             return blob_bytes.decode(encoding)
         except UnicodeDecodeError:
             # Try alternative encodings
-            for alt_encoding in ['latin-1', 'cp1252']:
+            for alt_encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
                 try:
+                    logger.warning(f"⚠️ Using {alt_encoding} encoding for {blob_name}")
                     return blob_bytes.decode(alt_encoding)
                 except UnicodeDecodeError:
                     continue
@@ -168,7 +193,7 @@ class StorageService:
             return False
 
     async def get_blob_info(self, container_name: str, blob_name: str) -> Dict[str, Any]:
-        """Get blob information"""
+        """Get blob information with caching of container client"""
         try:
             container_client = (self.cache_container_client 
                               if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
@@ -212,22 +237,140 @@ class StorageService:
             logger.error(f"❌ Failed to delete '{blob_name}': {e}")
             raise RuntimeError(f"Blob deletion failed: {e}")
 
-    async def batch_download_blobs(self, container_name: str, blob_names: List[str]) -> Dict[str, bytes]:
+    async def batch_download_blobs(self, container_name: str, blob_names: List[str], 
+                                  max_concurrent: int = 5) -> Dict[str, bytes]:
         """Download multiple blobs in parallel for performance"""
-        async def download_single(blob_name: str) -> tuple[str, Optional[bytes]]:
-            try:
-                data = await self.download_blob_as_bytes(container_name, blob_name)
-                return (blob_name, data)
-            except Exception as e:
-                logger.error(f"Failed to download {blob_name}: {e}")
-                return (blob_name, None)
+        semaphore = asyncio.Semaphore(max_concurrent)
         
-        # Download in parallel
-        tasks = [download_single(name) for name in blob_names]
+        async def download_with_semaphore(blob_name: str) -> tuple[str, Optional[bytes]]:
+            async with semaphore:
+                try:
+                    data = await self.download_blob_as_bytes(container_name, blob_name)
+                    return (blob_name, data)
+                except Exception as e:
+                    logger.error(f"Failed to download {blob_name}: {e}")
+                    return (blob_name, None)
+        
+        # Download all blobs in parallel with concurrency limit
+        tasks = [download_with_semaphore(name) for name in blob_names]
         results = await asyncio.gather(*tasks)
         
         # Return as dict, excluding failed downloads
-        return {name: data for name, data in results if data is not None}
+        downloaded = {name: data for name, data in results if data is not None}
+        
+        logger.info(f"✅ Batch downloaded {len(downloaded)}/{len(blob_names)} blobs")
+        return downloaded
+
+    async def batch_upload_blobs(self, container_name: str, blobs: Dict[str, bytes], 
+                                max_concurrent: int = 5) -> Dict[str, bool]:
+        """Upload multiple blobs in parallel for performance"""
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def upload_with_semaphore(blob_name: str, data: bytes) -> tuple[str, bool]:
+            async with semaphore:
+                try:
+                    await self.upload_file(container_name, blob_name, data)
+                    return (blob_name, True)
+                except Exception as e:
+                    logger.error(f"Failed to upload {blob_name}: {e}")
+                    return (blob_name, False)
+        
+        # Upload all blobs in parallel with concurrency limit
+        tasks = [upload_with_semaphore(name, data) for name, data in blobs.items()]
+        results = await asyncio.gather(*tasks)
+        
+        # Return upload results
+        upload_results = {name: success for name, success in results}
+        
+        successful = sum(1 for success in upload_results.values() if success)
+        logger.info(f"✅ Batch uploaded {successful}/{len(blobs)} blobs")
+        
+        return upload_results
+
+    async def copy_blob(self, source_container: str, source_blob: str, 
+                       dest_container: str, dest_blob: str) -> bool:
+        """Copy a blob from one location to another"""
+        try:
+            source_container_client = (self.cache_container_client 
+                                     if source_container == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                                     else self.main_container_client)
+            
+            dest_container_client = (self.cache_container_client 
+                                   if dest_container == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                                   else self.main_container_client)
+            
+            # Get source blob URL
+            source_blob_client = source_container_client.get_blob_client(blob=source_blob)
+            source_url = source_blob_client.url
+            
+            # Copy to destination
+            dest_blob_client = dest_container_client.get_blob_client(blob=dest_blob)
+            await dest_blob_client.start_copy_from_url(source_url)
+            
+            logger.info(f"✅ Copied {source_container}/{source_blob} -> {dest_container}/{dest_blob}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to copy blob: {e}")
+            return False
+
+    async def get_container_stats(self, container_name: str) -> Dict[str, Any]:
+        """Get statistics about a container - optimized version"""
+        try:
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
+            
+            total_size = 0
+            file_types = {}
+            blob_count = 0
+            
+            # Use async iteration for efficiency
+            async for blob in container_client.list_blobs():
+                blob_count += 1
+                total_size += blob.size
+                
+                # Count file types
+                if "." in blob.name:
+                    ext = blob.name.split(".")[-1].lower()
+                    file_types[ext] = file_types.get(ext, 0) + 1
+                else:
+                    file_types["no_extension"] = file_types.get("no_extension", 0) + 1
+            
+            return {
+                "container_name": container_name,
+                "total_blobs": blob_count,
+                "total_size_bytes": total_size,
+                "total_size_mb": round(total_size / (1024 * 1024), 2),
+                "file_types": file_types,
+                "success": True
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get container stats: {e}")
+            return {
+                "container_name": container_name,
+                "error": str(e),
+                "success": False
+            }
+
+    def get_connection_info(self) -> Dict[str, Any]:
+        """Get information about the storage connection (safe for logging)"""
+        return {
+            "service_type": "Azure Blob Storage",
+            "containers": {
+                "main": self.settings.AZURE_CONTAINER_NAME,
+                "cache": self.settings.AZURE_CACHE_CONTAINER_NAME
+            },
+            "optimizations": {
+                "chunk_size": "4MB streaming, 32MB single",
+                "parallel_downloads": "Supported",
+                "parallel_uploads": "Supported",
+                "pre_created_clients": True
+            },
+            "has_connection_string": bool(self.settings.AZURE_STORAGE_CONNECTION_STRING),
+            "connection_string_length": len(self.settings.AZURE_STORAGE_CONNECTION_STRING) if self.settings.AZURE_STORAGE_CONNECTION_STRING else 0
+        }
 
     async def __aenter__(self):
         """Async context manager entry"""
