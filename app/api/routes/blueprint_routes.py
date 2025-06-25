@@ -1,6 +1,6 @@
-# app/api/routes/blueprint_routes.py - COMPLETE FIXED VERSION
+# app/api/routes/blueprint_routes.py - COMPLETE FIXED VERSION WITH COLLABORATION ENDPOINTS
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Header, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Header, Query, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -390,6 +390,38 @@ async def list_documents(request: Request):
         logger.error(f"Failed to list documents: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
+# --- NEW ENDPOINT: Download PDF for shared viewing ---
+@blueprint_router.get("/documents/{document_id}/pdf")
+async def download_document_pdf(request: Request, document_id: str):
+    """Download the original PDF for viewing in shared documents"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(status_code=503, detail="Storage service not available")
+        
+        # Download PDF from storage
+        pdf_bytes = await storage_service.download_blob_as_bytes(
+            container_name=settings.AZURE_CONTAINER_NAME,
+            blob_name=f"{clean_document_id}.pdf"
+        )
+        
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename={clean_document_id}.pdf",
+                "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
+            }
+        )
+        
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"PDF for document '{document_id}' not found")
+    except Exception as e:
+        logger.error(f"Failed to download PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to download PDF: {str(e)}")
+
 @blueprint_router.post("/documents/{document_id}/chat", response_model=DocumentChatResponse)
 async def chat_with_shared_document(request: Request, document_id: str, chat: DocumentChatRequest):
     """Chat with AI about a document"""
@@ -696,3 +728,98 @@ async def publish_annotation(
     except Exception as e:
         logger.error(f"Failed to publish annotation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to publish annotation: {str(e)}")
+
+# --- NEW ENDPOINT: Batch publish annotations ---
+@blueprint_router.post("/documents/{document_id}/annotations/publish-batch")
+async def publish_multiple_annotations(
+    request: Request, 
+    document_id: str, 
+    annotation_ids: List[str],
+    author: str = Query(...)
+):
+    """Publish multiple private annotations at once"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        clean_author = validate_author(author)
+        storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(status_code=503, detail="Storage service not available")
+        
+        all_annotations = await load_annotations(clean_document_id, storage_service)
+        published_count = 0
+        
+        for annotation in all_annotations:
+            if (annotation.get("annotation_id") in annotation_ids and 
+                annotation.get("author") == clean_author and
+                annotation.get("is_private", True)):
+                
+                annotation["is_private"] = False
+                annotation["published_at"] = datetime.utcnow().isoformat() + "Z"
+                published_count += 1
+        
+        await save_annotations(clean_document_id, all_annotations, storage_service)
+        
+        return {
+            "status": "published", 
+            "published_count": published_count,
+            "annotation_ids": annotation_ids
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to batch publish: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- NEW ENDPOINT: Get annotations grouped by author ---
+@blueprint_router.get("/documents/{document_id}/annotations/by-author")
+async def get_annotations_by_author(
+    request: Request, 
+    document_id: str,
+    viewer: str = Query(..., description="Current viewer's name")
+):
+    """Get annotations grouped by author with privacy respected"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        clean_viewer = validate_author(viewer)
+        storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(status_code=503, detail="Storage service not available")
+        
+        all_annotations = await load_annotations(clean_document_id, storage_service)
+        
+        # Group by author, respecting privacy
+        authors_data = {}
+        for ann in all_annotations:
+            # Only show if public or owned by viewer
+            if not ann.get("is_private", True) or ann.get("author") == clean_viewer:
+                author = ann.get("author", "Unknown")
+                if author not in authors_data:
+                    authors_data[author] = {
+                        "author": author,
+                        "annotations": [],
+                        "is_current_user": author == clean_viewer
+                    }
+                
+                # Don't expose full annotation data for privacy
+                authors_data[author]["annotations"].append({
+                    "annotation_id": ann.get("annotation_id"),
+                    "page_number": ann.get("page_number"),
+                    "annotation_type": ann.get("annotation_type"),
+                    "is_private": ann.get("is_private", True),
+                    "timestamp": ann.get("timestamp")
+                })
+        
+        return {
+            "document_id": clean_document_id,
+            "authors": list(authors_data.values()),
+            "total_authors": len(authors_data)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get annotations by author: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
