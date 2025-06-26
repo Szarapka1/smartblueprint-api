@@ -280,16 +280,16 @@ class ProfessionalBlueprintAI:
         request_highlights: bool = True,
         reference_previous: Optional[List[str]] = None,
         preserve_existing: bool = False,
-        filter_by_trades: Optional[List[str]] = None,
+        show_trade_info: bool = False,
         detect_conflicts: bool = False
     ) -> Dict[str, Any]:
-        """Process blueprint queries with visual highlighting support"""
+        """Process blueprint queries with visual highlighting support - open to all users"""
         try:
             logger.info(f"📐 Processing query for document: {document_id}")
             logger.info(f"   Current page: {current_page}")
             logger.info(f"   Request highlights: {request_highlights}")
-            if filter_by_trades:
-                logger.info(f"   Filter trades: {filter_by_trades}")
+            if show_trade_info:
+                logger.info(f"   Show trade info: {show_trade_info}")
             if detect_conflicts:
                 logger.info(f"   Detect conflicts: {detect_conflicts}")
             
@@ -337,7 +337,7 @@ class ProfessionalBlueprintAI:
                 storage_service=storage_service,
                 metadata=metadata,
                 reused_highlights=reused_highlights,
-                filter_by_trades=filter_by_trades,
+                show_trade_info=show_trade_info,
                 detect_conflicts=detect_conflicts
             )
             
@@ -525,7 +525,7 @@ class ProfessionalBlueprintAI:
         storage_service: StorageService,
         metadata: Optional[Dict],
         reused_highlights: List[Dict],
-        filter_by_trades: Optional[List[str]] = None,
+        show_trade_info: bool = False,
         detect_conflicts: bool = False
     ) -> Dict[str, Any]:
         """Perform AI analysis and create highlights"""
@@ -547,7 +547,7 @@ class ProfessionalBlueprintAI:
         query_text = self._build_query(
             prompt, document_id, document_text, len(page_images), metadata, 
             total_pages=metadata.get('page_count', len(page_images)) if metadata else len(page_images),
-            filter_by_trades=filter_by_trades,
+            show_trade_info=show_trade_info,
             detect_conflicts=detect_conflicts
         )
         user_message["content"].append({"type": "text", "text": query_text})
@@ -572,8 +572,7 @@ class ProfessionalBlueprintAI:
                 query_session_id,
                 reused_highlights,
                 preserve_existing,
-                storage_service,
-                filter_by_trades
+                storage_service
             )
             
             result.update(highlight_data)
@@ -621,7 +620,7 @@ Remember: Construction professionals need insights about coordination, sequencin
         page_count: int,
         metadata: Optional[Dict],
         total_pages: int = None,
-        filter_by_trades: Optional[List[str]] = None,
+        show_trade_info: bool = False,
         detect_conflicts: bool = False
     ) -> str:
         """Build query text for AI"""
@@ -655,9 +654,9 @@ Pages analyzed: {page_count}{analysis_note}
 
 User question: {prompt}"""
 
-        # Add trade filtering if requested
-        if filter_by_trades:
-            query += f"\n\nFocus on elements related to these trades: {', '.join(filter_by_trades)}"
+        # Add optional instructions
+        if show_trade_info:
+            query += "\n\nInclude information about which trade each element belongs to in your response."
         
         # Add conflict detection if requested
         if detect_conflicts:
@@ -716,22 +715,14 @@ Remember to think holistically about the building systems and provide insights t
         query_session_id: str,
         reused_highlights: List[Dict],
         preserve_existing: bool,
-        storage_service: StorageService,
-        filter_by_trades: Optional[List[str]] = None
+        storage_service: StorageService
     ) -> Dict[str, Any]:
         """Process AI response and create highlight data"""
         
         # Parse response for elements
         new_highlights = self._parse_elements_from_response(
-            response, document_id, query_session_id
+            response, document_id, query_session_id, author
         )
-        
-        # Filter by trades if requested
-        if filter_by_trades:
-            new_highlights = [
-                h for h in new_highlights 
-                if h.get('assigned_trade') in filter_by_trades
-            ]
         
         # Combine with reused highlights
         all_highlights = reused_highlights + new_highlights
