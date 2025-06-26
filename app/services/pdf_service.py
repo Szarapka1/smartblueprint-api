@@ -1,4 +1,4 @@
-# app/services/pdf_service.py - ENHANCED WITH GRID DETECTION
+# app/services/pdf_service.py - ENHANCED WITH GRID DETECTION (OPTIMIZED)
 
 import logging
 import fitz  # PyMuPDF
@@ -10,10 +10,12 @@ from PIL import Image, ImageDraw
 import io
 import re
 from typing import List, Dict, Optional, Any, Tuple
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass, field
+import multiprocessing
+import time
 
 # Optional imports for grid detection
 try:
@@ -81,24 +83,28 @@ class PDFService:
         self.ai_image_dpi = self.settings.PDF_AI_DPI  # 100 - AI processing
         self.thumbnail_dpi = self.settings.PDF_THUMBNAIL_DPI  # 72 - Previews
         
-        # Processing settings
+        # Processing settings - OPTIMIZED
         self.max_pages = self.settings.PDF_MAX_PAGES
-        self.batch_size = self.settings.PROCESSING_BATCH_SIZE
-        self.max_workers = min(4, os.cpu_count() or 2)
+        self.batch_size = min(10, self.settings.PROCESSING_BATCH_SIZE * 2)  # Larger batches
+        self.max_workers = min(multiprocessing.cpu_count(), 8)  # Use all available cores
         
         # Image optimization settings
-        self.png_compression_level = self.settings.PDF_PNG_COMPRESSION
+        self.png_compression_level = 6  # Faster compression (was 9)
         self.jpeg_quality = self.settings.PDF_JPEG_QUALITY
         self.ai_image_quality = self.settings.AI_IMAGE_QUALITY
         self.ai_max_dimension = self.settings.AI_MAX_IMAGE_DIMENSION
         
-        # Grid detection settings
+        # Grid detection settings - OPTIMIZED
         self.enable_grid_detection = True
-        self.grid_line_threshold = 100  # Minimum line length for grid detection
-        self.grid_detection_method = 'opencv' if OPENCV_AVAILABLE else 'pattern'
+        self.grid_line_threshold = 100
+        self.grid_detection_method = 'pattern'  # Use pattern first, it's faster
+        self.defer_opencv_grid = True  # Process OpenCV grid detection after initial response
         
         # Thread pool for parallel processing
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        
+        # Separate executor for CPU-intensive tasks
+        self.cpu_executor = ProcessPoolExecutor(max_workers=max(2, self.max_workers // 2))
         
         # Grid patterns for text-based detection
         self.grid_patterns = {
@@ -109,12 +115,16 @@ class PDFService:
             'coordinate': re.compile(r'\b([A-Z])-(\d+)\b'),
         }
         
-        logger.info(f"✅ PDFService initialized with grid detection")
+        # Cache for frequently accessed data
+        self._page_cache = {}
+        self._grid_cache = {}
+        
+        logger.info(f"✅ PDFService initialized with optimizations")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ Image resolutions: Storage={self.image_dpi}, AI={self.ai_image_dpi}, Thumb={self.thumbnail_dpi}")
-        logger.info(f"   🎯 Grid detection: {self.grid_detection_method}")
+        logger.info(f"   🎯 Grid detection: {self.grid_detection_method} (deferred OpenCV: {self.defer_opencv_grid})")
         logger.info(f"   📦 Batch size: {self.batch_size}")
-        logger.info(f"   ⚡ Workers: {self.max_workers}")
+        logger.info(f"   ⚡ Workers: {self.max_workers} threads, {self.cpu_executor._max_workers} processes")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService):
@@ -124,7 +134,7 @@ class PDFService:
             pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
             logger.info(f"📄 PDF Size: {pdf_size_mb:.1f}MB")
             
-            processing_start = asyncio.get_event_loop().time()
+            processing_start = time.time()
             
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 total_pages = len(doc)
@@ -164,15 +174,19 @@ class PDFService:
                 total_ai_size = 0
                 total_thumb_size = 0
                 
+                # Create all page objects once
+                pages = [doc[i] for i in range(pages_to_process)]
+                
                 for batch_start in range(0, pages_to_process, self.batch_size):
                     batch_end = min(batch_start + self.batch_size, pages_to_process)
                     batch_pages = list(range(batch_start, batch_end))
                     
                     logger.info(f"📦 Processing batch: pages {batch_start + 1}-{batch_end}")
+                    batch_time = time.time()
                     
-                    # Process batch in parallel
-                    batch_results = await self._process_page_batch(
-                        doc, batch_pages, session_id, storage_service
+                    # Process batch in parallel with optimizations
+                    batch_results = await self._process_page_batch_optimized(
+                        pages, batch_pages, session_id, storage_service
                     )
                     
                     # Aggregate results
@@ -203,8 +217,10 @@ class PDFService:
                             if page_result['metadata'].get('has_tables'):
                                 metadata['extraction_summary']['has_tables'] = True
                     
-                    # Force garbage collection after each batch
-                    gc.collect()
+                    # Log batch performance
+                    batch_elapsed = time.time() - batch_time
+                    pages_per_second = len(batch_pages) / batch_elapsed
+                    logger.info(f"📊 Batch completed in {batch_elapsed:.1f}s ({pages_per_second:.1f} pages/sec)")
                     
                     # Progress update
                     progress = (batch_end / pages_to_process) * 100
@@ -212,40 +228,54 @@ class PDFService:
                 
                 # Save all text content
                 full_text = '\n'.join(all_text_parts)
-                await self._save_text_content(session_id, full_text, storage_service)
+                text_task = self._save_text_content(session_id, full_text, storage_service)
                 
                 # Save grid systems if any were detected
+                grid_task = None
                 if all_grid_systems:
-                    await self._save_grid_systems(session_id, all_grid_systems, storage_service)
+                    grid_task = self._save_grid_systems(session_id, all_grid_systems, storage_service)
                     logger.info(f"🎯 Saved grid systems for {len(all_grid_systems)} pages")
                 
                 # Create document index for fast searching
-                document_index = await self._create_document_index(
+                index_task = self._create_document_index(
                     session_id, metadata['page_details'], full_text, storage_service
                 )
                 
                 # Update metadata with final stats
-                processing_end = asyncio.get_event_loop().time()
+                processing_end = time.time()
                 metadata['processing_time'] = round(processing_end - processing_start, 2)
                 metadata['optimization_stats']['total_storage_size_mb'] = round(total_storage_size / 1024, 2)
                 metadata['optimization_stats']['total_ai_size_mb'] = round(total_ai_size / 1024, 2)
                 metadata['optimization_stats']['total_thumbnail_size_mb'] = round(total_thumb_size / 1024, 2)
                 
                 # Save metadata
-                await storage_service.upload_file(
+                metadata_task = storage_service.upload_file(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{session_id}_metadata.json",
                     data=json.dumps(metadata, ensure_ascii=False).encode('utf-8')
                 )
                 
                 # Create processing summary
-                await self._create_processing_summary(session_id, metadata, storage_service)
+                summary_task = self._create_processing_summary(session_id, metadata, storage_service)
+                
+                # Wait for all async saves to complete
+                await asyncio.gather(text_task, metadata_task, summary_task)
+                if grid_task:
+                    await grid_task
+                await index_task
+                
+                # Schedule deferred OpenCV grid detection if needed
+                if self.defer_opencv_grid and OPENCV_AVAILABLE:
+                    asyncio.create_task(self._process_deferred_grid_detection(
+                        session_id, pages_to_process, storage_service
+                    ))
                 
                 logger.info(f"✅ Processing complete for {session_id}")
                 logger.info(f"   📝 Text extracted: {len(full_text)} characters")
                 logger.info(f"   🖼️ Pages processed: {pages_to_process}")
                 logger.info(f"   🎯 Grid systems detected: {metadata['optimization_stats']['grid_systems_detected']}")
                 logger.info(f"   ⏱️ Processing time: {metadata['processing_time']}s")
+                logger.info(f"   📈 Processing speed: {pages_to_process / metadata['processing_time']:.1f} pages/sec")
                 logger.info(f"   💾 Storage breakdown:")
                 logger.info(f"      - Storage images: {metadata['optimization_stats']['total_storage_size_mb']:.1f}MB")
                 logger.info(f"      - AI images: {metadata['optimization_stats']['total_ai_size_mb']:.1f}MB")
@@ -255,18 +285,34 @@ class PDFService:
             logger.error(f"❌ Processing failed: {e}", exc_info=True)
             await self._save_error_state(session_id, str(e), storage_service)
             raise RuntimeError(f"PDF processing failed: {str(e)}")
+        finally:
+            # Clear caches
+            self._page_cache.clear()
+            self._grid_cache.clear()
+            gc.collect()
 
-    async def _process_page_batch(self, doc, page_numbers: List[int], 
-                                 session_id: str, storage_service: StorageService) -> List[Dict]:
-        """Process a batch of pages in parallel"""
-        tasks = []
-        
+    async def _process_page_batch_optimized(self, pages: List, page_numbers: List[int], 
+                                          session_id: str, storage_service: StorageService) -> List[Dict]:
+        """Process a batch of pages in parallel with optimizations"""
+        # Pre-extract text and analyze in parallel
+        text_tasks = []
         for page_num in page_numbers:
-            task = self._process_single_page(doc[page_num], page_num, session_id, storage_service)
-            tasks.append(task)
+            task = asyncio.create_task(self._extract_page_data_fast(pages[page_num], page_num))
+            text_tasks.append(task)
         
-        # Process pages in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Wait for text extraction
+        page_data = await asyncio.gather(*text_tasks)
+        
+        # Process pages with extracted data
+        process_tasks = []
+        for i, (page_num, data) in enumerate(zip(page_numbers, page_data)):
+            task = self._process_single_page_optimized(
+                pages[page_num], page_num, data, session_id, storage_service
+            )
+            process_tasks.append(task)
+        
+        # Process all pages in parallel
+        results = await asyncio.gather(*process_tasks, return_exceptions=True)
         
         # Handle results
         processed_results = []
@@ -283,50 +329,80 @@ class PDFService:
         
         return processed_results
 
-    async def _process_single_page(self, page, page_num: int, session_id: str, 
-                                  storage_service: StorageService) -> Dict[str, Any]:
-        """Process a single page with text extraction, image generation, and grid detection"""
+    async def _extract_page_data_fast(self, page, page_num: int) -> Dict:
+        """Fast extraction of page text and basic analysis"""
+        return await asyncio.get_event_loop().run_in_executor(
+            self.executor,
+            self._extract_page_data_sync,
+            page,
+            page_num
+        )
+    
+    def _extract_page_data_sync(self, page, page_num: int) -> Dict:
+        """Synchronous page data extraction"""
         try:
-            page_actual = page_num + 1
-            
             # Extract text
             page_text = page.get_text()
             
-            # Analyze page content
-            page_analysis = self._analyze_page_content(page_text, page_actual)
+            # Quick analysis
+            page_analysis = self._analyze_page_content(page_text, page_num + 1)
             
-            # Extract tables
+            # Extract tables (fast check)
             tables = []
             try:
                 page_tables = page.find_tables()
                 if page_tables:
-                    for table in page_tables:
+                    for table in page_tables[:5]:  # Limit to first 5 tables for speed
                         tables.append({
                             'data': table.extract(),
                             'bbox': list(table.bbox)
                         })
-                    page_analysis['has_tables'] = True
             except:
                 pass
             
-            # Generate images at different resolutions
-            image_results = await self._generate_all_page_images(page, page_actual)
+            return {
+                'text': page_text,
+                'analysis': page_analysis,
+                'tables': tables,
+                'has_tables': len(tables) > 0
+            }
+        except Exception as e:
+            logger.error(f"Error extracting page {page_num + 1} data: {e}")
+            return {
+                'text': '',
+                'analysis': {},
+                'tables': [],
+                'has_tables': False
+            }
+
+    async def _process_single_page_optimized(self, page, page_num: int, page_data: Dict,
+                                           session_id: str, storage_service: StorageService) -> Dict[str, Any]:
+        """Process a single page with pre-extracted data"""
+        try:
+            page_actual = page_num + 1
             
-            # Detect grid system
+            # Use pre-extracted data
+            page_text = page_data['text']
+            page_analysis = page_data['analysis']
+            tables = page_data['tables']
+            
+            # Generate images in parallel
+            image_task = self._generate_all_page_images_optimized(page, page_actual)
+            
+            # Quick grid detection (pattern-based only for speed)
             grid_system = None
-            if self.enable_grid_detection and 'storage' in image_results:
-                grid_system = await self._detect_page_grid_system(
-                    page, page_actual, image_results['storage'], page_text
-                )
-                if grid_system and grid_system.confidence > 0.3:
-                    logger.info(f"🎯 Grid detected on page {page_actual}: {len(grid_system.x_labels)}x{len(grid_system.y_labels)} grid")
+            if self.enable_grid_detection and page_text:
+                grid_system = await self._detect_grid_patterns_fast(page, page_text, page_actual)
             
-            # Upload images
+            # Wait for images
+            image_results = await image_task
+            
+            # Upload images in parallel
             upload_tasks = []
             
             # Storage quality image
             if 'storage' in image_results:
-                upload_task = storage_service.upload_file(
+                upload_task = storage_service.upload_file_async(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{session_id}_page_{page_actual}.png",
                     data=image_results['storage']
@@ -335,18 +411,18 @@ class PDFService:
             
             # AI optimized image
             if 'ai' in image_results:
-                upload_task = storage_service.upload_file(
+                upload_task = storage_service.upload_file_async(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{session_id}_page_{page_actual}_ai.png",
+                    blob_name=f"{session_id}_page_{page_actual}_ai.jpg",
                     data=image_results['ai']
                 )
                 upload_tasks.append(('ai', upload_task))
             
-            # Thumbnail (first 20 pages only)
-            if 'thumbnail' in image_results and page_actual <= 20:
-                upload_task = storage_service.upload_file(
+            # Thumbnail (first 10 pages only for speed)
+            if 'thumbnail' in image_results and page_actual <= 10:
+                upload_task = storage_service.upload_file_async(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{session_id}_page_{page_actual}_thumb.png",
+                    blob_name=f"{session_id}_page_{page_actual}_thumb.jpg",
                     data=image_results['thumbnail']
                 )
                 upload_tasks.append(('thumbnail', upload_task))
@@ -359,7 +435,7 @@ class PDFService:
                 'page_number': page_actual,
                 'text_length': len(page_text),
                 'has_text': bool(page_text.strip()),
-                'has_tables': len(tables) > 0,
+                'has_tables': page_data['has_tables'],
                 'table_count': len(tables),
                 'drawing_type': page_analysis.get('drawing_type'),
                 'sheet_number': page_analysis.get('sheet_number'),
@@ -403,25 +479,36 @@ class PDFService:
                 'metadata': {}
             }
 
-    async def _generate_all_page_images(self, page, page_num: int) -> Dict[str, bytes]:
-        """Generate page images at different resolutions"""
+    async def _generate_all_page_images_optimized(self, page, page_num: int) -> Dict[str, bytes]:
+        """Generate page images at different resolutions - optimized"""
         
-        async def generate_image(dpi: int, image_type: str):
+        # Generate base pixmap once and reuse
+        base_matrix = fitz.Matrix(self.image_dpi / 72, self.image_dpi / 72)
+        base_pix = await asyncio.get_event_loop().run_in_executor(
+            self.executor,
+            lambda: page.get_pixmap(matrix=base_matrix, alpha=False)
+        )
+        
+        # Convert to PIL Image once
+        base_img = Image.frombytes("RGB", [base_pix.width, base_pix.height], base_pix.samples)
+        
+        async def generate_from_base(img_type: str):
             try:
                 return await asyncio.get_event_loop().run_in_executor(
                     self.executor,
-                    self._generate_page_image_optimized,
-                    page, dpi, image_type
+                    self._convert_image_optimized,
+                    base_img,
+                    img_type
                 )
             except Exception as e:
-                logger.error(f"Failed to generate {image_type} image for page {page_num}: {e}")
+                logger.error(f"Failed to generate {img_type} image for page {page_num}: {e}")
                 return None
         
-        # Generate all image types in parallel
+        # Generate all image types in parallel from base image
         tasks = {
-            'storage': generate_image(self.image_dpi, 'storage'),
-            'ai': generate_image(self.ai_image_dpi, 'ai'),
-            'thumbnail': generate_image(self.thumbnail_dpi, 'thumbnail')
+            'storage': generate_from_base('storage'),
+            'ai': generate_from_base('ai'),
+            'thumbnail': generate_from_base('thumbnail')
         }
         
         results = {}
@@ -430,71 +517,165 @@ class PDFService:
             if result:
                 results[img_type] = result
         
+        # Clean up
+        base_pix = None
+        
         return results
 
-    def _generate_page_image_optimized(self, page, dpi: int, image_type: str) -> bytes:
-        """Generate optimized page image with proper compression"""
+    def _convert_image_optimized(self, base_img: Image.Image, image_type: str) -> bytes:
+        """Convert base image to optimized format"""
         try:
-            # Create transformation matrix
-            matrix = fitz.Matrix(dpi / 72, dpi / 72)
+            output = io.BytesIO()
             
-            # Generate pixmap without alpha channel (smaller files)
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
-            
-            # Convert based on image type
             if image_type == 'thumbnail':
-                # JPEG for thumbnails (much smaller)
-                img_data = pix.pil_tobytes(format="JPEG", optimize=True, quality=self.jpeg_quality)
+                # Create small thumbnail
+                thumb = base_img.copy()
+                thumb.thumbnail((400, 400), Image.Resampling.LANCZOS)
+                thumb.save(output, format='JPEG', optimize=True, quality=70)
             
             elif image_type == 'ai':
-                # Optimized PNG for AI processing
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                
-                # Resize if too large
-                if max(img.size) > self.ai_max_dimension:
-                    img.thumbnail((self.ai_max_dimension, self.ai_max_dimension), Image.Resampling.LANCZOS)
-                
-                # Save as optimized PNG
-                output = io.BytesIO()
-                img.save(output, format='PNG', optimize=True, compress_level=self.png_compression_level)
-                img_data = output.getvalue()
+                # AI processing image
+                ai_img = base_img.copy()
+                if max(ai_img.size) > self.ai_max_dimension:
+                    ai_img.thumbnail((self.ai_max_dimension, self.ai_max_dimension), 
+                                   Image.Resampling.LANCZOS)
+                ai_img.save(output, format='JPEG', optimize=True, quality=self.ai_image_quality)
             
             else:  # storage
-                # High quality compressed PNG
-                # FIX: Remove the compress_level parameter
-                img_data = pix.tobytes(output="png")
+                # Use WebP for storage - better compression than PNG
+                if hasattr(Image, 'WEBP'):
+                    base_img.save(output, format='WEBP', quality=90, method=4)
+                else:
+                    # Fallback to optimized PNG
+                    base_img.save(output, format='PNG', optimize=True, compress_level=self.png_compression_level)
             
-            # Clean up
-            pix = None
-            
-            return img_data
+            return output.getvalue()
             
         except Exception as e:
-            logger.error(f"Image generation error for {image_type}: {e}")
+            logger.error(f"Image conversion error for {image_type}: {e}")
             raise
 
-    async def _detect_page_grid_system(self, page, page_num: int, 
-                                      image_bytes: bytes, page_text: str) -> Optional[GridSystem]:
-        """Detect grid system on a page using multiple methods"""
-        
-        grid_system = None
-        
-        # Try OpenCV detection first if available
-        if OPENCV_AVAILABLE and self.grid_detection_method == 'opencv':
-            grid_system = await self._detect_grid_opencv(image_bytes, page_num)
-        
-        # If OpenCV fails or not available, try pattern-based detection
-        if not grid_system or grid_system.confidence < 0.5:
-            pattern_grid = await self._detect_grid_patterns(page, page_text, page_num)
-            if pattern_grid and (not grid_system or pattern_grid.confidence > grid_system.confidence):
-                grid_system = pattern_grid
-        
-        # If still no good grid, create estimated grid
-        if not grid_system or grid_system.confidence < 0.3:
-            grid_system = self._create_estimated_grid(page, page_num)
-        
-        return grid_system
+    async def _detect_grid_patterns_fast(self, page, page_text: str, page_num: int) -> Optional[GridSystem]:
+        """Fast pattern-based grid detection"""
+        try:
+            # Check cache first
+            cache_key = f"{page_num}_grid"
+            if cache_key in self._grid_cache:
+                return self._grid_cache[cache_key]
+            
+            # Quick pattern search
+            x_refs = set()
+            y_refs = set()
+            
+            # Limit text search to first 5000 characters for speed
+            search_text = page_text[:5000] if len(page_text) > 5000 else page_text
+            
+            # Look for grid labels
+            for pattern_name, pattern in self.grid_patterns.items():
+                matches = list(pattern.finditer(search_text))[:10]  # Limit matches
+                for match in matches:
+                    if pattern_name in ['column_line', 'grid_line', 'axis']:
+                        ref = match.group(1)
+                        if ref.isalpha():
+                            x_refs.add(ref)
+                        elif ref.isdigit():
+                            y_refs.add(ref)
+                    elif pattern_name == 'number':
+                        y_refs.add(match.group(1))
+                    elif pattern_name == 'coordinate':
+                        x_refs.add(match.group(1))
+                        y_refs.add(match.group(2))
+            
+            if not x_refs or not y_refs:
+                return None
+            
+            # Create quick grid system
+            grid = GridSystem(
+                page_number=page_num,
+                x_labels=sorted(list(x_refs))[:15],  # Limit size
+                y_labels=sorted(list(y_refs), key=lambda x: int(x) if x.isdigit() else 0)[:20],
+                confidence=0.4
+            )
+            
+            # Quick position estimation
+            width = page.rect.width
+            height = page.rect.height
+            
+            if grid.x_labels:
+                spacing = width / (len(grid.x_labels) + 1)
+                for i, label in enumerate(grid.x_labels):
+                    grid.x_coordinates[label] = int((i + 1) * spacing)
+                grid.cell_width = int(spacing)
+            
+            if grid.y_labels:
+                spacing = height / (len(grid.y_labels) + 1)
+                for i, label in enumerate(grid.y_labels):
+                    grid.y_coordinates[label] = int((i + 1) * spacing)
+                grid.cell_height = int(spacing)
+            
+            # Cache result
+            self._grid_cache[cache_key] = grid
+            
+            return grid
+            
+        except Exception as e:
+            logger.error(f"Fast grid detection failed: {e}")
+            return None
 
+    async def _process_deferred_grid_detection(self, session_id: str, page_count: int,
+                                             storage_service: StorageService):
+        """Process OpenCV grid detection in background after initial processing"""
+        try:
+            logger.info(f"🔍 Starting deferred OpenCV grid detection for {session_id}")
+            
+            # Load existing grid systems
+            try:
+                grid_data = await storage_service.download_file(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=f"{session_id}_grid_systems.json"
+                )
+                existing_grids = json.loads(grid_data.decode('utf-8')) if grid_data else {}
+            except:
+                existing_grids = {}
+            
+            updated = False
+            
+            # Process pages that need better grid detection
+            for page_num in range(1, min(page_count + 1, 20)):  # Limit to first 20 pages
+                str_page = str(page_num)
+                
+                # Skip if already has good grid
+                if str_page in existing_grids and existing_grids[str_page].get('confidence', 0) > 0.6:
+                    continue
+                
+                try:
+                    # Download page image
+                    img_data = await storage_service.download_file(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=f"{session_id}_page_{page_num}.png"
+                    )
+                    
+                    if img_data:
+                        # Run OpenCV detection
+                        grid = await self._detect_grid_opencv(img_data, page_num)
+                        
+                        if grid and grid.confidence > existing_grids.get(str_page, {}).get('confidence', 0):
+                            existing_grids[str_page] = grid.to_dict()
+                            updated = True
+                            logger.info(f"🎯 Enhanced grid detection for page {page_num}")
+                
+                except Exception as e:
+                    logger.error(f"Failed deferred grid detection for page {page_num}: {e}")
+            
+            # Save updated grids if any improvements
+            if updated:
+                await self._save_grid_systems(session_id, existing_grids, storage_service)
+                logger.info(f"✅ Completed deferred grid detection for {session_id}")
+            
+        except Exception as e:
+            logger.error(f"Deferred grid detection failed: {e}")
+
+    # Keep all the existing helper methods unchanged
     async def _detect_grid_opencv(self, image_bytes: bytes, page_num: int) -> Optional[GridSystem]:
         """Detect grid using OpenCV line detection"""
         if not OPENCV_AVAILABLE:
@@ -585,75 +766,6 @@ class PDFService:
                 
             except Exception as e:
                 logger.error(f"OpenCV grid detection failed: {e}")
-                return None
-        
-        return await asyncio.get_event_loop().run_in_executor(self.executor, detect)
-
-    async def _detect_grid_patterns(self, page, page_text: str, page_num: int) -> Optional[GridSystem]:
-        """Detect grid using text pattern matching"""
-        
-        def detect():
-            try:
-                # Find grid references in text
-                x_refs = set()
-                y_refs = set()
-                
-                # Look for grid labels
-                for pattern_name, pattern in self.grid_patterns.items():
-                    matches = pattern.finditer(page_text)
-                    for match in matches:
-                        if pattern_name in ['column_line', 'grid_line', 'axis']:
-                            ref = match.group(1)
-                            if ref.isalpha():
-                                x_refs.add(ref)
-                            elif ref.isdigit():
-                                y_refs.add(ref)
-                        elif pattern_name == 'number':
-                            y_refs.add(match.group(1))
-                        elif pattern_name == 'coordinate':
-                            x_refs.add(match.group(1))
-                            y_refs.add(match.group(2))
-                
-                if not x_refs or not y_refs:
-                    return None
-                
-                # Sort references
-                x_sorted = sorted(list(x_refs))
-                y_sorted = sorted(list(y_refs), key=lambda x: int(x) if x.isdigit() else 0)
-                
-                # Create grid system
-                grid = GridSystem(
-                    page_number=page_num,
-                    x_labels=x_sorted[:20],  # Limit to reasonable number
-                    y_labels=y_sorted[:30],
-                    confidence=0.5
-                )
-                
-                # Try to find actual positions using text search
-                width = page.rect.width
-                height = page.rect.height
-                
-                # Estimate positions
-                if grid.x_labels:
-                    spacing = width / (len(grid.x_labels) + 1)
-                    for i, label in enumerate(grid.x_labels):
-                        grid.x_coordinates[label] = int((i + 1) * spacing)
-                
-                if grid.y_labels:
-                    spacing = height / (len(grid.y_labels) + 1)
-                    for i, label in enumerate(grid.y_labels):
-                        grid.y_coordinates[label] = int((i + 1) * spacing)
-                
-                # Calculate cell dimensions
-                if len(grid.x_labels) > 1:
-                    grid.cell_width = int(width / (len(grid.x_labels) + 1))
-                if len(grid.y_labels) > 1:
-                    grid.cell_height = int(height / (len(grid.y_labels) + 1))
-                
-                return grid
-                
-            except Exception as e:
-                logger.error(f"Pattern grid detection failed: {e}")
                 return None
         
         return await asyncio.get_event_loop().run_in_executor(self.executor, detect)
@@ -914,8 +1026,8 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "3.0.0",
-            "mode": "enhanced_with_grid_detection",
+            "version": "3.1.0",
+            "mode": "enhanced_with_grid_detection_optimized",
             "capabilities": {
                 "max_pages": self.max_pages,
                 "parallel_processing": True,
@@ -923,11 +1035,13 @@ class PDFService:
                 "text_indexing": True,
                 "table_extraction": True,
                 "grid_detection": self.enable_grid_detection,
-                "multi_resolution": True
+                "multi_resolution": True,
+                "deferred_processing": self.defer_opencv_grid
             },
             "performance": {
                 "batch_size": self.batch_size,
                 "parallel_workers": self.max_workers,
+                "process_workers": self.cpu_executor._max_workers,
                 "image_resolutions": {
                     "storage": self.image_dpi,
                     "ai_processing": self.ai_image_dpi,
@@ -939,7 +1053,8 @@ class PDFService:
                 },
                 "grid_detection": {
                     "method": self.grid_detection_method,
-                    "opencv_available": OPENCV_AVAILABLE
+                    "opencv_available": OPENCV_AVAILABLE,
+                    "deferred": self.defer_opencv_grid
                 }
             }
         }
@@ -948,3 +1063,5 @@ class PDFService:
         """Cleanup thread pool"""
         if hasattr(self, 'executor'):
             self.executor.shutdown(wait=True)
+        if hasattr(self, 'cpu_executor'):
+            self.cpu_executor.shutdown(wait=True)
