@@ -1,4 +1,4 @@
-# main.py - OPTIMIZED FOR LARGE DOCUMENT PROCESSING
+# main.py - COMPLETE VERSION WITH ALL ROUTES REGISTERED
 
 import os
 import datetime
@@ -27,7 +27,6 @@ except ImportError as e:
     PDFService = None
 
 try:
-    # Import the main AI service class
     from app.services.ai_service import ProfessionalBlueprintAI
 except ImportError as e:
     logging.warning(f"AI service import failed: {e}")
@@ -52,6 +51,18 @@ except ImportError as e:
     logging.warning(f"Document routes import failed: {e}")
     document_router = None
 
+try:
+    from app.api.routes.annotation_routes import annotation_router
+except ImportError as e:
+    logging.warning(f"Annotation routes import failed: {e}")
+    annotation_router = None
+
+try:
+    from app.api.routes.note_routes import note_router
+except ImportError as e:
+    logging.warning(f"Note routes import failed: {e}")
+    note_router = None
+
 # --- Configure logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -68,7 +79,6 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 try:
     settings = get_settings()
     logger.info("✅ Settings loaded successfully")
-    # Get environment safely with fallback
     environment = getattr(settings, 'ENVIRONMENT', os.getenv('ENVIRONMENT', 'production'))
     logger.info(f"🔧 Environment: {environment}")
 except Exception as e:
@@ -79,15 +89,12 @@ except Exception as e:
 # --- Application Lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Manages application startup and shutdown with optimized service initialization
-    """
+    """Manages application startup and shutdown with optimized service initialization"""
     logger.info("="*60)
     logger.info("🚀 SMART BLUEPRINT API - PROFESSIONAL EDITION")
     logger.info("="*60)
     logger.info(f"📅 Starting at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Get environment safely
     environment = getattr(settings, 'ENVIRONMENT', os.getenv('ENVIRONMENT', 'production'))
     debug_mode = getattr(settings, 'DEBUG', False)
     
@@ -111,7 +118,6 @@ async def lifespan(app: FastAPI):
             await storage_service.verify_connection()
             app.state.storage_service = storage_service
             
-            # Log storage configuration
             storage_info = storage_service.get_connection_info()
             logger.info("✅ Storage Service Ready")
             logger.info(f"   - Main container: {storage_info['containers']['main']}")
@@ -134,7 +140,6 @@ async def lifespan(app: FastAPI):
             ai_service = ProfessionalBlueprintAI(settings)
             app.state.ai_service = ai_service
             
-            # Log AI capabilities
             capabilities = ai_service.get_professional_capabilities()
             logger.info("✅ Professional AI Service Ready")
             logger.info(f"   - Building codes: {len(capabilities['building_codes'])} supported")
@@ -142,6 +147,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"   - Max pages: {ai_service.max_pages_to_load}")
             logger.info(f"   - Batch processing: {ai_service.batch_size} pages/batch")
             logger.info(f"   - Image optimization: Enabled (quality={ai_service.image_quality}%)")
+            logger.info(f"   - Note suggestions: Enabled")
             
         except Exception as e:
             logger.error(f"❌ AI Service initialization failed: {e}")
@@ -158,12 +164,12 @@ async def lifespan(app: FastAPI):
             pdf_service = PDFService(settings)
             app.state.pdf_service = pdf_service
             
-            # Log PDF processing configuration
             stats = pdf_service.get_processing_stats()
             logger.info("✅ PDF Service Ready")
             logger.info(f"   - Max pages: {stats['capabilities']['max_pages']}")
             logger.info(f"   - Parallel processing: {stats['capabilities']['parallel_processing']}")
             logger.info(f"   - Image optimization: {stats['capabilities']['image_optimization']}")
+            logger.info(f"   - Grid detection: {stats['capabilities']['grid_detection']}")
             logger.info(f"   - Workers: {stats['performance']['parallel_workers']}")
             
         except Exception as e:
@@ -181,10 +187,14 @@ async def lifespan(app: FastAPI):
             session_service = SessionService(settings)
             app.state.session_service = session_service
             
+            # Start background cleanup
+            await session_service.start_background_cleanup()
+            
             logger.info("✅ Session Service Ready")
             logger.info(f"   - Max sessions: {session_service.max_sessions}")
             logger.info(f"   - Max annotations/session: {session_service.max_annotations_per_session}")
             logger.info(f"   - Memory management: LRU eviction enabled")
+            logger.info(f"   - Background cleanup: Running")
             
         except Exception as e:
             logger.error(f"❌ Session Service initialization failed: {e}")
@@ -206,6 +216,15 @@ async def lifespan(app: FastAPI):
     logger.info("="*60)
     logger.info("🌐 API Ready for Blueprint Analysis")
     logger.info(f"📍 Access docs at: http://{host}:{port}/docs")
+    logger.info("="*60)
+    logger.info("📋 Available Features:")
+    logger.info("   - Multi-page blueprint analysis (up to 100 pages)")
+    logger.info("   - AI-powered visual highlighting")
+    logger.info("   - Private user sessions for highlights")
+    logger.info("   - Collaborative note system")
+    logger.info("   - Building code compliance checking")
+    logger.info("   - Trade coordination & conflict detection")
+    logger.info("   - Automatic note suggestions from AI")
     logger.info("="*60)
 
     yield
@@ -243,14 +262,36 @@ app = FastAPI(
     
     This API provides comprehensive blueprint analysis including:
     - 🏗️ Multi-page document support (up to 100 pages)
-    - 📐 Building code compliance verification
+    - 📐 Building code compliance verification (BCBC, NBC, NFPA, CEC)
     - 🔍 Professional calculations and quantity takeoffs
     - 👥 Collaborative annotations and discussions
-    - 🤖 GPT-4 Vision powered analysis
+    - 🤖 GPT-4 Vision powered analysis with visual highlighting
+    - 📝 AI-suggested note creation for important findings
+    - 🔒 Privacy-first design with user-specific highlight sessions
+    
+    ## Key Features:
+    
+    ### Visual Intelligence
+    - Analyzes blueprint images with GPT-4 Vision
+    - Identifies elements and their grid locations
+    - Creates visual highlights visible only to the requesting user
+    - Detects grid systems for precise coordinate mapping
+    
+    ### Collaboration
+    - Private notes by default (only visible to author)
+    - Publish notes to share findings with all users
+    - Track which trades are impacted by issues
+    - Export notes and findings
+    
+    ### Building Code Knowledge
+    - Falls back to code requirements when information is missing
+    - Supports BCBC 2018, NBC, NFPA, CEC standards
+    - Identifies potential code violations
+    - Suggests compliance verification steps
     
     Optimized for large construction documents with parallel processing and intelligent caching.
     """,
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -264,6 +305,14 @@ app = FastAPI(
             "description": "Get statistics and collaboration insights"
         },
         {
+            "name": "Annotations",
+            "description": "Manage visual highlights and annotations (private to users)"
+        },
+        {
+            "name": "Notes",
+            "description": "Create and manage collaborative notes (private/public)"
+        },
+        {
             "name": "General",
             "description": "Health checks and system information"
         }
@@ -275,7 +324,7 @@ cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:8080",
-    "https://talktosmartblueprints.netlify.app",  # Production URL
+    "https://talktosmartblueprints.netlify.app",
 ]
 
 # Add any additional origins from settings
@@ -300,7 +349,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
+    max_age=3600,
 )
 
 # --- Global Exception Handler ---
@@ -311,7 +360,6 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Error: {exc}")
     logger.debug(f"Traceback: {traceback.format_exc()}")
     
-    # Provide detailed error in debug mode only
     debug_mode = getattr(settings, 'DEBUG', False)
     error_detail = str(exc) if debug_mode else "An internal server error occurred"
     
@@ -325,7 +373,9 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# --- Register API Routes ---
+# --- Register ALL API Routes ---
+
+# Blueprint routes (main functionality)
 if blueprint_router:
     app.include_router(
         blueprint_router, 
@@ -336,6 +386,7 @@ if blueprint_router:
 else:
     logger.error("❌ Blueprint routes not available")
 
+# Document analytics routes
 if document_router:
     app.include_router(
         document_router, 
@@ -346,29 +397,65 @@ if document_router:
 else:
     logger.warning("⚠️  Document analytics routes not available")
 
+# Annotation routes (visual highlights)
+if annotation_router:
+    app.include_router(
+        annotation_router, 
+        prefix="/api/v1", 
+        tags=["Annotations"]
+    )
+    logger.info("✅ Annotation routes registered")
+else:
+    logger.warning("⚠️  Annotation routes not available")
+
+# Note routes (collaborative notes)
+if note_router:
+    app.include_router(
+        note_router, 
+        prefix="/api/v1", 
+        tags=["Notes"]
+    )
+    logger.info("✅ Note routes registered")
+else:
+    logger.warning("⚠️  Note routes not available")
+
 # --- Core API Endpoints ---
 @app.get("/", tags=["General"])
 async def root():
-    """Welcome endpoint with API information"""
+    """Welcome endpoint with API information and quick start guide"""
     return {
         "message": "Welcome to Smart Blueprint Chat API - Professional Edition",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "documentation": "/docs",
         "health_check": "/health",
+        "quick_start": {
+            "1_upload": "POST /api/v1/documents/upload - Upload a PDF blueprint",
+            "2_chat": "POST /api/v1/documents/{document_id}/chat - Ask questions",
+            "3_highlights": "GET /api/v1/documents/{document_id}/highlights/active - View your highlights",
+            "4_notes": "POST /api/v1/documents/{document_id}/notes - Create notes"
+        },
         "capabilities": {
             "blueprint_analysis": True,
             "code_compliance": True,
             "multi_page_support": True,
             "max_pages": 100,
             "collaboration": True,
-            "annotations": True
+            "private_highlights": True,
+            "public_notes": True,
+            "ai_suggestions": True
         },
         "supported_codes": [
             "2018 BCBC (British Columbia Building Code)",
             "NBC (National Building Code of Canada)",
             "CSA Standards",
-            "NFPA Standards"
-        ]
+            "NFPA Standards",
+            "CEC (Canadian Electrical Code)"
+        ],
+        "privacy_model": {
+            "highlights": "Private to each user",
+            "notes": "Private by default, can be published",
+            "sessions": "User-specific with 24h expiration"
+        }
     }
 
 @app.get("/health", tags=["General"])
@@ -376,13 +463,11 @@ async def health_check(request: Request):
     """Comprehensive health check of all services"""
     app_state = request.app.state
     
-    # Check each service
     services_status = {}
     
     # Storage Service
     if hasattr(app_state, 'storage_service') and app_state.storage_service:
         try:
-            # Quick connectivity check
             services_status['storage'] = {
                 "status": "healthy",
                 "type": "Azure Blob Storage",
@@ -401,7 +486,8 @@ async def health_check(request: Request):
                 "status": "healthy",
                 "mode": "professional",
                 "max_pages": app_state.ai_service.max_pages_to_load,
-                "disciplines": len(capabilities['engineering_disciplines'])
+                "disciplines": len(capabilities['engineering_disciplines']),
+                "note_suggestions": "enabled"
             }
         except Exception as e:
             services_status['ai'] = {"status": "unhealthy", "error": str(e)}
@@ -415,7 +501,8 @@ async def health_check(request: Request):
             services_status['pdf'] = {
                 "status": "healthy",
                 "max_pages": stats['capabilities']['max_pages'],
-                "workers": stats['performance']['parallel_workers']
+                "workers": stats['performance']['parallel_workers'],
+                "grid_detection": stats['capabilities']['grid_detection']
             }
         except Exception as e:
             services_status['pdf'] = {"status": "unhealthy", "error": str(e)}
@@ -429,7 +516,8 @@ async def health_check(request: Request):
             services_status['sessions'] = {
                 "status": "healthy",
                 "active_sessions": stats['total_sessions'],
-                "capacity_used": f"{stats['capacity_used_percent']}%"
+                "capacity_used": f"{stats['capacity_used_percent']}%",
+                "highlight_sessions": stats['total_highlight_sessions']
             }
         except Exception as e:
             services_status['sessions'] = {"status": "unhealthy", "error": str(e)}
@@ -443,7 +531,6 @@ async def health_check(request: Request):
         if service.get('status') != 'disabled'
     )
     
-    # Get environment safely
     environment = getattr(app_state, 'environment', 'production')
     
     # Calculate uptime
@@ -453,10 +540,11 @@ async def health_check(request: Request):
     return {
         "status": "healthy" if all_healthy else "degraded",
         "timestamp": datetime.datetime.utcnow().isoformat(),
-        "version": "2.2.0",
+        "version": "2.3.0",
         "environment": environment,
         "services": services_status,
-        "uptime_seconds": uptime_seconds
+        "uptime_seconds": uptime_seconds,
+        "uptime_human": f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
     }
 
 @app.get("/api/v1/system/status", tags=["General"])
@@ -464,15 +552,21 @@ async def system_status(request: Request):
     """Detailed system status and capabilities"""
     app_state = request.app.state
     
-    # Get environment and debug mode safely
     environment = getattr(app_state, 'environment', 'production')
     debug_mode = getattr(settings, 'DEBUG', False) if settings else False
     
     system_info = {
-        "api_version": "2.2.0",
+        "api_version": "2.3.0",
         "environment": environment,
         "debug_mode": debug_mode,
-        "timestamp": datetime.datetime.utcnow().isoformat()
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "features_enabled": {
+            "document_notes": settings.ENABLE_DOCUMENT_NOTES if settings else True,
+            "ai_highlighting": settings.ENABLE_AI_HIGHLIGHTING if settings else True,
+            "private_notes": settings.ENABLE_PRIVATE_NOTES if settings else True,
+            "note_publishing": settings.ENABLE_NOTE_PUBLISHING if settings else True,
+            "trade_coordination": settings.ENABLE_TRADE_COORDINATION if settings else True
+        }
     }
     
     # Get detailed capabilities if AI service is available
@@ -491,25 +585,41 @@ async def system_status(request: Request):
 
 @app.get("/api/v1/system/info", tags=["General"])
 async def system_info():
-    """Basic system information"""
+    """Basic system information and limits"""
     return {
         "name": "Smart Blueprint Chat API",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "description": "Professional blueprint analysis with AI-powered intelligence",
         "features": [
             "Multi-page blueprint analysis (up to 100 pages)",
             "Building code compliance verification",
             "Professional calculations and takeoffs",
-            "Collaborative annotations",
-            "Real-time AI chat",
-            "Document version tracking"
+            "Private user-specific highlights",
+            "Collaborative note system",
+            "Real-time AI chat with visual responses",
+            "Document version tracking",
+            "Trade coordination support",
+            "AI-suggested note creation"
         ],
         "limits": {
             "max_file_size_mb": int(os.getenv("MAX_FILE_SIZE_MB", "60")),
             "max_pages": int(os.getenv("PDF_MAX_PAGES", "100")),
             "max_chat_length": 2000,
-            "max_annotation_length": 1000
-        }
+            "max_annotation_length": 1000,
+            "max_notes_per_document": int(os.getenv("MAX_NOTES_PER_DOCUMENT", "500")),
+            "max_note_length": int(os.getenv("MAX_NOTE_LENGTH", "10000")),
+            "highlight_expiration_hours": 24
+        },
+        "supported_formats": ["PDF"],
+        "supported_trades": [
+            "General",
+            "Electrical", 
+            "Plumbing",
+            "HVAC",
+            "Fire Protection",
+            "Structural",
+            "Architectural"
+        ]
     }
 
 # --- Store startup time for uptime calculation ---
