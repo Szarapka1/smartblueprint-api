@@ -1,4 +1,4 @@
-# app/api/routes/blueprint_routes.py - WITH MULTI-PAGE HIGHLIGHTING SUPPORT
+# app/api/routes/blueprint_routes.py - COMPLETE INTEGRATION WITH VISUAL HIGHLIGHTING
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Header, Query, Response
 from pydantic import BaseModel, Field
@@ -9,10 +9,12 @@ import uuid
 import re
 import os
 import logging
+import asyncio
+
 from app.core.config import get_settings
 from app.models.schemas import (
     Note, NoteCreate, NoteUpdate, NoteBatch, NoteList,
-    ChatRequest, ChatResponse, VisualElement, DrawingGrid,
+    ChatRequest, ChatResponse, VisualElement, DrawingGrid, GridReference,
     DocumentUploadResponse, DocumentInfoResponse, DocumentListResponse,
     SuccessResponse, ErrorResponse,
     Annotation  # For backward compatibility
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 blueprint_router = APIRouter()
 settings = get_settings()
 
-# --- Helper Functions (KEEPING ALL EXISTING ONES) ---
+# --- Helper Functions ---
 
 def validate_document_id(document_id: str) -> str:
     """Validate and sanitize document ID"""
@@ -83,7 +85,7 @@ def validate_file_upload(file: UploadFile) -> None:
     
     logger.info(f"File validation passed: {file.filename}, type: {file.content_type}")
 
-# --- Chat History Management (KEEPING EXISTING) ---
+# --- Chat History Management ---
 
 async def load_user_chat_history(document_id: str, author: str, storage_service) -> List[dict]:
     """Load a specific user's private chat history"""
@@ -120,10 +122,10 @@ async def save_user_chat_history(document_id: str, author: str, chat_history: Li
         raise
 
 async def log_all_chat_activity(document_id: str, author: str, prompt: str, 
-                               ai_response: str, visual_highlights: Optional[List[Dict]], 
-                               query_session_id: Optional[str],
+                               ai_response: str, query_session_id: Optional[str],
+                               highlight_stats: Dict[str, Any],
                                storage_service):
-    """Log ALL chat activity for service analytics - UPDATED with session tracking"""
+    """Log ALL chat activity for service analytics"""
     try:
         activity_blob_name = f"{document_id}_all_chats.json"
         
@@ -137,26 +139,25 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str,
         except Exception:
             all_chats = []
         
-        # Add new activity with enhanced tracking
+        # Add new activity with comprehensive tracking
         chat_entry = {
             "chat_id": str(uuid.uuid4())[:8],
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "document_id": document_id,
             "author": author,
             "prompt": prompt,
-            "ai_response": ai_response,
+            "ai_response": ai_response[:1000],  # Truncate long responses
             "prompt_length": len(prompt),
             "response_length": len(ai_response),
-            "had_visual_highlights": bool(visual_highlights),
-            "highlight_count": len(visual_highlights) if visual_highlights else 0,
-            "query_session_id": query_session_id,  # NEW: Track which highlight session
-            "reference_previous": bool("reference_previous" in prompt.lower()),  # Track if reusing
+            "query_session_id": query_session_id,
+            "highlight_stats": highlight_stats,
+            "reference_previous": bool("reference_previous" in prompt.lower()),
         }
         
         all_chats.append(chat_entry)
         
         # Limit size
-        max_chats = getattr(settings, 'MAX_CHAT_LOGS', 1000)
+        max_chats = settings.MAX_CHAT_LOGS
         if len(all_chats) > max_chats:
             all_chats = all_chats[-max_chats:]
         
@@ -171,60 +172,7 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str,
     except Exception as e:
         logger.error(f"Failed to log chat activity: {e}")
 
-# --- NEW: Session Management for Highlights ---
-
-async def get_active_query_session(document_id: str, author: str, storage_service) -> Optional[str]:
-    """Get the active query session ID for a user's highlights"""
-    try:
-        # Store active sessions in a simple mapping file
-        session_blob = f"{document_id}_active_sessions.json"
-        
-        try:
-            session_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=session_blob
-            )
-            sessions = json.loads(session_data)
-        except:
-            sessions = {}
-        
-        return sessions.get(author)
-        
-    except Exception as e:
-        logger.error(f"Failed to get active session: {e}")
-        return None
-
-async def set_active_query_session(document_id: str, author: str, 
-                                  query_session_id: str, storage_service):
-    """Set the active query session ID for a user"""
-    try:
-        session_blob = f"{document_id}_active_sessions.json"
-        
-        # Load existing sessions
-        try:
-            session_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=session_blob
-            )
-            sessions = json.loads(session_data)
-        except:
-            sessions = {}
-        
-        # Update session
-        sessions[author] = query_session_id
-        
-        # Save back
-        session_json = json.dumps(sessions, indent=2)
-        await storage_service.upload_file(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=session_blob,
-            data=session_json.encode('utf-8')
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to set active session: {e}")
-
-# --- Note Management Functions (KEEPING EXISTING) ---
+# --- Note Management Functions ---
 
 async def load_notes(document_id: str, storage_service) -> List[dict]:
     """Load all notes for a document"""
@@ -268,7 +216,7 @@ async def get_document_metadata(document_id: str, storage_service) -> Optional[D
     except Exception:
         return None
 
-# --- MAIN API ROUTES (KEEPING ALL EXISTING ENDPOINTS) ---
+# --- MAIN API ROUTES ---
 
 @blueprint_router.post("/documents/upload", status_code=201, response_model=DocumentUploadResponse)
 async def upload_shared_document(
@@ -277,18 +225,18 @@ async def upload_shared_document(
     force_reprocess: bool = Query(False, description="Force reprocessing"),
     file: UploadFile = File(...)
 ):
-    """Upload and process a PDF document"""
+    """Upload and process a PDF document with grid detection"""
     try:
         logger.info(f"Upload request: id={document_id}, force={force_reprocess}, file={file.filename}")
         validate_file_upload(file)
         
         # Check file size
-        max_size = int(os.getenv("MAX_FILE_SIZE_MB", "60")) * 1024 * 1024
+        max_size = settings.MAX_FILE_SIZE_MB * 1024 * 1024
         pdf_bytes = await file.read()
         if len(pdf_bytes) > max_size:
             raise HTTPException(
                 status_code=413, 
-                detail=f"File too large. Max size is {max_size // (1024*1024)}MB"
+                detail=f"File too large. Max size is {settings.MAX_FILE_SIZE_MB}MB"
             )
 
         clean_document_id = validate_document_id(document_id)
@@ -296,8 +244,9 @@ async def upload_shared_document(
         # Check services
         pdf_service = request.app.state.pdf_service
         storage_service = request.app.state.storage_service
+        session_service = request.app.state.session_service
         
-        if not pdf_service or not storage_service:
+        if not all([pdf_service, storage_service, session_service]):
             raise HTTPException(
                 status_code=503, 
                 detail="Required services are not available"
@@ -310,8 +259,10 @@ async def upload_shared_document(
         )
         
         if document_exists and not force_reprocess:
-            logger.info(f"Document {clean_document_id} already exists")
+            # Create/update session
+            session_service.create_session(clean_document_id, file.filename)
             
+            logger.info(f"Document {clean_document_id} already exists")
             return DocumentUploadResponse(
                 document_id=clean_document_id,
                 filename=file.filename,
@@ -327,12 +278,24 @@ async def upload_shared_document(
             data=pdf_bytes
         )
 
-        # Process PDF
+        # Process PDF with grid detection
         await pdf_service.process_and_cache_pdf(
             session_id=clean_document_id,
             pdf_bytes=pdf_bytes,
             storage_service=storage_service
         )
+        
+        # Create session
+        session_service.create_session(clean_document_id, file.filename)
+        
+        # Update session with metadata
+        metadata = await get_document_metadata(clean_document_id, storage_service)
+        if metadata:
+            session_service.update_session_metadata(clean_document_id, {
+                'page_count': metadata.get('page_count', 0),
+                'has_grid_systems': metadata.get('extraction_summary', {}).get('has_grid_systems', False),
+                'grid_systems_detected': metadata.get('optimization_stats', {}).get('grid_systems_detected', 0)
+            })
 
         status_message = "reprocessed" if (force_reprocess and document_exists) else "processing_complete"
         
@@ -347,7 +310,7 @@ async def upload_shared_document(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Upload failed for {document_id}: {e}")
+        logger.error(f"Upload failed for {document_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @blueprint_router.get("/documents/{document_id}/info", response_model=DocumentInfoResponse)
@@ -356,6 +319,7 @@ async def get_document_info(request: Request, document_id: str):
     try:
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
+        session_service = request.app.state.session_service
         
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service not available")
@@ -375,12 +339,20 @@ async def get_document_info(request: Request, document_id: str):
         # Get metadata
         metadata = await get_document_metadata(clean_document_id, storage_service)
         
+        # Get session info if available
+        session_info = None
+        if session_service:
+            session_info = session_service.get_session_info(clean_document_id)
+        
         return DocumentInfoResponse(
             document_id=clean_document_id,
             status="ready",
             message="Document is ready for use",
             exists=True,
-            metadata=metadata
+            metadata={
+                **(metadata or {}),
+                'session_info': session_info
+            }
         )
             
     except HTTPException:
@@ -398,22 +370,22 @@ async def list_documents(
     """List all available documents with pagination"""
     try:
         storage_service = request.app.state.storage_service
+        session_service = request.app.state.session_service
+        
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service not available")
         
-        # Use optimized method
-        if hasattr(storage_service, 'list_document_ids'):
-            document_ids = await storage_service.list_document_ids(settings.AZURE_CACHE_CONTAINER_NAME)
-        else:
-            context_files = await storage_service.list_blobs(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                suffix="_context.txt"
-            )
-            document_ids = [f.replace('_context.txt', '') for f in context_files]
+        # Get document IDs
+        document_ids = await storage_service.list_document_ids(settings.AZURE_CACHE_CONTAINER_NAME)
         
         # Apply pagination
         paginated_ids = document_ids[offset:offset + limit]
         has_more = len(document_ids) > offset + limit
+        
+        # Get session data if available
+        active_sessions = {}
+        if session_service:
+            active_sessions = session_service.get_all_sessions(limit=200)
         
         documents = []
         for doc_id in paginated_ids:
@@ -422,12 +394,17 @@ async def list_documents(
                 "status": "ready"
             }
             
+            # Add session info
+            if doc_id in active_sessions:
+                doc_info["session_data"] = active_sessions[doc_id]
+            
             # Try to get metadata
             try:
                 metadata = await get_document_metadata(doc_id, storage_service)
                 if metadata:
                     doc_info["page_count"] = metadata.get("page_count", 0)
                     doc_info["file_size_mb"] = metadata.get("file_size_mb", 0)
+                    doc_info["has_grid_systems"] = metadata.get("extraction_summary", {}).get("has_grid_systems", False)
             except:
                 pass
             
@@ -445,7 +422,7 @@ async def list_documents(
 
 @blueprint_router.get("/documents/{document_id}/pdf")
 async def download_document_pdf(request: Request, document_id: str):
-    """Download the original PDF for viewing in shared documents"""
+    """Download the original PDF"""
     try:
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
@@ -453,7 +430,7 @@ async def download_document_pdf(request: Request, document_id: str):
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service not available")
         
-        # Check existence first
+        # Check existence
         exists = await storage_service.blob_exists(
             container_name=settings.AZURE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}.pdf"
@@ -483,7 +460,7 @@ async def download_document_pdf(request: Request, document_id: str):
         logger.error(f"Failed to download PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to download PDF: {str(e)}")
 
-# --- ENHANCED CHAT ENDPOINT WITH MULTI-PAGE HIGHLIGHTING ---
+# --- ENHANCED CHAT ENDPOINT WITH VISUAL HIGHLIGHTING ---
 
 @blueprint_router.post("/documents/{document_id}/chat", response_model=ChatResponse)
 async def chat_with_shared_document(
@@ -491,22 +468,21 @@ async def chat_with_shared_document(
     document_id: str, 
     chat_request: ChatRequest
 ):
-    """Chat with AI about a document with multi-page visual highlighting"""
+    """Chat with AI about a document with visual highlighting support"""
     try:
         clean_document_id = validate_document_id(document_id)
-        
-        # Validate author
-        author = chat_request.author
-        clean_author = validate_author(author)
-        
+        clean_author = validate_author(chat_request.author)
         clean_prompt = chat_request.prompt.strip()
+        
         if not clean_prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
         
         # Check services
         ai_service = request.app.state.ai_service
         storage_service = request.app.state.storage_service
-        if not ai_service or not storage_service:
+        session_service = request.app.state.session_service
+        
+        if not all([ai_service, storage_service, session_service]):
             raise HTTPException(
                 status_code=503, 
                 detail="Required services are not available"
@@ -523,17 +499,26 @@ async def chat_with_shared_document(
                 status_code=404, 
                 detail=f"Document '{clean_document_id}' not found"
             )
+        
+        # Create highlight session
+        highlight_session = session_service.create_highlight_session(
+            document_id=clean_document_id,
+            user=clean_author,
+            query=clean_prompt
+        )
+        
+        logger.info(f"Created highlight session {highlight_session.query_session_id} for {clean_author}")
 
-        # Get AI response with multi-page highlighting support
+        # Get AI response with visual highlighting
         ai_result = await ai_service.get_ai_response(
             prompt=clean_prompt,
             document_id=clean_document_id,
             storage_service=storage_service,
             author=clean_author,
             current_page=chat_request.current_page,
-            request_highlights=True,  # Always allow highlights
-            reference_previous=chat_request.reference_previous,  # NEW: Reference previous highlights
-            preserve_existing=chat_request.preserve_existing     # NEW: Keep existing highlights
+            request_highlights=True,
+            reference_previous=chat_request.reference_previous,
+            preserve_existing=chat_request.preserve_existing
         )
         
         # Extract components from result
@@ -542,37 +527,51 @@ async def chat_with_shared_document(
             visual_highlights = ai_result.get("visual_highlights")
             drawing_grid = ai_result.get("drawing_grid")
             highlight_summary = ai_result.get("highlight_summary")
-            current_page = ai_result.get("current_page")
-            query_session_id = ai_result.get("query_session_id")  # NEW: Session ID for highlights
-            all_highlight_pages = ai_result.get("all_highlight_pages")  # NEW: Pages with highlights
+            current_page = ai_result.get("current_page", chat_request.current_page)
+            query_session_id = highlight_session.query_session_id
+            all_highlight_pages = ai_result.get("all_highlight_pages", {})
+            total_highlights = ai_result.get("total_highlights", 0)
         else:
             # Backward compatibility
-            ai_response_text = ai_result
+            ai_response_text = str(ai_result)
             visual_highlights = None
             drawing_grid = None
             highlight_summary = None
-            current_page = None
-            query_session_id = None
-            all_highlight_pages = None
+            current_page = chat_request.current_page
+            query_session_id = highlight_session.query_session_id
+            all_highlight_pages = {}
+            total_highlights = 0
         
-        chat_id = str(uuid.uuid4())[:8]
-        timestamp = datetime.utcnow().isoformat() + "Z"
-
+        # Update highlight session with results
+        if all_highlight_pages:
+            element_types = list(set(
+                h.element_type for h in visual_highlights
+            )) if visual_highlights else []
+            
+            session_service.update_highlight_session(
+                document_id=clean_document_id,
+                query_session_id=query_session_id,
+                pages_with_highlights=all_highlight_pages,
+                element_types=element_types,
+                total_highlights=total_highlights
+            )
+        
         # Save to user's chat history
         chat_history = await load_user_chat_history(clean_document_id, clean_author, storage_service)
         chat_entry = {
-            "chat_id": chat_id,
-            "timestamp": timestamp,
+            "chat_id": str(uuid.uuid4())[:8],
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "prompt": clean_prompt,
             "ai_response": ai_response_text,
             "had_highlights": bool(visual_highlights),
-            "query_session_id": query_session_id,  # Track which highlights
-            "reference_previous": chat_request.reference_previous  # Track what was referenced
+            "query_session_id": query_session_id,
+            "reference_previous": chat_request.reference_previous,
+            "pages_with_highlights": list(all_highlight_pages.keys()) if all_highlight_pages else []
         }
         chat_history.append(chat_entry)
         
         # Limit history size
-        max_chats = int(os.getenv("MAX_USER_CHAT_HISTORY", "100"))
+        max_chats = settings.MAX_USER_CHAT_HISTORY
         await save_user_chat_history(
             clean_document_id, 
             clean_author, 
@@ -580,34 +579,37 @@ async def chat_with_shared_document(
             storage_service
         )
         
-        # Update active query session if new highlights created
-        if query_session_id and not chat_request.preserve_existing:
-            await set_active_query_session(
-                clean_document_id, clean_author, query_session_id, storage_service
-            )
+        # Record chat activity in session
+        session_service.record_chat_activity(clean_document_id, clean_author)
         
         # Log for analytics
+        highlight_stats = {
+            "total_highlights": total_highlights,
+            "pages_with_highlights": len(all_highlight_pages),
+            "highlight_counts": all_highlight_pages
+        }
+        
         await log_all_chat_activity(
             clean_document_id, 
             clean_author, 
             clean_prompt, 
             ai_response_text,
-            visual_highlights,
             query_session_id,
+            highlight_stats,
             storage_service
         )
 
-        # Build response with multi-page support
+        # Build response
         response = ChatResponse(
             session_id=clean_document_id,
             ai_response=ai_response_text,
             source_pages=list(all_highlight_pages.keys()) if all_highlight_pages else [],
-            visual_highlights=visual_highlights,  # Current page only
+            visual_highlights=visual_highlights,
             drawing_grid=drawing_grid,
             highlight_summary=highlight_summary,
             current_page=current_page,
-            query_session_id=query_session_id,  # NEW: Include session ID
-            all_highlight_pages=all_highlight_pages  # NEW: All pages with highlights
+            query_session_id=query_session_id,
+            all_highlight_pages=all_highlight_pages
         )
         
         return response
@@ -615,80 +617,244 @@ async def chat_with_shared_document(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Chat failed for {document_id}: {e}")
+        logger.error(f"Chat failed for {document_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"AI response failed: {str(e)}")
 
-@blueprint_router.get("/documents/{document_id}/highlights/current")
-async def get_current_page_highlights(
+# --- NEW HIGHLIGHT MANAGEMENT ENDPOINTS ---
+
+@blueprint_router.get("/documents/{document_id}/highlights/generate")
+async def generate_highlighted_page(
     request: Request,
     document_id: str,
-    page_number: int = Query(..., description="Current page number"),
-    author: str = Query(..., description="User requesting highlights")
+    page_number: int = Query(..., description="Page number to highlight"),
+    query_session_id: str = Query(..., description="Query session ID for highlights")
 ):
-    """Get highlights for the current page based on active query session"""
+    """Generate highlighted version of a page on-demand"""
     try:
         clean_document_id = validate_document_id(document_id)
-        clean_author = validate_author(author)
+        ai_service = request.app.state.ai_service
         storage_service = request.app.state.storage_service
         
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
+        if not ai_service or not storage_service:
+            raise HTTPException(status_code=503, detail="Required services not available")
         
-        # Get user's active query session
-        active_session = await get_active_query_session(
-            clean_document_id, clean_author, storage_service
+        # Generate highlighted page
+        highlighted_image = await ai_service.generate_highlighted_page(
+            document_id=clean_document_id,
+            page_num=page_number,
+            query_session_id=query_session_id,
+            storage_service=storage_service
         )
         
-        if not active_session:
-            return {
-                "document_id": clean_document_id,
-                "page_number": page_number,
-                "highlights": [],
-                "query_session_id": None
-            }
-        
-        # Use annotation route to get highlights
-        from app.api.routes.annotation_routes import get_active_highlights_for_session
-        
-        session_highlights = await get_active_highlights_for_session(
-            clean_document_id, active_session, storage_service
-        )
-        
-        # Filter to current page
-        page_highlights = [
-            h for h in session_highlights
-            if h.get('page_number') == page_number
-        ]
-        
-        # Convert to VisualElement format
-        visual_elements = []
-        for h in page_highlights:
-            visual_elements.append(
-                VisualElement(
-                    element_id=h['annotation_id'],
-                    element_type=h['element_type'],
-                    grid_location=GridReference(
-                        grid_ref=h['grid_reference'],
-                        x_grid=h['grid_reference'].split('-')[0] if '-' in h['grid_reference'] else h['grid_reference'],
-                        y_grid=h['grid_reference'].split('-')[1] if '-' in h['grid_reference'] else None
-                    ),
-                    label=h.get('label', ''),
-                    page_number=h['page_number']
-                )
+        if not highlighted_image:
+            raise HTTPException(
+                status_code=404,
+                detail="No highlights found for this page and session"
             )
         
+        # Return as base64 data URL
         return {
             "document_id": clean_document_id,
             "page_number": page_number,
-            "highlights": visual_elements,
-            "query_session_id": active_session
+            "query_session_id": query_session_id,
+            "highlighted_image_url": highlighted_image
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get current page highlights: {e}")
+        logger.error(f"Failed to generate highlighted page: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@blueprint_router.get("/documents/{document_id}/highlights/sessions")
+async def get_highlight_sessions(
+    request: Request,
+    document_id: str,
+    author: Optional[str] = Query(None, description="Filter by author"),
+    include_expired: bool = Query(False, description="Include expired sessions")
+):
+    """Get all highlight sessions for a document"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        session_service = request.app.state.session_service
+        
+        if not session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
+        
+        sessions = session_service.get_highlight_sessions_for_document(
+            clean_document_id,
+            include_expired=include_expired
+        )
+        
+        # Filter by author if requested
+        if author:
+            clean_author = validate_author(author)
+            sessions = [s for s in sessions if s['user'] == clean_author]
+        
+        return {
+            "document_id": clean_document_id,
+            "highlight_sessions": sessions,
+            "total_sessions": len(sessions)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get highlight sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@blueprint_router.get("/documents/{document_id}/highlights/active")
+async def get_user_active_highlights(
+    request: Request,
+    document_id: str,
+    author: str = Query(..., description="User to get highlights for")
+):
+    """Get user's active highlight session"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        clean_author = validate_author(author)
+        session_service = request.app.state.session_service
+        
+        if not session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
+        
+        active_session = session_service.get_user_active_highlights(
+            clean_document_id,
+            clean_author
+        )
+        
+        if not active_session:
+            return {
+                "document_id": clean_document_id,
+                "author": clean_author,
+                "active_session": None,
+                "message": "No active highlight session"
+            }
+        
+        return {
+            "document_id": clean_document_id,
+            "author": clean_author,
+            "active_session": active_session
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get active highlights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@blueprint_router.post("/documents/{document_id}/highlights/activate")
+async def activate_highlight_session(
+    request: Request,
+    document_id: str,
+    query_session_id: str = Query(..., description="Session to activate"),
+    author: str = Query(..., description="User activating the session")
+):
+    """Activate a specific highlight session for a user"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        clean_author = validate_author(author)
+        session_service = request.app.state.session_service
+        
+        if not session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
+        
+        success = session_service.set_user_active_session(
+            clean_document_id,
+            clean_author,
+            query_session_id
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail="Highlight session not found"
+            )
+        
+        return {
+            "status": "success",
+            "document_id": clean_document_id,
+            "author": clean_author,
+            "active_session_id": query_session_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to activate session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@blueprint_router.delete("/documents/{document_id}/highlights/clear")
+async def clear_user_highlights(
+    request: Request,
+    document_id: str,
+    author: str = Query(..., description="User to clear highlights for")
+):
+    """Clear user's active highlights"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        clean_author = validate_author(author)
+        
+        storage_service = request.app.state.storage_service
+        session_service = request.app.state.session_service
+        
+        if not storage_service or not session_service:
+            raise HTTPException(status_code=503, detail="Required services not available")
+        
+        # Get user's active session
+        active_session = session_service.get_user_active_highlights(
+            clean_document_id,
+            clean_author
+        )
+        
+        if not active_session:
+            return {
+                "status": "success",
+                "message": "No active highlights to clear"
+            }
+        
+        # Clear from annotations storage
+        query_session_id = active_session['query_session_id']
+        
+        # Load annotations
+        annotations_blob = f"{clean_document_id}_annotations.json"
+        try:
+            annotations_text = await storage_service.download_blob_as_text(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=annotations_blob
+            )
+            annotations = json.loads(annotations_text)
+        except:
+            annotations = []
+        
+        # Remove highlights from this session
+        filtered_annotations = [
+            ann for ann in annotations
+            if ann.get('query_session_id') != query_session_id
+        ]
+        
+        # Save back
+        await storage_service.upload_file(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=annotations_blob,
+            data=json.dumps(filtered_annotations, indent=2).encode('utf-8')
+        )
+        
+        # Clear from session
+        session_service.set_user_active_session(clean_document_id, clean_author, "")
+        
+        return {
+            "status": "success",
+            "message": f"Cleared highlights from session {query_session_id}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to clear highlights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- CHAT HISTORY ENDPOINTS ---
 
 @blueprint_router.get("/documents/{document_id}/my-chats")
 async def get_my_chat_history(
@@ -723,7 +889,7 @@ async def get_my_chat_history(
         logger.error(f"Failed to get chat history for {author}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
 
-# --- NOTE ENDPOINTS (Keeping all existing) ---
+# --- NOTE MANAGEMENT ENDPOINTS ---
 
 @blueprint_router.post("/documents/{document_id}/notes", response_model=Note)
 async def create_note(
@@ -743,6 +909,13 @@ async def create_note(
         
         # Load existing notes
         all_notes = await load_notes(clean_document_id, storage_service)
+        
+        # Check note limit
+        if len(all_notes) >= settings.MAX_NOTES_PER_DOCUMENT:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Maximum number of notes ({settings.MAX_NOTES_PER_DOCUMENT}) reached"
+            )
         
         # Create new note
         note = Note(
@@ -780,7 +953,7 @@ async def get_document_notes(
     note_type: Optional[str] = Query(None, description="Filter by note type"),
     include_private: bool = Query(True, description="Include your private notes")
 ):
-    """Get notes visible to the user (their private + all public)"""
+    """Get notes visible to the user"""
     try:
         clean_document_id = validate_document_id(document_id)
         clean_author = validate_author(author)
@@ -969,103 +1142,30 @@ async def publish_note(
         logger.error(f"Failed to publish note: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to publish note: {str(e)}")
 
-@blueprint_router.post("/documents/{document_id}/notes/publish-batch")
-async def publish_multiple_notes(
-    request: Request, 
-    document_id: str, 
-    batch: NoteBatch,
-    author: str = Query(...)
-):
-    """Publish multiple private notes at once"""
+# --- SESSION MANAGEMENT ENDPOINTS ---
+
+@blueprint_router.get("/documents/{document_id}/session")
+async def get_document_session(request: Request, document_id: str):
+    """Get session information for a document"""
     try:
         clean_document_id = validate_document_id(document_id)
-        clean_author = validate_author(author)
-        storage_service = request.app.state.storage_service
+        session_service = request.app.state.session_service
         
-        if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service not available")
+        if not session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
         
-        all_notes = await load_notes(clean_document_id, storage_service)
-        published_count = 0
+        session_info = session_service.get_session_info(clean_document_id)
         
-        for note in all_notes:
-            if (note.get("note_id") in batch.note_ids and 
-                note.get("author") == clean_author and
-                note.get("is_private", True)):
-                
-                note["is_private"] = False
-                note["published_at"] = datetime.utcnow().isoformat() + "Z"
-                published_count += 1
+        if not session_info:
+            raise HTTPException(status_code=404, detail="Session not found")
         
-        await save_notes(clean_document_id, all_notes, storage_service)
-        
-        return {
-            "status": "published", 
-            "published_count": published_count,
-            "note_ids": batch.note_ids
-        }
+        return session_info
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to batch publish: {e}")
+        logger.error(f"Failed to get session info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# --- BACKWARD COMPATIBILITY ENDPOINTS ---
-
-@blueprint_router.post("/documents/{document_id}/annotations")
-async def create_annotation_compat(
-    request: Request,
-    document_id: str,
-    annotation: Annotation
-):
-    """DEPRECATED: Compatibility endpoint - redirects to notes"""
-    # Convert annotation to note
-    note_data = NoteCreate(
-        text=annotation.text,
-        note_type=annotation.annotation_type if hasattr(annotation, 'annotation_type') else "note",
-        impacts_trades=[],
-        priority="normal",
-        is_private=annotation.is_private if hasattr(annotation, 'is_private') else True
-    )
-    
-    return await create_note(
-        request=request,
-        document_id=document_id,
-        note_data=note_data,
-        author=annotation.author
-    )
-
-@blueprint_router.get("/documents/{document_id}/annotations")
-async def get_annotations_compat(
-    request: Request,
-    document_id: str,
-    author: str = Query(...)
-):
-    """DEPRECATED: Compatibility endpoint - returns notes as annotations"""
-    notes_response = await get_document_notes(
-        request=request,
-        document_id=document_id,
-        author=author
-    )
-    
-    # Convert notes to annotation format
-    annotations = []
-    for note in notes_response.notes:
-        annotations.append({
-            "annotation_id": note.note_id,
-            "document_id": note.document_id,
-            "page_number": 1,  # Default
-            "x": 0,
-            "y": 0,
-            "text": note.text,
-            "annotation_type": note.note_type,
-            "author": note.author,
-            "is_private": note.is_private,
-            "timestamp": note.timestamp
-        })
-    
-    return {"annotations": annotations}
 
 # --- ADMIN ENDPOINTS ---
 
@@ -1078,63 +1178,96 @@ async def delete_document(
     """Delete a document and all associated files (admin only)"""
     try:
         # Verify admin token
-        expected_token = getattr(settings, 'ADMIN_SECRET_TOKEN', None)
-        if not expected_token or admin_token != expected_token:
+        if not admin_token or admin_token != settings.ADMIN_SECRET_TOKEN:
             raise HTTPException(status_code=403, detail="Invalid admin token")
         
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
+        session_service = request.app.state.session_service
         
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service not available")
         
-        # Use optimized deletion
-        if hasattr(storage_service, 'delete_document_files'):
-            deleted_counts = await storage_service.delete_document_files(clean_document_id)
-            
-            if deleted_counts['total'] == 0:
-                raise HTTPException(status_code=404, detail=f"Document '{clean_document_id}' not found")
-            
-            return {
-                "status": "deleted",
-                "document_id": clean_document_id,
-                "files_deleted": deleted_counts
-            }
-        else:
-            # Fallback
-            deleted_count = 0
-            
-            # Delete original PDF
-            try:
-                await storage_service.delete_blob(settings.AZURE_CONTAINER_NAME, f"{clean_document_id}.pdf")
-                deleted_count += 1
-            except:
-                pass
-            
-            # Delete all cache files
-            cache_files = await storage_service.list_blobs(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                prefix=f"{clean_document_id}_"
-            )
-            
-            for filename in cache_files:
-                try:
-                    await storage_service.delete_blob(settings.AZURE_CACHE_CONTAINER_NAME, filename)
-                    deleted_count += 1
-                except:
-                    pass
-            
-            if deleted_count == 0:
-                raise HTTPException(status_code=404, detail=f"Document '{clean_document_id}' not found")
-            
-            return {
-                "status": "deleted",
-                "document_id": clean_document_id,
-                "files_deleted": deleted_count
-            }
+        # Delete from storage
+        deleted_counts = await storage_service.delete_document_files(clean_document_id)
+        
+        if deleted_counts['total'] == 0:
+            raise HTTPException(status_code=404, detail=f"Document '{clean_document_id}' not found")
+        
+        # Delete from session if exists
+        if session_service:
+            session_service.delete_session(clean_document_id)
+        
+        return {
+            "status": "deleted",
+            "document_id": clean_document_id,
+            "files_deleted": deleted_counts
+        }
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to delete document: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+
+@blueprint_router.get("/admin/sessions/stats")
+async def get_session_statistics(
+    request: Request,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """Get session service statistics (admin only)"""
+    try:
+        # Verify admin token
+        if not admin_token or admin_token != settings.ADMIN_SECRET_TOKEN:
+            raise HTTPException(status_code=403, detail="Invalid admin token")
+        
+        session_service = request.app.state.session_service
+        
+        if not session_service:
+            raise HTTPException(status_code=503, detail="Session service not available")
+        
+        return session_service.get_session_statistics()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@blueprint_router.post("/admin/cleanup/expired")
+async def cleanup_expired_highlights(
+    request: Request,
+    admin_token: str = Header(None, alias="X-Admin-Token")
+):
+    """Clean up expired highlights (admin only)"""
+    try:
+        # Verify admin token
+        if not admin_token or admin_token != settings.ADMIN_SECRET_TOKEN:
+            raise HTTPException(status_code=403, detail="Invalid admin token")
+        
+        session_service = request.app.state.session_service
+        ai_service = request.app.state.ai_service
+        storage_service = request.app.state.storage_service
+        
+        if not all([session_service, ai_service, storage_service]):
+            raise HTTPException(status_code=503, detail="Required services not available")
+        
+        # Clean up in session service
+        session_results = await session_service.cleanup_all_expired()
+        
+        # Clean up in storage
+        storage_count = await ai_service.cleanup_expired_highlights(storage_service)
+        
+        return {
+            "status": "success",
+            "session_cleanup": session_results,
+            "storage_cleanup": {
+                "highlights_removed": storage_count
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cleanup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
