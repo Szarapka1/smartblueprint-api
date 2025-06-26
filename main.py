@@ -1,4 +1,4 @@
-# main.py - COMPLETE VERSION WITH ALL ROUTES REGISTERED
+# main.py - COMPLETE VERSION WITH CORS FIX FOR TESTING
 
 import os
 import datetime
@@ -319,38 +319,63 @@ app = FastAPI(
     ]
 )
 
-# --- CORS Configuration ---
+# --- CORS Configuration - UPDATED FOR TESTING ---
+logger.info("🌐 Configuring CORS for testing...")
+
+# Get environment-specific CORS settings
+environment = getattr(settings, 'ENVIRONMENT', os.getenv('ENVIRONMENT', 'production')) if settings else 'production'
+debug_mode = getattr(settings, 'DEBUG', False) if settings else False
+
+# Base CORS origins
 cors_origins = [
     "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3000", 
     "http://localhost:8080",
+    "http://localhost:8000",
+    "https://localhost:3000",  # HTTPS localhost
+    "https://127.0.0.1:3000",  # HTTPS localhost
     "https://talktosmartblueprints.netlify.app",
 ]
 
 # Add any additional origins from settings
-if hasattr(settings, 'CORS_ORIGINS'):
+if hasattr(settings, 'CORS_ORIGINS') and settings:
     cors_value = getattr(settings, 'CORS_ORIGINS', '')
     if isinstance(cors_value, str) and cors_value:
-        cors_origins.extend([origin.strip() for origin in cors_value.split(',') if origin.strip()])
+        additional_origins = [origin.strip() for origin in cors_value.split(',') if origin.strip()]
+        cors_origins.extend(additional_origins)
     elif isinstance(cors_value, list):
         cors_origins.extend(cors_value)
 
-# Always allow all origins in production for now
-cors_origins.append("*")
+# For testing/development: Allow all origins
+if environment in ['development', 'testing'] or debug_mode:
+    logger.info("🧪 TESTING MODE: Allowing all CORS origins")
+    cors_origins = ["*"]
+    allow_credentials = False  # Must be False when allowing all origins
+else:
+    logger.info("🔒 PRODUCTION MODE: Restricted CORS origins")
+    allow_credentials = True
 
-# Deduplicate origins
-cors_origins = list(set(cors_origins))
+# Remove duplicates while preserving order
+if cors_origins != ["*"]:
+    cors_origins = list(dict.fromkeys(cors_origins))  # Preserves order, removes duplicates
 
-logger.info(f"🌐 CORS enabled for origins: {cors_origins}")
+logger.info(f"🌐 CORS Configuration:")
+logger.info(f"   - Origins: {cors_origins}")
+logger.info(f"   - Credentials: {allow_credentials}")
+logger.info(f"   - Environment: {environment}")
 
+# Add CORS middleware with testing-friendly settings
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    max_age=3600,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"], # Expose all headers to client
+    max_age=3600,        # Cache preflight for 1 hour
 )
+
+logger.info("✅ CORS middleware configured successfully")
 
 # --- Global Exception Handler ---
 @app.exception_handler(Exception)
@@ -360,7 +385,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Error: {exc}")
     logger.debug(f"Traceback: {traceback.format_exc()}")
     
-    debug_mode = getattr(settings, 'DEBUG', False)
+    debug_mode = getattr(settings, 'DEBUG', False) if settings else False
     error_detail = str(exc) if debug_mode else "An internal server error occurred"
     
     return JSONResponse(
@@ -428,6 +453,8 @@ async def root():
         "version": "2.3.0",
         "documentation": "/docs",
         "health_check": "/health",
+        "cors_enabled": True,
+        "testing_mode": True,
         "quick_start": {
             "1_upload": "POST /api/v1/documents/upload - Upload a PDF blueprint",
             "2_chat": "POST /api/v1/documents/{document_id}/chat - Ask questions",
@@ -544,7 +571,9 @@ async def health_check(request: Request):
         "environment": environment,
         "services": services_status,
         "uptime_seconds": uptime_seconds,
-        "uptime_human": f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
+        "uptime_human": f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m",
+        "cors_enabled": True,
+        "testing_mode": True
     }
 
 @app.get("/api/v1/system/status", tags=["General"])
@@ -559,6 +588,8 @@ async def system_status(request: Request):
         "api_version": "2.3.0",
         "environment": environment,
         "debug_mode": debug_mode,
+        "cors_enabled": True,
+        "testing_mode": True,
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "features_enabled": {
             "document_notes": settings.ENABLE_DOCUMENT_NOTES if settings else True,
@@ -590,6 +621,8 @@ async def system_info():
         "name": "Smart Blueprint Chat API",
         "version": "2.3.0",
         "description": "Professional blueprint analysis with AI-powered intelligence",
+        "cors_enabled": True,
+        "testing_mode": True,
         "features": [
             "Multi-page blueprint analysis (up to 100 pages)",
             "Building code compliance verification",
@@ -636,6 +669,7 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting development server at http://{host}:{port}")
     logger.info(f"📚 API Documentation: http://{host}:{port}/docs")
     logger.info(f"🔄 Auto-reload: {'ON' if reload else 'OFF'}")
+    logger.info(f"🌐 CORS: ENABLED FOR ALL ORIGINS (Testing Mode)")
     logger.info("="*60)
     
     uvicorn.run(
