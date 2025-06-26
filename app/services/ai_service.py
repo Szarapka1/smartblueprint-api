@@ -279,13 +279,19 @@ class ProfessionalBlueprintAI:
         current_page: Optional[int] = None,
         request_highlights: bool = True,
         reference_previous: Optional[List[str]] = None,
-        preserve_existing: bool = False
+        preserve_existing: bool = False,
+        filter_by_trades: Optional[List[str]] = None,
+        detect_conflicts: bool = False
     ) -> Dict[str, Any]:
         """Process blueprint queries with visual highlighting support"""
         try:
             logger.info(f"📐 Processing query for document: {document_id}")
             logger.info(f"   Current page: {current_page}")
             logger.info(f"   Request highlights: {request_highlights}")
+            if filter_by_trades:
+                logger.info(f"   Filter trades: {filter_by_trades}")
+            if detect_conflicts:
+                logger.info(f"   Detect conflicts: {detect_conflicts}")
             
             # Load document context
             document_text, metadata = await self._load_document_context(
@@ -330,7 +336,9 @@ class ProfessionalBlueprintAI:
                 preserve_existing=preserve_existing,
                 storage_service=storage_service,
                 metadata=metadata,
-                reused_highlights=reused_highlights
+                reused_highlights=reused_highlights,
+                filter_by_trades=filter_by_trades,
+                detect_conflicts=detect_conflicts
             )
             
             return result
@@ -516,7 +524,9 @@ class ProfessionalBlueprintAI:
         preserve_existing: bool,
         storage_service: StorageService,
         metadata: Optional[Dict],
-        reused_highlights: List[Dict]
+        reused_highlights: List[Dict],
+        filter_by_trades: Optional[List[str]] = None,
+        detect_conflicts: bool = False
     ) -> Dict[str, Any]:
         """Perform AI analysis and create highlights"""
         
@@ -535,7 +545,10 @@ class ProfessionalBlueprintAI:
         
         # Add text query
         query_text = self._build_query(
-            prompt, document_id, document_text, len(page_images), metadata, total_pages=metadata.get('page_count', len(page_images)) if metadata else len(page_images)
+            prompt, document_id, document_text, len(page_images), metadata, 
+            total_pages=metadata.get('page_count', len(page_images)) if metadata else len(page_images),
+            filter_by_trades=filter_by_trades,
+            detect_conflicts=detect_conflicts
         )
         user_message["content"].append({"type": "text", "text": query_text})
         
@@ -559,7 +572,8 @@ class ProfessionalBlueprintAI:
                 query_session_id,
                 reused_highlights,
                 preserve_existing,
-                storage_service
+                storage_service,
+                filter_by_trades
             )
             
             result.update(highlight_data)
@@ -589,6 +603,11 @@ Your responses should:
 - Provide practical, real-world advice
 - Anticipate related concerns the user might not have thought of
 
+When identifying elements:
+- Recognize which trade each element belongs to (Electrical, Plumbing, HVAC, Fire Protection, Structural, etc.)
+- Consider how different trades' work might conflict or need coordination
+- Note spatial conflicts, access issues, or installation sequence problems
+
 Format element findings clearly but focus on providing VALUE through your analysis. You're not just a element-finder - you're a trusted construction advisor.
 
 Remember: Construction professionals need insights about coordination, sequencing, potential conflicts, cost implications, maintenance access, future flexibility, and real-world installation challenges. Draw upon your knowledge of how buildings actually get built."""
@@ -601,7 +620,9 @@ Remember: Construction professionals need insights about coordination, sequencin
         document_text: str,
         page_count: int,
         metadata: Optional[Dict],
-        total_pages: int = None
+        total_pages: int = None,
+        filter_by_trades: Optional[List[str]] = None,
+        detect_conflicts: bool = False
     ) -> str:
         """Build query text for AI"""
         doc_info = ""
@@ -632,7 +653,21 @@ Remember: Construction professionals need insights about coordination, sequencin
 Pages analyzed: {page_count}{analysis_note}
 {doc_info}
 
-User question: {prompt}
+User question: {prompt}"""
+
+        # Add trade filtering if requested
+        if filter_by_trades:
+            query += f"\n\nFocus on elements related to these trades: {', '.join(filter_by_trades)}"
+        
+        # Add conflict detection if requested
+        if detect_conflicts:
+            query += "\n\nAlso identify any potential conflicts between different trades' elements, such as:"
+            query += "\n- Spatial conflicts where elements from different trades occupy the same space"
+            query += "\n- Access issues where one trade's work blocks access for another"
+            query += "\n- Installation sequence problems"
+            query += "\n- Code compliance issues between systems"
+        
+        query += """
 
 Provide a comprehensive professional analysis that leverages your full knowledge of construction, engineering, and building systems. Consider all relevant aspects including codes, constructability, coordination between trades, and practical implementation.
 
@@ -681,7 +716,8 @@ Remember to think holistically about the building systems and provide insights t
         query_session_id: str,
         reused_highlights: List[Dict],
         preserve_existing: bool,
-        storage_service: StorageService
+        storage_service: StorageService,
+        filter_by_trades: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Process AI response and create highlight data"""
         
@@ -689,6 +725,13 @@ Remember to think holistically about the building systems and provide insights t
         new_highlights = self._parse_elements_from_response(
             response, document_id, query_session_id
         )
+        
+        # Filter by trades if requested
+        if filter_by_trades:
+            new_highlights = [
+                h for h in new_highlights 
+                if h.get('assigned_trade') in filter_by_trades
+            ]
         
         # Combine with reused highlights
         all_highlights = reused_highlights + new_highlights
@@ -733,20 +776,26 @@ Remember to think holistically about the building systems and provide insights t
                     ),
                     label=h.get('label', ''),
                     page_number=h['page_number'],
-                    confidence=h.get('confidence', 0.9)
+                    confidence=h.get('confidence', 0.9),
+                    trade=h.get('assigned_trade')
                 )
             )
         
         # Calculate summary
         pages_with_highlights = defaultdict(int)
+        trade_summary = defaultdict(lambda: defaultdict(int))
+        
         for h in all_highlights:
             pages_with_highlights[h['page_number']] += 1
+            if h.get('assigned_trade'):
+                trade_summary[h['assigned_trade']][h['element_type']] += 1
         
         return {
             "visual_highlights": visual_highlights,
             "all_highlight_pages": dict(pages_with_highlights),
             "total_highlights_created": len(new_highlights),
-            "total_highlights": len(all_highlights)
+            "total_highlights": len(all_highlights),
+            "trade_summary": dict(trade_summary) if trade_summary else None
         }
     
     def _parse_elements_from_response(
@@ -755,7 +804,7 @@ Remember to think holistically about the building systems and provide insights t
         document_id: str,
         query_session_id: str
     ) -> List[Dict]:
-        """Parse AI response for element locations"""
+        """Parse AI response for element locations - AI determines trade assignment"""
         highlights = []
         
         # Look for ELEMENTS_FOUND section
@@ -777,7 +826,7 @@ Remember to think holistically about the building systems and provide insights t
             page_num = int(page_match.group(1))
             page_content = page_match.group(2)
             
-            # Determine element type from content
+            # Determine element type from content - AI provides this
             element_type = self._detect_element_type(page_content)
             
             # Extract grid references
@@ -785,6 +834,9 @@ Remember to think holistically about the building systems and provide insights t
             
             for grid_match in re.finditer(grid_pattern, page_content, re.IGNORECASE):
                 grid_ref = grid_match.group(1).upper()
+                
+                # Let AI determine the trade from context
+                assigned_trade = self._extract_trade_from_context(page_content, element_type)
                 
                 highlights.append({
                     "annotation_id": str(uuid.uuid4())[:8],
@@ -802,7 +854,8 @@ Remember to think holistically about the building systems and provide insights t
                     "query_session_id": query_session_id,
                     "created_at": datetime.utcnow().isoformat() + "Z",
                     "expires_at": (datetime.utcnow() + timedelta(hours=self.highlight_cache_ttl_hours)).isoformat() + "Z",
-                    "confidence": 0.9
+                    "confidence": 0.9,
+                    "assigned_trade": assigned_trade
                 })
         
         return highlights
@@ -833,6 +886,42 @@ Remember to think holistically about the building systems and provide insights t
                 return element_type
         
         return 'element'  # Generic fallback
+    
+    def _extract_trade_from_context(self, text: str, element_type: str) -> Optional[str]:
+        """Extract trade assignment from AI's context - AI already understands trades"""
+        text_lower = text.lower()
+        
+        # Look for explicit trade mentions
+        trade_keywords = {
+            'Electrical': ['electrical', 'power', 'lighting', 'panel', 'circuit'],
+            'Plumbing': ['plumbing', 'water', 'drain', 'waste', 'vent', 'pipe'],
+            'HVAC': ['hvac', 'mechanical', 'duct', 'air', 'ventilation', 'heating', 'cooling'],
+            'Fire Protection': ['fire', 'sprinkler', 'alarm', 'smoke', 'protection'],
+            'Structural': ['structural', 'beam', 'column', 'footing', 'slab', 'foundation'],
+            'Architectural': ['architectural', 'door', 'window', 'partition', 'finish']
+        }
+        
+        for trade, keywords in trade_keywords.items():
+            if any(keyword in text_lower for keyword in keywords):
+                return trade
+        
+        # Fallback based on element type
+        element_trade_map = {
+            'outlet': 'Electrical',
+            'panel': 'Electrical',
+            'light': 'Electrical',
+            'catch_basin': 'Plumbing',
+            'fixture': 'Plumbing',
+            'diffuser': 'HVAC',
+            'equipment': 'HVAC',
+            'sprinkler': 'Fire Protection',
+            'column': 'Structural',
+            'beam': 'Structural',
+            'door': 'Architectural',
+            'window': 'Architectural'
+        }
+        
+        return element_trade_map.get(element_type, 'General')
     
     async def _ensure_grid_systems_loaded(
         self,
@@ -1049,8 +1138,10 @@ Remember to think holistically about the building systems and provide insights t
                     width=self.highlight_border_width
                 )
                 
-                # Add label
+                # Add label with trade info
                 label = highlight.get('label', highlight['element_type'])
+                if highlight.get('assigned_trade'):
+                    label += f" ({highlight['assigned_trade']})"
                 
                 # Draw label background
                 bbox = draw.textbbox((x, y - 20), label, font=font)
@@ -1145,12 +1236,22 @@ Remember to think holistically about the building systems and provide insights t
                 "CSA Standards",
                 "NFPA Standards"
             ],
+            "engineering_disciplines": [
+                "Structural Engineering",
+                "MEP Coordination",
+                "Fire Protection Systems",
+                "Electrical Distribution",
+                "HVAC Design",
+                "Plumbing Systems"
+            ],
             "features": [
                 "Multi-page analysis",
                 "Grid-based element detection",
                 "On-demand highlight generation",
                 "Automatic highlight expiration",
                 "Reference previous highlights",
+                "Trade-specific filtering",
+                "Cross-trade conflict detection",
                 "No storage of highlighted images"
             ],
             "optimization": [
