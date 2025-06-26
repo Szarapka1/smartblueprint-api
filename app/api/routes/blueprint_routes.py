@@ -1,4 +1,4 @@
-# app/api/routes/blueprint_routes.py - WITH NOTES AND HIGHLIGHTING
+# app/api/routes/blueprint_routes.py - WITH MULTI-PAGE HIGHLIGHTING SUPPORT
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Header, Query, Response
 from pydantic import BaseModel, Field
@@ -121,8 +121,9 @@ async def save_user_chat_history(document_id: str, author: str, chat_history: Li
 
 async def log_all_chat_activity(document_id: str, author: str, prompt: str, 
                                ai_response: str, visual_highlights: Optional[List[Dict]], 
+                               query_session_id: Optional[str],
                                storage_service):
-    """Log ALL chat activity for service analytics"""
+    """Log ALL chat activity for service analytics - UPDATED with session tracking"""
     try:
         activity_blob_name = f"{document_id}_all_chats.json"
         
@@ -136,7 +137,7 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str,
         except Exception:
             all_chats = []
         
-        # Add new activity
+        # Add new activity with enhanced tracking
         chat_entry = {
             "chat_id": str(uuid.uuid4())[:8],
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -147,7 +148,9 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str,
             "prompt_length": len(prompt),
             "response_length": len(ai_response),
             "had_visual_highlights": bool(visual_highlights),
-            "highlight_count": len(visual_highlights) if visual_highlights else 0
+            "highlight_count": len(visual_highlights) if visual_highlights else 0,
+            "query_session_id": query_session_id,  # NEW: Track which highlight session
+            "reference_previous": bool("reference_previous" in prompt.lower()),  # Track if reusing
         }
         
         all_chats.append(chat_entry)
@@ -164,11 +167,64 @@ async def log_all_chat_activity(document_id: str, author: str, prompt: str,
             blob_name=activity_blob_name,
             data=activity_json.encode('utf-8')
         )
-        logger.info(f"Logged chat activity for {author} in {document_id}")
+        logger.info(f"Logged chat activity for {author} in {document_id} (session: {query_session_id})")
     except Exception as e:
         logger.error(f"Failed to log chat activity: {e}")
 
-# --- NEW: Note Management Functions ---
+# --- NEW: Session Management for Highlights ---
+
+async def get_active_query_session(document_id: str, author: str, storage_service) -> Optional[str]:
+    """Get the active query session ID for a user's highlights"""
+    try:
+        # Store active sessions in a simple mapping file
+        session_blob = f"{document_id}_active_sessions.json"
+        
+        try:
+            session_data = await storage_service.download_blob_as_text(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=session_blob
+            )
+            sessions = json.loads(session_data)
+        except:
+            sessions = {}
+        
+        return sessions.get(author)
+        
+    except Exception as e:
+        logger.error(f"Failed to get active session: {e}")
+        return None
+
+async def set_active_query_session(document_id: str, author: str, 
+                                  query_session_id: str, storage_service):
+    """Set the active query session ID for a user"""
+    try:
+        session_blob = f"{document_id}_active_sessions.json"
+        
+        # Load existing sessions
+        try:
+            session_data = await storage_service.download_blob_as_text(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=session_blob
+            )
+            sessions = json.loads(session_data)
+        except:
+            sessions = {}
+        
+        # Update session
+        sessions[author] = query_session_id
+        
+        # Save back
+        session_json = json.dumps(sessions, indent=2)
+        await storage_service.upload_file(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=session_blob,
+            data=session_json.encode('utf-8')
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to set active session: {e}")
+
+# --- Note Management Functions (KEEPING EXISTING) ---
 
 async def load_notes(document_id: str, storage_service) -> List[dict]:
     """Load all notes for a document"""
@@ -427,7 +483,7 @@ async def download_document_pdf(request: Request, document_id: str):
         logger.error(f"Failed to download PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to download PDF: {str(e)}")
 
-# --- ENHANCED CHAT ENDPOINT WITH HIGHLIGHTING ---
+# --- ENHANCED CHAT ENDPOINT WITH MULTI-PAGE HIGHLIGHTING ---
 
 @blueprint_router.post("/documents/{document_id}/chat", response_model=ChatResponse)
 async def chat_with_shared_document(
@@ -435,13 +491,13 @@ async def chat_with_shared_document(
     document_id: str, 
     chat_request: ChatRequest
 ):
-    """Chat with AI about a document with optional visual highlighting"""
+    """Chat with AI about a document with multi-page visual highlighting"""
     try:
         clean_document_id = validate_document_id(document_id)
         
-        # Validate author from body (for backward compatibility)
-        author = getattr(chat_request, 'author', 'anonymous')
-        clean_author = validate_author(author) if author != 'anonymous' else author
+        # Validate author
+        author = chat_request.author
+        clean_author = validate_author(author)
         
         clean_prompt = chat_request.prompt.strip()
         if not clean_prompt:
@@ -468,14 +524,16 @@ async def chat_with_shared_document(
                 detail=f"Document '{clean_document_id}' not found"
             )
 
-        # Get AI response with optional highlighting
+        # Get AI response with multi-page highlighting support
         ai_result = await ai_service.get_ai_response(
             prompt=clean_prompt,
             document_id=clean_document_id,
             storage_service=storage_service,
             author=clean_author,
             current_page=chat_request.current_page,
-            request_highlights=True  # Always allow highlights if page specified
+            request_highlights=True,  # Always allow highlights
+            reference_previous=chat_request.reference_previous,  # NEW: Reference previous highlights
+            preserve_existing=chat_request.preserve_existing     # NEW: Keep existing highlights
         )
         
         # Extract components from result
@@ -485,6 +543,8 @@ async def chat_with_shared_document(
             drawing_grid = ai_result.get("drawing_grid")
             highlight_summary = ai_result.get("highlight_summary")
             current_page = ai_result.get("current_page")
+            query_session_id = ai_result.get("query_session_id")  # NEW: Session ID for highlights
+            all_highlight_pages = ai_result.get("all_highlight_pages")  # NEW: Pages with highlights
         else:
             # Backward compatibility
             ai_response_text = ai_result
@@ -492,6 +552,8 @@ async def chat_with_shared_document(
             drawing_grid = None
             highlight_summary = None
             current_page = None
+            query_session_id = None
+            all_highlight_pages = None
         
         chat_id = str(uuid.uuid4())[:8]
         timestamp = datetime.utcnow().isoformat() + "Z"
@@ -503,7 +565,9 @@ async def chat_with_shared_document(
             "timestamp": timestamp,
             "prompt": clean_prompt,
             "ai_response": ai_response_text,
-            "had_highlights": bool(visual_highlights)
+            "had_highlights": bool(visual_highlights),
+            "query_session_id": query_session_id,  # Track which highlights
+            "reference_previous": chat_request.reference_previous  # Track what was referenced
         }
         chat_history.append(chat_entry)
         
@@ -516,6 +580,12 @@ async def chat_with_shared_document(
             storage_service
         )
         
+        # Update active query session if new highlights created
+        if query_session_id and not chat_request.preserve_existing:
+            await set_active_query_session(
+                clean_document_id, clean_author, query_session_id, storage_service
+            )
+        
         # Log for analytics
         await log_all_chat_activity(
             clean_document_id, 
@@ -523,18 +593,21 @@ async def chat_with_shared_document(
             clean_prompt, 
             ai_response_text,
             visual_highlights,
+            query_session_id,
             storage_service
         )
 
-        # Build response
+        # Build response with multi-page support
         response = ChatResponse(
             session_id=clean_document_id,
             ai_response=ai_response_text,
-            source_pages=[current_page] if current_page else [],
-            visual_highlights=visual_highlights,
+            source_pages=list(all_highlight_pages.keys()) if all_highlight_pages else [],
+            visual_highlights=visual_highlights,  # Current page only
             drawing_grid=drawing_grid,
             highlight_summary=highlight_summary,
-            current_page=current_page
+            current_page=current_page,
+            query_session_id=query_session_id,  # NEW: Include session ID
+            all_highlight_pages=all_highlight_pages  # NEW: All pages with highlights
         )
         
         return response
@@ -544,6 +617,78 @@ async def chat_with_shared_document(
     except Exception as e:
         logger.error(f"Chat failed for {document_id}: {e}")
         raise HTTPException(status_code=500, detail=f"AI response failed: {str(e)}")
+
+@blueprint_router.get("/documents/{document_id}/highlights/current")
+async def get_current_page_highlights(
+    request: Request,
+    document_id: str,
+    page_number: int = Query(..., description="Current page number"),
+    author: str = Query(..., description="User requesting highlights")
+):
+    """Get highlights for the current page based on active query session"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        clean_author = validate_author(author)
+        storage_service = request.app.state.storage_service
+        
+        if not storage_service:
+            raise HTTPException(status_code=503, detail="Storage service not available")
+        
+        # Get user's active query session
+        active_session = await get_active_query_session(
+            clean_document_id, clean_author, storage_service
+        )
+        
+        if not active_session:
+            return {
+                "document_id": clean_document_id,
+                "page_number": page_number,
+                "highlights": [],
+                "query_session_id": None
+            }
+        
+        # Use annotation route to get highlights
+        from app.api.routes.annotation_routes import get_active_highlights_for_session
+        
+        session_highlights = await get_active_highlights_for_session(
+            clean_document_id, active_session, storage_service
+        )
+        
+        # Filter to current page
+        page_highlights = [
+            h for h in session_highlights
+            if h.get('page_number') == page_number
+        ]
+        
+        # Convert to VisualElement format
+        visual_elements = []
+        for h in page_highlights:
+            visual_elements.append(
+                VisualElement(
+                    element_id=h['annotation_id'],
+                    element_type=h['element_type'],
+                    grid_location=GridReference(
+                        grid_ref=h['grid_reference'],
+                        x_grid=h['grid_reference'].split('-')[0] if '-' in h['grid_reference'] else h['grid_reference'],
+                        y_grid=h['grid_reference'].split('-')[1] if '-' in h['grid_reference'] else None
+                    ),
+                    label=h.get('label', ''),
+                    page_number=h['page_number']
+                )
+            )
+        
+        return {
+            "document_id": clean_document_id,
+            "page_number": page_number,
+            "highlights": visual_elements,
+            "query_session_id": active_session
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get current page highlights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @blueprint_router.get("/documents/{document_id}/my-chats")
 async def get_my_chat_history(
@@ -578,7 +723,7 @@ async def get_my_chat_history(
         logger.error(f"Failed to get chat history for {author}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get chat history: {str(e)}")
 
-# --- NEW NOTE ENDPOINTS (Replacing Annotations) ---
+# --- NOTE ENDPOINTS (Keeping all existing) ---
 
 @blueprint_router.post("/documents/{document_id}/notes", response_model=Note)
 async def create_note(
@@ -606,9 +751,13 @@ async def create_note(
             text=note_data.text.strip(),
             note_type=note_data.note_type,
             author=clean_author,
+            author_trade=note_data.impacts_trades[0] if note_data.impacts_trades else None,
+            impacts_trades=note_data.impacts_trades,
+            priority=note_data.priority,
             is_private=note_data.is_private,
             timestamp=datetime.utcnow().isoformat() + "Z",
-            char_count=len(note_data.text.strip())
+            char_count=len(note_data.text.strip()),
+            status="open"
         )
         
         all_notes.append(note.dict())
@@ -705,6 +854,15 @@ async def update_note(
                 
                 if update_data.note_type is not None:
                     note_dict["note_type"] = update_data.note_type
+                    
+                if update_data.impacts_trades is not None:
+                    note_dict["impacts_trades"] = update_data.impacts_trades
+                    
+                if update_data.priority is not None:
+                    note_dict["priority"] = update_data.priority
+                    
+                if update_data.status is not None:
+                    note_dict["status"] = update_data.status
                 
                 note_dict["edited_at"] = datetime.utcnow().isoformat() + "Z"
                 
@@ -865,8 +1023,10 @@ async def create_annotation_compat(
     # Convert annotation to note
     note_data = NoteCreate(
         text=annotation.text,
-        note_type=annotation.annotation_type,
-        is_private=annotation.is_private
+        note_type=annotation.annotation_type if hasattr(annotation, 'annotation_type') else "note",
+        impacts_trades=[],
+        priority="normal",
+        is_private=annotation.is_private if hasattr(annotation, 'is_private') else True
     )
     
     return await create_note(
