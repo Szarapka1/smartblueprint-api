@@ -1,12 +1,11 @@
-# app/core/config.py - UPDATED WITH NEW FEATURES
-
+# app/core/config.py - OPTIMIZED FOR MULTI-USER COLLABORATION
 from functools import lru_cache
 from typing import List
 import os
 
 class AppSettings:
     """
-    Application settings loaded from Azure environment variables.
+    Application settings optimized for multi-user collaborative blueprint analysis.
     """
     def __init__(self):
         # General
@@ -30,7 +29,7 @@ class AppSettings:
         self.OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
         self.OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
         self.OPENAI_MAX_TOKENS: int = int(os.getenv("OPENAI_MAX_TOKENS", 4000))
-        self.OPENAI_TEMPERATURE: float = float(os.getenv("OPENAI_TEMPERATURE", 0.0))  # Changed to 0.0 for consistency
+        self.OPENAI_TEMPERATURE: float = float(os.getenv("OPENAI_TEMPERATURE", 0.0))
         
         # PDF Processing - OPTIMIZED VALUES
         self.PDF_PREVIEW_RESOLUTION: int = int(os.getenv("PDF_PREVIEW_RESOLUTION", 72))  # For thumbnails
@@ -88,7 +87,7 @@ class AppSettings:
         
         # Environment
         self.ENVIRONMENT: str = os.getenv("ENVIRONMENT", "production")
-        
+    
     def get_note_types(self) -> List[str]:
         """Get allowed note types"""
         return self.NOTE_TYPES
@@ -113,6 +112,7 @@ class AppSettings:
             except:
                 return ["*"]
         return self.CORS_ORIGINS
+
 
 @lru_cache()
 def get_settings() -> AppSettings:
