@@ -1,4 +1,4 @@
-# app/services/ai_service.py - WITH GRID-BASED HIGHLIGHTING
+# app/services/ai_service.py - COMPLETE MULTI-PAGE HIGHLIGHTING SYSTEM
 
 import os
 import asyncio
@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from collections import defaultdict
 from PIL import Image
 import io
+import uuid
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -30,7 +31,9 @@ except ImportError as e:
 # Internal imports
 from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
-from app.models.schemas import VisualElement, GridReference, DrawingGrid
+from app.models.schemas import (
+    VisualElement, GridReference, DrawingGrid, ChatRequest
+)
 
 
 @dataclass
@@ -53,7 +56,7 @@ class GridSystem:
 
 
 class ProfessionalBlueprintAI:
-    """Professional AI service with grid-based visual element highlighting"""
+    """Professional AI service with multi-page grid-based visual element highlighting"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -65,7 +68,7 @@ class ProfessionalBlueprintAI:
         
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ Professional Blueprint AI initialized with highlighting support")
+            logger.info("✅ Professional Blueprint AI initialized with multi-page highlighting")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
@@ -86,21 +89,37 @@ class ProfessionalBlueprintAI:
             'coordinate': r'([A-Z]+)-([A-Z]+\d*|\d+)'
         }
         
+        # Element patterns for detection
+        self.element_patterns = {
+            'window': r'(?:TYPE|type)\s*(\d+)|W\d+|WINDOW|window',
+            'door': r'(?:TYPE|type)\s*([A-Z]\d*)|D\d+|DOOR|door',
+            'column': r'C\d+|COL\.?\s*\d+|COLUMN',
+            'beam': r'B\d+|BM\.?\s*\d+|BEAM',
+            'catch_basin': r'CB[-\s]?\d+|CATCH\s*BASIN',
+            'sprinkler': r'SP[-\s]?\d+|SPRINKLER',
+            'outlet': r'OUTLET|RECEPTACLE|DUPLEX',
+            'panel': r'PANEL\s*[A-Z]\d*|EP[-\s]?\d+|MDP'
+        }
+        
         logger.info(f"   📄 Max pages: {self.max_pages_to_load}")
         logger.info(f"   📦 Batch size: {self.batch_size}")
         logger.info(f"   🖼️ Image quality: {self.image_quality}%")
-        logger.info(f"   🎯 Grid highlighting: Enabled")
+        logger.info(f"   🎯 Multi-page highlighting: Enabled")
     
     async def get_ai_response(self, prompt: str, document_id: str, 
                               storage_service: StorageService, 
                               author: str = None,
                               current_page: Optional[int] = None,
-                              request_highlights: bool = True) -> Dict[str, Any]:
-        """Process blueprint queries with optional grid-based highlighting"""
+                              request_highlights: bool = True,
+                              reference_previous: Optional[List[str]] = None,
+                              preserve_existing: bool = False) -> Dict[str, Any]:
+        """Process blueprint queries with multi-page highlighting support"""
         try:
             logger.info(f"📐 Processing blueprint analysis for {document_id}")
             logger.info(f"   📄 Current page: {current_page}")
             logger.info(f"   🎯 Highlights requested: {request_highlights}")
+            logger.info(f"   📚 Reference previous: {reference_previous}")
+            logger.info(f"   🔒 Preserve existing: {preserve_existing}")
             
             analysis_start = asyncio.get_event_loop().time()
             
@@ -136,32 +155,48 @@ class ProfessionalBlueprintAI:
                     "visual_highlights": None
                 }
             
-            # Determine if we need visual analysis
-            needs_visual_analysis = self._needs_visual_highlighting(prompt, current_page, request_highlights)
-            
-            if needs_visual_analysis and current_page:
-                # Load specific page for visual analysis
-                page_images = await self._load_specific_page(
-                    document_id, current_page, storage_service
+            # Check if we can reuse previous highlights
+            if reference_previous:
+                reused_highlights = await self._get_previous_highlights(
+                    document_id, reference_previous, storage_service
                 )
-            else:
-                # Load all pages for comprehensive analysis
+                if reused_highlights:
+                    logger.info(f"♻️ Reusing {len(reused_highlights)} previous highlights")
+            
+            # Determine if we need new visual analysis
+            needs_new_analysis = self._needs_visual_analysis(prompt, reference_previous)
+            
+            if needs_new_analysis:
+                # Load ALL pages for comprehensive analysis
                 page_images = await self._load_all_pages_optimized(
                     document_id, storage_service, metadata
                 )
+                logger.info(f"📄 Loaded {len(page_images)} pages for analysis")
+            else:
+                # Just load current page for context
+                if current_page:
+                    page_images = await self._load_specific_page(
+                        document_id, current_page, storage_service
+                    )
+                else:
+                    page_images = []
             
             loading_time = asyncio.get_event_loop().time() - analysis_start
             logger.info(f"⏱️ Document loaded in {loading_time:.2f}s")
             
             # Process with professional analysis
-            result = await self._analyze_blueprint_with_highlighting(
+            result = await self._analyze_blueprint_with_multi_page_highlighting(
                 prompt=prompt,
                 document_text=document_text,
                 image_urls=page_images,
                 document_id=document_id,
                 author=author,
                 current_page=current_page,
-                request_highlights=request_highlights and needs_visual_analysis
+                request_highlights=request_highlights,
+                reference_previous=reference_previous,
+                preserve_existing=preserve_existing,
+                storage_service=storage_service,
+                metadata=metadata
             )
             
             total_time = asyncio.get_event_loop().time() - analysis_start
@@ -176,109 +211,120 @@ class ProfessionalBlueprintAI:
                 "visual_highlights": None
             }
     
-    def _needs_visual_highlighting(self, prompt: str, current_page: Optional[int], 
-                                  request_highlights: bool) -> bool:
-        """Determine if the query needs visual highlighting"""
-        if not request_highlights or not current_page:
+    def _needs_visual_analysis(self, prompt: str, reference_previous: Optional[List[str]]) -> bool:
+        """Determine if we need to analyze pages for new elements"""
+        # If just referencing previous, no new analysis needed
+        if reference_previous and not self._contains_new_element_request(prompt):
             return False
         
-        # Keywords that indicate visual search
+        # Check if prompt asks for visual elements
         visual_keywords = [
             'show', 'highlight', 'where', 'locate', 'find', 'identify',
-            'point out', 'mark', 'indicate', 'display', 'circle'
-        ]
-        
-        # Element types that can be highlighted
-        element_keywords = [
-            'column', 'beam', 'outlet', 'window', 'door', 'sprinkler',
-            'duct', 'pipe', 'equipment', 'fixture', 'panel', 'valve',
-            'switch', 'light', 'vent', 'drain', 'wall', 'opening'
+            'point out', 'mark', 'indicate', 'display', 'how many', 'count'
         ]
         
         prompt_lower = prompt.lower()
-        
-        # Check if prompt contains visual request
-        has_visual_keyword = any(keyword in prompt_lower for keyword in visual_keywords)
-        has_element_keyword = any(keyword in prompt_lower for keyword in element_keywords)
-        
-        return has_visual_keyword or has_element_keyword
+        return any(keyword in prompt_lower for keyword in visual_keywords)
     
-    async def _load_specific_page(self, document_id: str, page_num: int,
-                                 storage_service: StorageService) -> List[Dict[str, any]]:
-        """Load a specific page for visual analysis"""
+    def _contains_new_element_request(self, prompt: str) -> bool:
+        """Check if prompt requests new element types beyond reference_previous"""
+        prompt_lower = prompt.lower()
+        
+        # Check for element types in prompt
+        for element_type in self.element_patterns.keys():
+            if element_type in prompt_lower:
+                return True
+        
+        return False
+    
+    async def _get_previous_highlights(self, document_id: str, element_types: List[str],
+                                      storage_service: StorageService) -> List[Dict]:
+        """Retrieve previously saved highlights for specified element types"""
         try:
-            page_data = await self._load_single_page_optimized(
-                document_id, page_num, storage_service
+            # Load all annotations
+            annotations_blob = f"{document_id}_annotations.json"
+            annotations_data = await storage_service.download_blob_as_text(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=annotations_blob
             )
+            all_annotations = json.loads(annotations_data)
             
-            if page_data:
-                logger.info(f"✅ Loaded page {page_num} for visual analysis")
-                return [page_data]
-            else:
-                logger.warning(f"⚠️ Could not load page {page_num}")
-                return []
-                
+            # Filter to requested element types
+            previous_highlights = [
+                ann for ann in all_annotations
+                if ann.get('annotation_type') == 'ai_highlight' and
+                   ann.get('element_type') in element_types
+            ]
+            
+            logger.info(f"✅ Retrieved {len(previous_highlights)} previous highlights")
+            return previous_highlights
+            
         except Exception as e:
-            logger.error(f"Error loading page {page_num}: {e}")
+            logger.info(f"No previous highlights found: {e}")
             return []
     
-    async def _analyze_blueprint_with_highlighting(self, prompt: str, document_text: str, 
-                                                  image_urls: List[Dict[str, any]], 
-                                                  document_id: str,
-                                                  author: str,
-                                                  current_page: Optional[int],
-                                                  request_highlights: bool) -> Dict[str, Any]:
-        """Analyze blueprint with optional grid-based highlighting"""
+    async def _analyze_blueprint_with_multi_page_highlighting(
+        self, prompt: str, document_text: str, image_urls: List[Dict[str, any]], 
+        document_id: str, author: str, current_page: Optional[int],
+        request_highlights: bool, reference_previous: Optional[List[str]],
+        preserve_existing: bool, storage_service: StorageService,
+        metadata: Optional[Dict]) -> Dict[str, Any]:
+        """Analyze blueprint and create highlights across ALL pages"""
         try:
             logger.info("="*50)
-            logger.info("📊 PROFESSIONAL BLUEPRINT ANALYSIS WITH HIGHLIGHTING")
+            logger.info("📊 MULTI-PAGE BLUEPRINT ANALYSIS")
             logger.info(f"📄 Document: {document_id}")
             logger.info(f"❓ Query: {prompt}")
-            logger.info(f"🎯 Current Page: {current_page}")
-            logger.info(f"✨ Highlights Requested: {request_highlights}")
+            logger.info(f"📑 Total pages: {len(image_urls)}")
             logger.info("="*50)
             
-            # Enhanced system message for grid-based highlighting
-            system_message = self._get_enhanced_system_message(request_highlights, current_page)
+            # Get system message for comprehensive analysis
+            system_message = self._get_multi_page_system_message()
             
             messages = [system_message]
             
-            # Build user message
+            # Build user message with all pages
             user_message = {"role": "user", "content": []}
             
-            # Add page images
+            # Add ALL page images for analysis
             if image_urls:
-                for page_data in image_urls:
+                for i, page_data in enumerate(image_urls):
                     user_message["content"].append({
                         "type": "image_url",
                         "image_url": {"url": page_data["url"], "detail": "high"}
                     })
             
             # Build comprehensive query
-            query_text = self._build_query_text(
+            query_text = self._build_multi_page_query(
                 prompt, document_id, document_text, 
-                current_page, request_highlights, len(image_urls)
+                len(image_urls), metadata
             )
             
             user_message["content"].append({"type": "text", "text": query_text})
             messages.append(user_message)
             
-            logger.info("📤 Requesting professional analysis with grid detection")
+            logger.info("📤 Requesting multi-page analysis")
             
             # Get AI response
             response = await self._get_ai_completion(messages)
             
-            # Parse response for visual elements if requested
-            if request_highlights and current_page:
-                parsed_response = self._parse_response_with_highlights(response, current_page)
+            # Parse response and create highlights for ALL pages
+            if request_highlights:
+                query_session_id = str(uuid.uuid4())
+                parsed_response = await self._create_multi_page_highlights(
+                    response, document_id, query_session_id, 
+                    reference_previous, preserve_existing, storage_service
+                )
+                parsed_response['query_session_id'] = query_session_id
             else:
                 parsed_response = {
                     "ai_response": response,
                     "visual_highlights": None,
-                    "drawing_grid": None,
-                    "highlight_summary": None,
-                    "current_page": current_page
+                    "query_session_id": None
                 }
+            
+            # Add current page and highlight summary
+            parsed_response['current_page'] = current_page
             
             return parsed_response
             
@@ -289,122 +335,249 @@ class ProfessionalBlueprintAI:
                 "visual_highlights": None
             }
     
-    def _get_enhanced_system_message(self, request_highlights: bool, 
-                                    current_page: Optional[int]) -> Dict[str, str]:
-        """Get system message with grid highlighting instructions"""
-        
-        base_message = """You are a professional blueprint analyst with extensive experience across all construction trades. You analyze MULTI-SHEET blueprint sets, ALWAYS provide code-based recommendations when information is missing, AND ask clarifying questions."""
-        
-        highlighting_instructions = """
+    def _get_multi_page_system_message(self) -> Dict[str, str]:
+        """System message for analyzing entire document"""
+        return {
+            "role": "system",
+            "content": """You are a professional blueprint analyst examining construction documents. 
 
-🎯 VISUAL ELEMENT IDENTIFICATION AND GRID HIGHLIGHTING:
+CRITICAL INSTRUCTIONS FOR MULTI-PAGE ANALYSIS:
 
-When asked to show/highlight/identify specific elements on a drawing:
+1. ALWAYS provide complete, professional answers with code references
+2. When identifying elements (windows, doors, columns, etc.), analyze ALL pages provided
+3. For each element found, note:
+   - Page number where it appears
+   - Grid location (e.g., "W2-WA", "Grid B-3")
+   - Element label/ID if visible
+   - Quantity and dimensions
 
-1. IDENTIFY GRID SYSTEM
-• Look for grid lines with labels (e.g., A, B, C... or 1, 2, 3... or W1, W2...)
-• Note grid intersections (e.g., A-1, B-2, W2-WA)
-• Identify scale from title block
-
-2. LOCATE ELEMENTS USING GRID REFERENCES
-• For each requested element, provide its grid location
-• Use format: "Column at W2-WA" or "Outlet near grid B-3"
-• Be specific about grid intersections or areas
-
-3. PROVIDE STRUCTURED OUTPUT FOR HIGHLIGHTING
-When identifying elements for highlighting, include:
+4. FORMAT YOUR FINDINGS:
+When listing elements across pages, use this format:
 ```
-VISUAL_ELEMENTS:
-- Element: [type] at grid [reference]
-  Label: [identifier or description]
-  Size: [dimensions if shown]
+ELEMENTS_FOUND:
+Page 3: 8 windows (Type 1 at B-2, Type 2 at E-5...)
+Page 4: 6 windows (Type 1 at B-2, Type 3 at F-7...)
+Page 5: 8 windows (Type 1 at B-2, Type 2 at E-5...)
+
+TOTAL: 22 windows across 3 pages
 ```
 
-4. GRID SYSTEM INFORMATION
-If grid system is visible, provide:
-```
-GRID_SYSTEM:
-X-axis: [list of horizontal grid labels]
-Y-axis: [list of vertical grid labels]
-Scale: [drawing scale]
-```
+5. BUILDING CODES:
+- Reference BCBC 2018 (British Columbia Building Code)
+- Include CSA standards where applicable
+- Mention local Burnaby requirements when relevant
 
-Example for columns:
-```
-VISUAL_ELEMENTS:
-- Element: Column at grid W2-WA
-  Label: C-101
-  Size: 600x600mm
-- Element: Column at grid W3-WC
-  Label: C-102
-  Size: 600x600mm
+6. ALWAYS SUGGEST FOLLOW-UP:
+End responses with helpful options like:
+"Would you like me to:
+1. Show specific element types on other levels?
+2. Calculate quantities for specific trades?
+3. Identify potential conflicts?"
 
-GRID_SYSTEM:
-X-axis: W1, W2, W3, W4, W5
-Y-axis: WA, WB, WC, WD, WE
-Scale: 1/8" = 1'-0"
-```"""
-        
-        comprehensive_instructions = """
-
-📍 COMPREHENSIVE ANALYSIS APPROACH:
-
-1. ANALYZE ALL SHEETS PROVIDED
-• Identify what's on each sheet
-• Cross-reference between sheets
-• Note what's missing
-
-2. ALWAYS PROVIDE COMPLETE ANSWERS USING CODES
-• If sizes aren't shown → Use code minimums and typical sizes
-• If quantities are missing → Calculate per code requirements
-• Never say "not enough information" → Give code-based answer
-
-3. ASK CLARIFYING QUESTIONS
-• To verify assumptions
-• To find additional sheets
-• To provide better accuracy"""
-        
-        if request_highlights and current_page:
-            return {
-                "role": "system",
-                "content": base_message + highlighting_instructions + comprehensive_instructions
-            }
-        else:
-            return {
-                "role": "system",
-                "content": base_message + comprehensive_instructions
-            }
+Remember: You're helping construction professionals who need accurate counts, locations, and code compliance information."""
+        }
     
-    def _build_query_text(self, prompt: str, document_id: str, document_text: str,
-                         current_page: Optional[int], request_highlights: bool,
-                         image_count: int) -> str:
-        """Build the query text with appropriate context"""
+    def _build_multi_page_query(self, prompt: str, document_id: str, 
+                                document_text: str, page_count: int,
+                                metadata: Optional[Dict]) -> str:
+        """Build query for multi-page analysis"""
         
-        base_query = f"""Document: {document_id}
-Question: {prompt}"""
+        # Extract document info from metadata
+        doc_info = ""
+        if metadata:
+            if 'document_info' in metadata:
+                doc_info = f"Project: {metadata['document_info'].get('title', 'Unknown')}\n"
+            if 'page_details' in metadata:
+                sheet_info = []
+                for page in metadata['page_details']:
+                    if page.get('sheet_number'):
+                        sheet_info.append(f"Page {page['page_number']}: Sheet {page['sheet_number']} - {page.get('drawing_type', 'Unknown type')}")
+                if sheet_info:
+                    doc_info += "Drawing sheets:\n" + "\n".join(sheet_info[:10])  # First 10
         
-        if request_highlights and current_page:
-            highlight_context = f"""
+        query = f"""Document: {document_id}
+Total pages provided: {page_count}
 
-VISUAL HIGHLIGHTING REQUEST:
-- Current page: {current_page}
-- Identify and locate elements using grid references
-- Provide structured VISUAL_ELEMENTS and GRID_SYSTEM sections
-- Be specific about grid locations for each element"""
-        else:
-            highlight_context = """
+{doc_info}
 
-Note: If this query is about locating specific elements, please specify which page you're viewing for visual highlighting."""
+User Question: {prompt}
+
+IMPORTANT: 
+- Analyze ALL {page_count} pages provided
+- Identify requested elements on EVERY page where they appear
+- Provide total counts across all pages
+- Note page numbers for each finding
+
+Drawing text content available: {'Yes' if document_text else 'No'}"""
         
-        context = f"""{base_query}{highlight_context}
-
-Total pages provided: {image_count}
-Text from all pages: {'Available' if document_text else 'Not available'}
-
-Drawing text content (from all sheets):
-{document_text}"""
+        if document_text:
+            query += f"\n\nText extracted from drawings:\n{document_text[:2000]}..."
         
-        return context
+        return query
+    
+    async def _create_multi_page_highlights(self, response: str, document_id: str,
+                                           query_session_id: str,
+                                           reference_previous: Optional[List[str]],
+                                           preserve_existing: bool,
+                                           storage_service: StorageService) -> Dict[str, Any]:
+        """Parse response and create highlights across multiple pages"""
+        
+        # Parse response for element locations
+        all_highlights = []
+        pages_with_highlights = {}
+        
+        # Extract structured element data from response
+        elements_section = re.search(r'ELEMENTS_FOUND:(.*?)(?=TOTAL:|$)', response, re.DOTALL)
+        
+        if elements_section:
+            elements_text = elements_section.group(1)
+            
+            # Parse page-by-page findings
+            page_pattern = r'Page\s+(\d+):\s*(.*?)(?=Page\s+\d+:|$)'
+            page_matches = re.finditer(page_pattern, elements_text, re.DOTALL)
+            
+            for match in page_matches:
+                page_num = int(match.group(1))
+                page_content = match.group(2)
+                
+                # Extract elements from this page
+                page_elements = self._parse_page_elements(page_content, page_num)
+                
+                for element in page_elements:
+                    all_highlights.append({
+                        "annotation_id": str(uuid.uuid4())[:8],
+                        "document_id": document_id,
+                        "page_number": page_num,
+                        "element_type": element['element_type'],
+                        "grid_reference": element['grid_reference'],
+                        "label": element.get('label', ''),
+                        "x": 0,  # Grid-based, not pixel
+                        "y": 0,
+                        "text": element.get('description', ''),
+                        "annotation_type": "ai_highlight",
+                        "author": "ai_system",
+                        "is_private": False,
+                        "query_session_id": query_session_id,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "confidence": element.get('confidence', 0.9)
+                    })
+                
+                pages_with_highlights[page_num] = len(page_elements)
+        
+        # Handle reference_previous - add existing highlights
+        if reference_previous:
+            previous_highlights = await self._get_previous_highlights(
+                document_id, reference_previous, storage_service
+            )
+            
+            # Update their session ID if not preserving
+            if not preserve_existing:
+                for ph in previous_highlights:
+                    ph['query_session_id'] = query_session_id
+            
+            all_highlights.extend(previous_highlights)
+        
+        # Save all highlights using annotation route
+        if all_highlights:
+            # Import here to avoid circular dependency
+            from app.api.routes.annotation_routes import save_all_annotations, load_all_annotations
+            
+            # Load existing annotations
+            existing_annotations = await load_all_annotations(document_id, storage_service)
+            
+            # Clear previous AI highlights unless preserving
+            if not preserve_existing:
+                existing_annotations = [
+                    ann for ann in existing_annotations
+                    if ann.get('annotation_type') != 'ai_highlight'
+                ]
+            
+            # Add new highlights
+            existing_annotations.extend(all_highlights)
+            
+            # Save back
+            await save_all_annotations(document_id, existing_annotations, storage_service)
+            
+            logger.info(f"💾 Saved {len(all_highlights)} highlights across {len(pages_with_highlights)} pages")
+        
+        # Clean response text
+        clean_response = response
+        if elements_section:
+            clean_response = clean_response.replace(elements_section.group(0), '')
+        
+        # Return current page highlights only for display
+        current_page_highlights = None
+        if all_highlights:
+            # Convert to VisualElement format for current page
+            current_page_highlights = []
+            for h in all_highlights:
+                if h.get('page_number') == h.get('current_page', 1):
+                    current_page_highlights.append(
+                        VisualElement(
+                            element_id=h['annotation_id'],
+                            element_type=h['element_type'],
+                            grid_location=GridReference(
+                                grid_ref=h['grid_reference'],
+                                x_grid=h['grid_reference'].split('-')[0] if '-' in h['grid_reference'] else h['grid_reference'],
+                                y_grid=h['grid_reference'].split('-')[1] if '-' in h['grid_reference'] else None
+                            ),
+                            label=h['label'],
+                            page_number=h['page_number']
+                        )
+                    )
+        
+        return {
+            "ai_response": clean_response.strip(),
+            "visual_highlights": current_page_highlights,
+            "all_highlight_pages": pages_with_highlights,
+            "total_highlights_created": len(all_highlights)
+        }
+    
+    def _parse_page_elements(self, page_content: str, page_num: int) -> List[Dict]:
+        """Parse elements from page description"""
+        elements = []
+        
+        # Common patterns for element detection
+        patterns = [
+            # "Type 1 at B-2"
+            r'Type\s+(\d+)\s+at\s+([A-Z0-9-]+)',
+            # "8 windows (details)"
+            r'(\d+)\s+(\w+)\s+\((.*?)\)',
+            # "CB-301 at grid W2-WA"
+            r'(CB-\d+)\s+at\s+(?:grid\s+)?([A-Z0-9-]+)',
+            # Generic "element at location"
+            r'(\w+)\s+at\s+(?:grid\s+)?([A-Z0-9-]+)'
+        ]
+        
+        content_lower = page_content.lower()
+        
+        # Determine element type from content
+        element_type = 'unknown'
+        for etype, keywords in [
+            ('window', ['window', 'glazing', 'type']),
+            ('door', ['door', 'entrance']),
+            ('catch_basin', ['cb', 'catch basin', 'drain']),
+            ('column', ['column', 'col']),
+            ('sprinkler', ['sprinkler', 'sp'])
+        ]:
+            if any(kw in content_lower for kw in keywords):
+                element_type = etype
+                break
+        
+        # Extract grid locations
+        grid_pattern = r'[A-Z]\d+[-\s]?[A-Z]*\d*|[A-Z][-\s]\d+|\d+[-\s][A-Z]'
+        grid_matches = re.finditer(grid_pattern, page_content)
+        
+        for i, match in enumerate(grid_matches):
+            elements.append({
+                'element_type': element_type,
+                'grid_reference': match.group(0),
+                'label': f"{element_type}_{page_num}_{i+1}",
+                'confidence': 0.9,
+                'description': f"{element_type} on page {page_num}"
+            })
+        
+        return elements
     
     async def _get_ai_completion(self, messages: List[Dict]) -> str:
         """Get completion from OpenAI"""
@@ -432,121 +605,7 @@ Drawing text content (from all sheets):
                 else:
                     raise
     
-    def _parse_response_with_highlights(self, response: str, current_page: int) -> Dict[str, Any]:
-        """Parse AI response to extract visual elements and grid information"""
-        
-        # Extract visual elements section
-        visual_elements = []
-        grid_system = None
-        
-        # Look for VISUAL_ELEMENTS section
-        visual_match = re.search(r'VISUAL_ELEMENTS:(.*?)(?=GRID_SYSTEM:|$)', response, re.DOTALL)
-        if visual_match:
-            elements_text = visual_match.group(1)
-            visual_elements = self._parse_visual_elements(elements_text)
-        
-        # Look for GRID_SYSTEM section
-        grid_match = re.search(r'GRID_SYSTEM:(.*?)(?=\n\n|$)', response, re.DOTALL)
-        if grid_match:
-            grid_text = grid_match.group(1)
-            grid_system = self._parse_grid_system(grid_text)
-        
-        # Clean the response text (remove structured sections)
-        clean_response = response
-        if visual_match:
-            clean_response = clean_response.replace(visual_match.group(0), '')
-        if grid_match:
-            clean_response = clean_response.replace(grid_match.group(0), '')
-        
-        # Create highlight summary
-        highlight_summary = {}
-        if visual_elements:
-            for element in visual_elements:
-                elem_type = element.element_type
-                highlight_summary[elem_type] = highlight_summary.get(elem_type, 0) + 1
-        
-        return {
-            "ai_response": clean_response.strip(),
-            "visual_highlights": visual_elements if visual_elements else None,
-            "drawing_grid": grid_system,
-            "highlight_summary": highlight_summary if highlight_summary else None,
-            "current_page": current_page
-        }
-    
-    def _parse_visual_elements(self, elements_text: str) -> List[VisualElement]:
-        """Parse visual elements from structured text"""
-        elements = []
-        
-        # Pattern to match element entries
-        element_pattern = r'- Element: (.+?) at grid (.+?)(?:\n\s+Label: (.+?))?(?:\n\s+Size: (.+?))?'
-        
-        matches = re.finditer(element_pattern, elements_text)
-        
-        for i, match in enumerate(matches):
-            element_type = match.group(1).lower().replace(' ', '_')
-            grid_ref = match.group(2).strip()
-            label = match.group(3).strip() if match.group(3) else f"{element_type}_{i+1}"
-            size = match.group(4).strip() if match.group(4) else None
-            
-            # Parse grid reference
-            grid_parts = grid_ref.split('-')
-            if len(grid_parts) == 2:
-                x_grid, y_grid = grid_parts
-            else:
-                x_grid = grid_ref
-                y_grid = None
-            
-            element = VisualElement(
-                element_id=f"{element_type}_{i+1}",
-                element_type=element_type,
-                grid_location=GridReference(
-                    grid_ref=grid_ref,
-                    x_grid=x_grid,
-                    y_grid=y_grid
-                ),
-                label=label,
-                dimensions=size,
-                confidence=0.9
-            )
-            
-            elements.append(element)
-        
-        logger.info(f"📍 Parsed {len(elements)} visual elements")
-        return elements
-    
-    def _parse_grid_system(self, grid_text: str) -> DrawingGrid:
-        """Parse grid system information"""
-        x_labels = []
-        y_labels = []
-        scale = None
-        
-        # Parse X-axis
-        x_match = re.search(r'X-axis:\s*(.+)', grid_text)
-        if x_match:
-            x_labels = [label.strip() for label in x_match.group(1).split(',')]
-        
-        # Parse Y-axis
-        y_match = re.search(r'Y-axis:\s*(.+)', grid_text)
-        if y_match:
-            y_labels = [label.strip() for label in y_match.group(1).split(',')]
-        
-        # Parse scale
-        scale_match = re.search(r'Scale:\s*(.+)', grid_text)
-        if scale_match:
-            scale = scale_match.group(1).strip()
-        
-        if x_labels or y_labels:
-            grid = DrawingGrid(
-                x_labels=x_labels,
-                y_labels=y_labels,
-                scale=scale
-            )
-            logger.info(f"📐 Parsed grid system: {len(x_labels)}x{len(y_labels)}")
-            return grid
-        
-        return None
-    
-    # --- Keep all existing methods from original file ---
+    # --- Keep all existing helper methods ---
     
     async def _load_all_pages_optimized(self, document_id: str, 
                                        storage_service: StorageService,
@@ -665,6 +724,25 @@ Drawing text content (from all sheets):
             logger.error(f"Failed to load page {page_num}: {e}")
             return None
     
+    async def _load_specific_page(self, document_id: str, page_num: int,
+                                 storage_service: StorageService) -> List[Dict[str, any]]:
+        """Load a specific page for visual analysis"""
+        try:
+            page_data = await self._load_single_page_optimized(
+                document_id, page_num, storage_service
+            )
+            
+            if page_data:
+                logger.info(f"✅ Loaded page {page_num} for visual analysis")
+                return [page_data]
+            else:
+                logger.warning(f"⚠️ Could not load page {page_num}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error loading page {page_num}: {e}")
+            return []
+    
     async def _optimize_image_for_ai(self, image_bytes: bytes) -> bytes:
         """Optimize image for AI processing to reduce memory usage"""
         return await asyncio.get_event_loop().run_in_executor(
@@ -733,27 +811,25 @@ Drawing text content (from all sheets):
                 "Fire Protection",
                 "Civil/Site"
             ],
-            "analysis_features": [
-                "Multi-page document support",
-                "Cross-trade coordination",
-                "Code compliance checking",
-                "Quantity takeoffs",
-                "Professional calculations",
-                "Drawing cross-referencing",
-                "Grid-based element highlighting"
+            "multi_page_features": [
+                "Analyzes entire document at once",
+                "Finds elements across all pages",
+                "Creates persistent highlights",
+                "Reuses previous analysis",
+                "Provides page-by-page breakdowns"
             ],
             "visual_features": [
                 "Grid system detection",
                 "Element location identification",
-                "Dynamic highlighting",
-                "Multi-element selection",
+                "Multi-page highlighting",
+                "Reference previous highlights",
                 "Drawing scale recognition"
             ],
             "optimization_features": [
                 f"Handles up to {self.max_pages_to_load} pages",
                 f"Parallel loading in batches of {self.batch_size}",
                 "Image compression for efficiency",
-                "Automatic retry on context limits",
+                "Highlight reuse system",
                 "Optimized for large documents"
             ]
         }
