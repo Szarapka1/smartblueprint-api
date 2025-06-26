@@ -1,7 +1,7 @@
 # app/models/schemas.py - ENHANCED WITH AI NOTE SUGGESTIONS
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 # --- Document Chat Models ---
@@ -296,7 +296,7 @@ class DocumentInfoResponse(BaseModel):
     status: str
     message: str
     exists: bool
-    metadata: Optional[Dict[str, any]] = None
+    metadata: Optional[Dict[str, Any]] = None  # Changed from 'any' to 'Any'
     # NEW: Public collaboration info only
     total_published_notes: Optional[int] = None  # Count of public notes
     active_collaborators: Optional[int] = None  # Users who have published notes
@@ -304,11 +304,11 @@ class DocumentInfoResponse(BaseModel):
 
 class DocumentListResponse(BaseModel):
     """List of documents response"""
-    documents: List[Dict[str, any]]
+    documents: List[Dict[str, Any]]  # Changed from 'any' to 'Any'
     total_count: int
     has_more: bool
     # NEW: Filtering info
-    filter_applied: Optional[Dict[str, any]] = None
+    filter_applied: Optional[Dict[str, Any]] = None  # Changed from 'any' to 'Any'
 
 # --- Enhanced Response Models ---
 
@@ -348,7 +348,7 @@ class SuccessResponse(BaseModel):
     """Generic success response"""
     status: str = "success"
     message: str
-    data: Optional[Dict[str, any]] = None
+    data: Optional[Dict[str, Any]] = None  # Changed from 'any' to 'Any'
 
 class ErrorResponse(BaseModel):
     """Generic error response"""
