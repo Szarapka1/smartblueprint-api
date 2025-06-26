@@ -56,12 +56,13 @@ class AppSettings:
         self.MAX_NOTES_PER_DOCUMENT: int = int(os.getenv("MAX_NOTES_PER_DOCUMENT", 500))
         self.MAX_NOTE_LENGTH: int = int(os.getenv("MAX_NOTE_LENGTH", 10000))
         self.MAX_TOTAL_NOTE_CHARS: int = int(os.getenv("MAX_TOTAL_NOTE_CHARS", 500000))
-        self.NOTE_TYPES: List[str] = os.getenv("NOTE_TYPES", "general,question,issue,suggestion,review").split(",")
+        self.NOTE_TYPES: List[str] = os.getenv("NOTE_TYPES", "general,question,issue,suggestion,review,coordination,warning").split(",")
         
         # Session Service Settings
         self.MAX_SESSIONS_IN_MEMORY: int = int(os.getenv("MAX_SESSIONS_IN_MEMORY", 100))
         self.SESSION_CLEANUP_HOURS: int = int(os.getenv("SESSION_CLEANUP_HOURS", 24))
         self.MAX_SESSION_MEMORY_MB: int = int(os.getenv("MAX_SESSION_MEMORY_MB", 500))
+        self.MAX_ANNOTATIONS_PER_SESSION: int = int(os.getenv("MAX_ANNOTATIONS_PER_SESSION", 1000))
         
         # AI Visual Highlighting Settings
         self.AI_MAX_PAGES: int = int(os.getenv("AI_MAX_PAGES", 100))
@@ -79,6 +80,13 @@ class AppSettings:
         self.STORAGE_MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_DOWNLOADS", 5))
         self.STORAGE_ENABLE_PAGINATION: bool = os.getenv("STORAGE_ENABLE_PAGINATION", "true").lower() == "true"
         
+        # Trade Configuration
+        self.TRADES_LIST: List[str] = os.getenv(
+            "TRADES_LIST", 
+            "General,Electrical,Plumbing,HVAC,Fire Protection,Structural,Architectural"
+        ).split(",")
+        self.ENABLE_TRADE_COORDINATION: bool = os.getenv("ENABLE_TRADE_COORDINATION", "true").lower() == "true"
+        
         # Feature Flags
         self.ENABLE_DOCUMENT_NOTES: bool = os.getenv("ENABLE_DOCUMENT_NOTES", "true").lower() == "true"
         self.ENABLE_AI_HIGHLIGHTING: bool = os.getenv("ENABLE_AI_HIGHLIGHTING", "true").lower() == "true"
@@ -91,6 +99,10 @@ class AppSettings:
     def get_note_types(self) -> List[str]:
         """Get allowed note types"""
         return self.NOTE_TYPES
+    
+    def get_trades_list(self) -> List[str]:
+        """Get list of construction trades"""
+        return self.TRADES_LIST
     
     def is_production(self) -> bool:
         """Check if running in production"""
