@@ -32,7 +32,7 @@ def validate_document_id(document_id: str) -> str:
 
 def validate_admin_access(admin_token: str) -> bool:
     """Validate admin access using environment variable"""
-    expected_token = os.getenv("ADMIN_SECRET_TOKEN")
+    expected_token = os.getenv("ADMIN_SECRET_TOKEN", settings.ADMIN_SECRET_TOKEN)
     if not expected_token:
         raise HTTPException(
             status_code=500,
@@ -156,28 +156,36 @@ async def get_active_highlights(
     request: Request,
     document_id: str,
     query_session_id: str = Query(..., description="Query session to get highlights for"),
+    author: str = Query(..., description="User requesting highlights"),
     page_number: Optional[int] = Query(None, description="Filter by specific page")
 ):
-    """Get active highlights for current query session"""
+    """Get active highlights for current query session - only visible to the user who created them"""
     try:
         clean_document_id = validate_document_id(document_id)
         storage_service = request.app.state.storage_service
         
-        # Get highlights for this session
+        # Get all highlights for this session
         session_highlights = await get_active_highlights_for_session(
             clean_document_id, query_session_id, storage_service
         )
         
+        # Filter to only highlights created by this user
+        user_highlights = [
+            h for h in session_highlights
+            if h.get("author") == author or h.get("author") == "ai_system"
+        ]
+        
         # Filter by page if requested
         if page_number is not None:
-            session_highlights = [
-                h for h in session_highlights 
+            user_highlights = [
+                h for h in user_highlights 
                 if h.get("page_number") == page_number
             ]
         
         # Group by page for summary
         highlights_by_page = {}
-        for highlight in session_highlights:
+        
+        for highlight in user_highlights:
             page = highlight.get("page_number", 0)
             if page not in highlights_by_page:
                 highlights_by_page[page] = []
@@ -186,8 +194,9 @@ async def get_active_highlights(
         return {
             "document_id": clean_document_id,
             "query_session_id": query_session_id,
-            "total_highlights": len(session_highlights),
-            "highlights": session_highlights,
+            "author": author,
+            "total_highlights": len(user_highlights),
+            "highlights": user_highlights,
             "pages_with_highlights": sorted(highlights_by_page.keys()),
             "highlights_by_page": {
                 page: len(items) for page, items in highlights_by_page.items()
@@ -235,17 +244,21 @@ async def clear_highlight_session(
         logger.error(f"Failed to clear highlight session: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to clear highlights: {str(e)}")
 
-# --- EXISTING ENDPOINTS (Updated for compatibility) ---
+# --- EXISTING ENDPOINTS (Updated for open access) ---
 
 @annotation_router.get("/documents/{document_id}/annotations")
 async def get_user_visible_annotations(
     request: Request, 
     document_id: str,
-    author: str = Query(...),
-    include_highlights: bool = Query(True, description="Include AI highlights")
+    author: str = Query(..., description="User requesting annotations"),
+    include_highlights: bool = Query(True, description="Include your AI highlights"),
+    include_published: bool = Query(True, description="Include published notes from all users")
 ):
     """
-    Get annotations visible to user INCLUDING active AI highlights
+    Get annotations visible to user:
+    - Their own AI highlights (private)
+    - Their own personal notes (private)
+    - Published notes from all users (public)
     """
     try:
         clean_document_id = validate_document_id(document_id)
@@ -257,24 +270,30 @@ async def get_user_visible_annotations(
         # Clear expired highlights
         all_annotations = await clear_expired_highlights(all_annotations)
         
-        # Filter to what user can see
+        # Filter annotations based on privacy rules
         visible_annotations = []
         for annotation in all_annotations:
-            # Include AI highlights if requested
-            if annotation.get("annotation_type") == "ai_highlight" and include_highlights:
+            # User's own AI highlights (private to them)
+            if (annotation.get("annotation_type") == "ai_highlight" and 
+                include_highlights and 
+                annotation.get("author") == author):
                 visible_annotations.append(annotation)
-            # Include public annotations
-            elif not annotation.get("is_private", True):
+            # Published notes (visible to everyone)
+            elif not annotation.get("is_private", True) and include_published:
                 visible_annotations.append(annotation)
-            # Include user's private annotations
-            elif annotation.get("author") == author:
+            # User's own private notes
+            elif annotation.get("is_private", True) and annotation.get("author") == author:
                 visible_annotations.append(annotation)
         
         return {
             "document_id": clean_document_id,
             "annotations": visible_annotations,
             "visible_count": len(visible_annotations),
-            "requesting_author": author
+            "requesting_author": author,
+            "filters_applied": {
+                "include_highlights": include_highlights,
+                "include_published": include_published
+            }
         }
 
     except Exception as e:
@@ -330,13 +349,70 @@ async def create_annotation(
             element_type=annotation.element_type,
             grid_reference=annotation.grid_reference,
             query_session_id=annotation.query_session_id,
-            created_at=new_annotation["created_at"]
+            created_at=new_annotation["created_at"],
+            assigned_trade=new_annotation.get("assigned_trade")
         )
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create annotation: {str(e)}")
+
+@annotation_router.get("/documents/{document_id}/highlights/summary")
+async def get_highlights_summary(
+    request: Request,
+    document_id: str,
+    include_expired: bool = Query(False, description="Include expired highlights")
+):
+    """Get summary of all highlights for a document - accessible to all users"""
+    try:
+        clean_document_id = validate_document_id(document_id)
+        storage_service = request.app.state.storage_service
+        
+        # Get ALL annotations
+        all_annotations = await load_all_annotations(clean_document_id, storage_service)
+        
+        # Filter to highlights
+        if not include_expired:
+            all_annotations = await clear_expired_highlights(all_annotations)
+        
+        highlights = [
+            ann for ann in all_annotations 
+            if ann.get("annotation_type") == "ai_highlight"
+        ]
+        
+        # Group by session
+        sessions_summary = {}
+        for highlight in highlights:
+            session_id = highlight.get("query_session_id", "unknown")
+            if session_id not in sessions_summary:
+                sessions_summary[session_id] = {
+                    "created_at": highlight.get("created_at"),
+                    "expires_at": highlight.get("expires_at"),
+                    "pages": set(),
+                    "element_types": set(),
+                    "total": 0
+                }
+            
+            sessions_summary[session_id]["pages"].add(highlight.get("page_number"))
+            sessions_summary[session_id]["element_types"].add(highlight.get("element_type"))
+            sessions_summary[session_id]["total"] += 1
+        
+        # Convert sets to lists
+        for session in sessions_summary.values():
+            session["pages"] = sorted(list(session["pages"]))
+            session["element_types"] = sorted(list(session["element_types"]))
+        
+        return {
+            "document_id": clean_document_id,
+            "total_highlights": len(highlights),
+            "active_sessions": len(sessions_summary),
+            "sessions": sessions_summary
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get highlights summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- ADMIN ENDPOINTS ---
 
@@ -367,8 +443,10 @@ async def admin_get_all_highlights(
             if ann.get("annotation_type") == "ai_highlight"
         ]
         
-        # Group by query session
+        # Group by query session with more details
         sessions = {}
+        trade_breakdown = {}
+        
         for highlight in all_highlights:
             session_id = highlight.get("query_session_id", "unknown")
             if session_id not in sessions:
@@ -376,22 +454,34 @@ async def admin_get_all_highlights(
                     "highlights": [],
                     "pages": set(),
                     "element_types": set(),
-                    "created_at": highlight.get("created_at")
+                    "trades": set(),
+                    "created_at": highlight.get("created_at"),
+                    "author": highlight.get("author", "ai_system")
                 }
             sessions[session_id]["highlights"].append(highlight)
             sessions[session_id]["pages"].add(highlight.get("page_number"))
             sessions[session_id]["element_types"].add(highlight.get("element_type"))
+            
+            # Track trades
+            trade = highlight.get("assigned_trade", "Unassigned")
+            sessions[session_id]["trades"].add(trade)
+            
+            if trade not in trade_breakdown:
+                trade_breakdown[trade] = 0
+            trade_breakdown[trade] += 1
         
         # Convert sets to lists for JSON
         for session in sessions.values():
             session["pages"] = sorted(list(session["pages"]))
             session["element_types"] = sorted(list(session["element_types"]))
+            session["trades"] = sorted(list(session["trades"]))
             session["highlight_count"] = len(session["highlights"])
         
         return {
             "document_id": clean_document_id,
             "total_highlights": len(all_highlights),
             "total_sessions": len(sessions),
+            "trade_breakdown": trade_breakdown,
             "sessions": sessions
         }
 
