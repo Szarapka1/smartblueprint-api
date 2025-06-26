@@ -461,7 +461,8 @@ class PDFService:
             
             else:  # storage
                 # High quality compressed PNG
-                img_data = pix.tobytes(output="png", compress_level=self.png_compression_level)
+                # FIX: Remove the compress_level parameter
+                img_data = pix.tobytes(output="png")
             
             # Clean up
             pix = None
