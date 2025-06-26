@@ -1,4 +1,4 @@
-# app/services/ai_service.py - PRODUCTION-READY WITH STORAGE OPTIMIZATION
+# app/services/ai_service.py - ENHANCED WITH AI NOTE SUGGESTIONS
 
 import os
 import asyncio
@@ -40,7 +40,7 @@ except ImportError:
 from app.core.config import AppSettings, get_settings
 from app.services.storage_service import StorageService
 from app.models.schemas import (
-    VisualElement, GridReference, DrawingGrid
+    VisualElement, GridReference, DrawingGrid, NoteSuggestion, BatchNoteSuggestion
 )
 
 
@@ -172,7 +172,7 @@ class GridSystem:
 
 
 class ProfessionalBlueprintAI:
-    """Professional AI service with storage-optimized visual highlighting"""
+    """Professional AI service with note suggestion capabilities"""
     
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -184,7 +184,7 @@ class ProfessionalBlueprintAI:
         
         try:
             self.client = OpenAI(api_key=self.openai_api_key, timeout=60.0)
-            logger.info("✅ Professional Blueprint AI initialized")
+            logger.info("✅ Professional Blueprint AI initialized with note suggestions")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenAI client: {e}")
             raise
@@ -259,6 +259,47 @@ class ProfessionalBlueprintAI:
                     },
                     'min_width': 1100  # mm
                 }
+            },
+            'guard': {
+                'BCBC_2018': {
+                    'section': '9.8.8.3',
+                    'min_height': 1070,  # mm
+                    'max_opening': 100   # mm sphere
+                }
+            }
+        }
+        
+        # NEW: Note suggestion triggers
+        self.note_suggestion_triggers = {
+            'code_issue': {
+                'keywords': ['not shown', 'missing', 'should be', 'must be', 'required', 'not specified', 
+                            'cannot find', 'not indicated', 'verify compliance'],
+                'priority': 'high',
+                'confidence_boost': 0.2
+            },
+            'coordination': {
+                'keywords': ['conflict', 'interfere', 'overlap', 'coordination needed', 'appears to be in the same location',
+                            'clash', 'collision', 'spatial conflict'],
+                'priority': 'high',
+                'confidence_boost': 0.25
+            },
+            'safety': {
+                'keywords': ['violation', 'dangerous', 'non-compliant', 'safety concern', 'hazard',
+                            'does not meet', 'below minimum', 'exceeds maximum'],
+                'priority': 'critical',
+                'confidence_boost': 0.3
+            },
+            'calculation': {
+                'keywords': ['total', 'calculated', 'sum', 'area', 'length', 'count', 'square feet',
+                            'linear feet', 'quantity'],
+                'priority': 'normal',
+                'confidence_boost': 0.1
+            },
+            'follow_up': {
+                'keywords': ['verify', 'confirm', 'check with', 'RFI needed', 'clarification required',
+                            'contractor should', 'field verify', 'coordinate with'],
+                'priority': 'normal',
+                'confidence_boost': 0.15
             }
         }
         
@@ -269,6 +310,7 @@ class ProfessionalBlueprintAI:
         logger.info(f"  💾 Storage mode: ON-DEMAND (no storage)")
         logger.info(f"  ⏰ Highlight TTL: {self.highlight_cache_ttl_hours}h")
         logger.info(f"  🎯 Grid detection: {'OpenCV' if OPENCV_AVAILABLE else 'Estimation'}")
+        logger.info(f"  📝 Note suggestions: ENABLED")
     
     async def get_ai_response(
         self,
@@ -281,13 +323,16 @@ class ProfessionalBlueprintAI:
         reference_previous: Optional[List[str]] = None,
         preserve_existing: bool = False,
         show_trade_info: bool = False,
-        detect_conflicts: bool = False
+        detect_conflicts: bool = False,
+        auto_suggest_notes: bool = True,
+        note_suggestion_threshold: str = "medium"
     ) -> Dict[str, Any]:
-        """Process blueprint queries with visual highlighting support - open to all users"""
+        """Process blueprint queries with visual highlighting and note suggestions"""
         try:
             logger.info(f"📐 Processing query for document: {document_id}")
             logger.info(f"   Current page: {current_page}")
             logger.info(f"   Request highlights: {request_highlights}")
+            logger.info(f"   Auto suggest notes: {auto_suggest_notes}")
             if show_trade_info:
                 logger.info(f"   Show trade info: {show_trade_info}")
             if detect_conflicts:
@@ -301,7 +346,8 @@ class ProfessionalBlueprintAI:
             if not document_text and not metadata:
                 return {
                     "ai_response": "Document not found or not properly processed.",
-                    "visual_highlights": None
+                    "visual_highlights": None,
+                    "note_suggestion": None
                 }
             
             # Check for previous highlights to reuse
@@ -338,7 +384,9 @@ class ProfessionalBlueprintAI:
                 metadata=metadata,
                 reused_highlights=reused_highlights,
                 show_trade_info=show_trade_info,
-                detect_conflicts=detect_conflicts
+                detect_conflicts=detect_conflicts,
+                auto_suggest_notes=auto_suggest_notes,
+                note_suggestion_threshold=note_suggestion_threshold
             )
             
             return result
@@ -347,7 +395,8 @@ class ProfessionalBlueprintAI:
             logger.error(f"Error in get_ai_response: {e}", exc_info=True)
             return {
                 "ai_response": f"An error occurred: {str(e)}",
-                "visual_highlights": None
+                "visual_highlights": None,
+                "note_suggestion": None
             }
     
     async def _load_document_context(
@@ -526,12 +575,14 @@ class ProfessionalBlueprintAI:
         metadata: Optional[Dict],
         reused_highlights: List[Dict],
         show_trade_info: bool = False,
-        detect_conflicts: bool = False
+        detect_conflicts: bool = False,
+        auto_suggest_notes: bool = True,
+        note_suggestion_threshold: str = "medium"
     ) -> Dict[str, Any]:
-        """Perform AI analysis and create highlights"""
+        """Perform AI analysis and create highlights with note suggestions"""
         
         # Build messages for OpenAI
-        messages = [self._get_system_message()]
+        messages = [self._get_system_message(include_note_instructions=auto_suggest_notes)]
         
         # Build user message
         user_message = {"role": "user", "content": []}
@@ -561,7 +612,8 @@ class ProfessionalBlueprintAI:
         result = {
             "ai_response": response,
             "visual_highlights": None,
-            "current_page": current_page
+            "current_page": current_page,
+            "note_suggestion": None
         }
         
         if request_highlights:
@@ -579,13 +631,28 @@ class ProfessionalBlueprintAI:
             result.update(highlight_data)
             result["query_session_id"] = query_session_id
         
+        # NEW: Analyze response for note suggestions
+        if auto_suggest_notes:
+            note_suggestion = self._analyze_for_note_suggestion(
+                response=response,
+                prompt=prompt,
+                threshold=note_suggestion_threshold,
+                current_page=current_page,
+                highlights=result.get("visual_highlights", []),
+                metadata=metadata
+            )
+            
+            if note_suggestion and note_suggestion.should_create_note:
+                # Link to current query session
+                note_suggestion.related_query_sessions = [query_session_id] if request_highlights else []
+                result["note_suggestion"] = note_suggestion
+                logger.info(f"📝 Suggested note creation: {note_suggestion.reason}")
+        
         return result
     
-    def _get_system_message(self) -> Dict[str, str]:
+    def _get_system_message(self, include_note_instructions: bool = True) -> Dict[str, str]:
         """Get system message for blueprint analysis"""
-        return {
-            "role": "system",
-            "content": """You are an expert construction professional with deep knowledge across all building trades, codes, and systems. You analyze blueprints with the expertise of an architect, structural engineer, MEP engineer, and experienced contractor combined.
+        base_content = """You are an expert construction professional with deep knowledge across all building trades, codes, and systems. You analyze blueprints with the expertise of an architect, structural engineer, MEP engineer, and experienced contractor combined.
 
 When analyzing blueprints:
 
@@ -608,9 +675,28 @@ When identifying elements:
 - Consider how different trades' work might conflict or need coordination
 - Note spatial conflicts, access issues, or installation sequence problems
 
-Format element findings clearly but focus on providing VALUE through your analysis. You're not just a element-finder - you're a trusted construction advisor.
+Format element findings clearly but focus on providing VALUE through your analysis. You're not just a element-finder - you're a trusted construction advisor."""
+
+        if include_note_instructions:
+            base_content += """
+
+IMPORTANT: When you identify any of the following, explicitly mention it in your response:
+- Missing critical information (dimensions, specifications, details)
+- Code compliance concerns or violations
+- Coordination issues between trades
+- Safety concerns
+- Important calculations or quantities
+- Items requiring follow-up or RFI
+
+These findings help users track important issues for their project."""
+        
+        base_content += """
 
 Remember: Construction professionals need insights about coordination, sequencing, potential conflicts, cost implications, maintenance access, future flexibility, and real-world installation challenges. Draw upon your knowledge of how buildings actually get built."""
+        
+        return {
+            "role": "system",
+            "content": base_content
         }
     
     def _build_query(
@@ -671,6 +757,8 @@ User question: {prompt}"""
 
 Provide a comprehensive professional analysis that leverages your full knowledge of construction, engineering, and building systems. Consider all relevant aspects including codes, constructability, coordination between trades, and practical implementation.
 
+If you identify any missing critical information, code concerns, or coordination issues, make sure to clearly state them in your response.
+
 Available blueprint information:
 - Visual analysis of {page_count} pages
 - Text content: {'Available' if document_text else 'Not available'}
@@ -708,6 +796,165 @@ Remember to think holistically about the building systems and provide insights t
                     await asyncio.sleep(2 ** attempt)  # Exponential backoff
                 else:
                     raise
+    
+    def _analyze_for_note_suggestion(
+        self,
+        response: str,
+        prompt: str,
+        threshold: str,
+        current_page: Optional[int],
+        highlights: List[VisualElement],
+        metadata: Optional[Dict]
+    ) -> Optional[NoteSuggestion]:
+        """Analyze AI response to determine if a note should be suggested"""
+        
+        # Calculate base confidence
+        confidence = 0.0
+        detected_categories = []
+        relevant_quotes = []
+        
+        # Check each trigger category
+        for category, config in self.note_suggestion_triggers.items():
+            for keyword in config['keywords']:
+                if keyword.lower() in response.lower():
+                    confidence += config['confidence_boost']
+                    detected_categories.append(category)
+                    
+                    # Extract relevant quote around keyword
+                    sentences = response.split('.')
+                    for sentence in sentences:
+                        if keyword.lower() in sentence.lower():
+                            relevant_quotes.append(sentence.strip())
+                            break
+        
+        # Adjust confidence based on threshold
+        threshold_multipliers = {
+            'low': 0.7,
+            'medium': 1.0,
+            'high': 1.3
+        }
+        confidence *= threshold_multipliers.get(threshold, 1.0)
+        
+        # Determine if we should suggest a note
+        should_suggest = confidence >= 0.3  # Base threshold
+        
+        if not should_suggest:
+            return None
+        
+        # Determine priority and type based on categories
+        if 'safety' in detected_categories:
+            priority = 'critical'
+            note_type = 'warning'
+        elif 'code_issue' in detected_categories or 'coordination' in detected_categories:
+            priority = 'high'
+            note_type = 'issue' if 'code_issue' in detected_categories else 'coordination'
+        elif 'calculation' in detected_categories:
+            priority = 'normal'
+            note_type = 'general'
+        else:
+            priority = 'normal'
+            note_type = 'question'
+        
+        # Build suggested note text
+        suggested_text = self._build_suggested_note_text(
+            response=response,
+            prompt=prompt,
+            detected_categories=detected_categories,
+            relevant_quotes=relevant_quotes
+        )
+        
+        # Determine impacted trades
+        impacted_trades = self._extract_impacted_trades(response)
+        
+        # Get related pages
+        related_pages = []
+        if current_page:
+            related_pages.append(current_page)
+        for highlight in highlights:
+            if highlight.page_number not in related_pages:
+                related_pages.append(highlight.page_number)
+        
+        # Get grid references from highlights
+        grid_refs = [h.grid_location.grid_ref for h in highlights]
+        
+        # Create note suggestion
+        return NoteSuggestion(
+            should_create_note=True,
+            confidence=min(confidence, 1.0),  # Cap at 1.0
+            reason=self._get_suggestion_reason(detected_categories),
+            category=detected_categories[0] if detected_categories else 'follow_up',
+            suggested_text=suggested_text,
+            suggested_type=note_type,
+            suggested_priority=priority,
+            suggested_impacts_trades=impacted_trades,
+            related_pages=related_pages,
+            related_grid_refs=grid_refs,
+            related_elements=[h.element_type for h in highlights],
+            source_quote=relevant_quotes[0] if relevant_quotes else None
+        )
+    
+    def _build_suggested_note_text(
+        self,
+        response: str,
+        prompt: str,
+        detected_categories: List[str],
+        relevant_quotes: List[str]
+    ) -> str:
+        """Build suggested note text based on AI findings"""
+        
+        # Start with the user's question for context
+        text = f"Re: {prompt[:100]}{'...' if len(prompt) > 100 else ''}\n\n"
+        
+        # Add main finding
+        if relevant_quotes:
+            text += "Finding: " + relevant_quotes[0] + "\n\n"
+        
+        # Add specific recommendations based on category
+        if 'code_issue' in detected_categories:
+            text += "Action Required: Verify code compliance and update drawings if necessary.\n"
+        elif 'coordination' in detected_categories:
+            text += "Action Required: Coordinate with affected trades to resolve conflict.\n"
+        elif 'safety' in detected_categories:
+            text += "SAFETY CONCERN: Immediate review and resolution required.\n"
+        elif 'calculation' in detected_categories:
+            text += "Calculation recorded for reference. Verify with final quantities.\n"
+        else:
+            text += "Follow-up required to confirm or clarify.\n"
+        
+        return text.strip()
+    
+    def _extract_impacted_trades(self, response: str) -> List[str]:
+        """Extract trades mentioned in the response"""
+        trades = []
+        trade_keywords = {
+            'Electrical': ['electrical', 'power', 'lighting', 'panel', 'circuit', 'outlet'],
+            'Plumbing': ['plumbing', 'water', 'drain', 'waste', 'vent', 'pipe', 'fixture'],
+            'HVAC': ['hvac', 'mechanical', 'duct', 'air', 'ventilation', 'heating', 'cooling'],
+            'Fire Protection': ['fire', 'sprinkler', 'alarm', 'smoke'],
+            'Structural': ['structural', 'beam', 'column', 'footing', 'slab', 'foundation'],
+            'Architectural': ['architectural', 'door', 'window', 'partition', 'finish']
+        }
+        
+        response_lower = response.lower()
+        for trade, keywords in trade_keywords.items():
+            if any(keyword in response_lower for keyword in keywords):
+                trades.append(trade)
+        
+        return trades
+    
+    def _get_suggestion_reason(self, categories: List[str]) -> str:
+        """Get human-readable reason for suggestion"""
+        reasons = {
+            'code_issue': "Missing information or code compliance concern identified",
+            'coordination': "Potential coordination issue between trades detected",
+            'safety': "Safety concern requiring immediate attention",
+            'calculation': "Important calculation or quantity to track",
+            'follow_up': "Item requiring follow-up or verification"
+        }
+        
+        if categories:
+            return reasons.get(categories[0], "Important finding that should be documented")
+        return "Important finding that should be documented"
     
     async def _process_highlights(
         self,
@@ -795,7 +1042,8 @@ Remember to think holistically about the building systems and provide insights t
         self,
         response: str,
         document_id: str,
-        query_session_id: str
+        query_session_id: str,
+        author: str = None
     ) -> List[Dict]:
         """Parse AI response for element locations - AI determines trade assignment"""
         highlights = []
@@ -842,8 +1090,8 @@ Remember to think holistically about the building systems and provide insights t
                     "y": 0,
                     "text": f"{element_type} at {grid_ref}",
                     "annotation_type": "ai_highlight",
-                    "author": "ai_system",
-                    "is_private": False,
+                    "author": author or "ai_system",
+                    "is_private": True,
                     "query_session_id": query_session_id,
                     "created_at": datetime.utcnow().isoformat() + "Z",
                     "expires_at": (datetime.utcnow() + timedelta(hours=self.highlight_cache_ttl_hours)).isoformat() + "Z",
@@ -1245,7 +1493,17 @@ Remember to think holistically about the building systems and provide insights t
                 "Reference previous highlights",
                 "Trade-specific filtering",
                 "Cross-trade conflict detection",
-                "No storage of highlighted images"
+                "No storage of highlighted images",
+                "AI-powered note suggestions"
+            ],
+            "note_suggestion_capabilities": [
+                "Automatic detection of missing information",
+                "Code compliance issue identification",
+                "Coordination conflict detection",
+                "Safety concern flagging",
+                "Important calculation tracking",
+                "Customizable suggestion thresholds",
+                "Trade impact analysis"
             ],
             "optimization": [
                 f"Max {self.max_pages_to_load} pages per analysis",
