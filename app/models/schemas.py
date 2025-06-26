@@ -1,4 +1,4 @@
-# app/models/schemas.py - DOCUMENT NOTES WITH MULTI-PAGE HIGHLIGHTING
+# app/models/schemas.py - ENHANCED WITH AI NOTE SUGGESTIONS
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
@@ -18,6 +18,40 @@ class ChatRequest(BaseModel):
     # Optional features - anyone can use these
     show_trade_info: bool = Field(False, description="Include trade information in response")
     detect_conflicts: bool = Field(False, description="Detect potential conflicts between trades")
+    # NEW: User preferences for note suggestions
+    auto_suggest_notes: bool = Field(True, description="AI should suggest creating notes for important findings")
+    note_suggestion_threshold: str = Field("medium", description="Threshold for suggestions: low/medium/high")
+
+# --- NEW: Note Suggestion Models ---
+
+class NoteSuggestion(BaseModel):
+    """AI-suggested note based on findings"""
+    should_create_note: bool
+    confidence: float = Field(0.0, ge=0.0, le=1.0, description="AI confidence this should be noted")
+    reason: str = Field(..., description="Why AI thinks this should be noted")
+    category: str = Field(..., description="Category: code_issue, coordination, safety, calculation, follow_up")
+    
+    # Suggested note properties
+    suggested_text: str
+    suggested_type: str  # general, question, issue, warning, coordination
+    suggested_priority: str  # low, normal, high, critical
+    suggested_impacts_trades: List[str] = Field(default_factory=list)
+    
+    # Context
+    related_pages: List[int] = Field(default_factory=list)
+    related_grid_refs: List[str] = Field(default_factory=list)
+    related_elements: List[str] = Field(default_factory=list)
+    source_quote: Optional[str] = Field(None, description="Relevant quote from AI response")
+
+class BatchNoteSuggestion(BaseModel):
+    """Multiple note suggestions from comprehensive analysis"""
+    total_suggestions: int
+    critical_count: int = 0
+    high_priority_count: int = 0
+    normal_priority_count: int = 0
+    
+    suggestions: List[NoteSuggestion]
+    summary: str = Field(..., description="Summary of what was found")
 
 # --- Visual Highlighting Models ---
 
@@ -48,7 +82,7 @@ class DrawingGrid(BaseModel):
     scale: Optional[str] = None
 
 class ChatResponse(BaseModel):
-    """Enhanced chat response with multi-page visual highlights - highlights are private to requesting user"""
+    """Enhanced chat response with note suggestions"""
     session_id: str
     ai_response: str
     source_pages: List[int] = Field(default_factory=list)
@@ -63,8 +97,27 @@ class ChatResponse(BaseModel):
     # NEW: Trade analysis
     trade_summary: Optional[Dict[str, Dict[str, int]]] = None  # {trade: {element_type: count}}
     detected_conflicts: Optional[List['TradeConflict']] = None
+    
+    # NEW: Note suggestions from AI
+    note_suggestion: Optional[NoteSuggestion] = None
+    batch_suggestions: Optional[BatchNoteSuggestion] = None
 
-# --- Document Note Models (NO COORDINATES) ---
+# --- Enhanced Note Models ---
+
+class QuickNoteCreate(BaseModel):
+    """Quick note creation from AI suggestion"""
+    text: str
+    note_type: str
+    priority: str
+    impacts_trades: List[str] = Field(default_factory=list)
+    is_private: bool = Field(True)
+    
+    # Auto-populated from AI context
+    ai_suggested: bool = Field(True)
+    suggestion_confidence: float
+    related_query_session: Optional[str] = None
+    related_highlights: List[str] = Field(default_factory=list)
+    source_pages: List[int] = Field(default_factory=list)
 
 class NoteCreate(BaseModel):
     """Create a document-level note"""
@@ -76,6 +129,9 @@ class NoteCreate(BaseModel):
     # NEW: Related elements
     related_element_ids: Optional[List[str]] = Field(default_factory=list, description="Related visual elements")
     related_query_sessions: Optional[List[str]] = Field(default_factory=list, description="Related highlight sessions")
+    # NEW: AI suggestion tracking
+    ai_suggested: bool = Field(False, description="Was this suggested by AI?")
+    suggestion_confidence: Optional[float] = Field(None, description="AI confidence if suggested")
 
 class Note(BaseModel):
     """Document-level note - private by default until published"""
@@ -99,6 +155,10 @@ class Note(BaseModel):
     resolution_notes: Optional[str] = None
     resolved_by: Optional[str] = None
     resolved_at: Optional[str] = None
+    # NEW: AI suggestion tracking
+    ai_suggested: bool = False
+    suggestion_confidence: Optional[float] = None
+    source_pages: List[int] = Field(default_factory=list)
 
 class NoteUpdate(BaseModel):
     """Update a note"""
@@ -120,6 +180,7 @@ class NoteList(BaseModel):
     private_notes_count: Optional[int] = None  # User's private notes
     published_notes_count: Optional[int] = None  # Public notes from all users
     notes_by_status: Optional[Dict[str, int]] = None
+    ai_suggested_count: Optional[int] = None  # How many were AI suggested
 
 class NoteBatch(BaseModel):
     """Batch operations on notes"""
@@ -127,6 +188,17 @@ class NoteBatch(BaseModel):
     # NEW: Batch operations
     operation: Optional[str] = Field("update", description="Operation: update, resolve, delete")
     update_data: Optional[NoteUpdate] = None
+
+# --- User Preferences ---
+
+class UserPreferences(BaseModel):
+    """User preferences for AI behavior"""
+    auto_suggest_notes: bool = Field(True, description="Auto-suggest note creation")
+    suggestion_threshold: str = Field("medium", description="low/medium/high")
+    default_note_priority: str = Field("normal")
+    quick_save_enabled: bool = Field(True, description="Enable one-click save")
+    preferred_note_type: str = Field("general")
+    auto_link_highlights: bool = Field(True, description="Auto-link notes to current highlights")
 
 # --- Trade Coordination Models ---
 
@@ -147,6 +219,8 @@ class TradeConflict(BaseModel):
     page_numbers: List[int] = Field(default_factory=list, description="Pages with conflicts")
     suggested_resolution: Optional[str] = None
     assigned_to_trade: Optional[str] = None
+    # NEW: AI suggested this be noted
+    ai_suggested_note: bool = False
 
 class TradeNotification(BaseModel):
     """Notification for trade coordination"""
@@ -251,6 +325,9 @@ class HighlightSessionInfo(BaseModel):
     trade: Optional[str] = None
     is_active: bool
     can_merge: bool = True
+    # NEW: Notes created from this session
+    notes_created: int = 0
+    ai_suggestions_made: int = 0
 
 class TradeFilterRequest(BaseModel):
     """Request for filtering by trade"""
