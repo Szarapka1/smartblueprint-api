@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, List
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from app.core.config import get_settings
@@ -238,6 +238,50 @@ async def upload_document(
         logger.error(f"Upload failed: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@blueprint_router.get("/documents/{document_id}/download")
+async def download_document_pdf(
+    request: Request,
+    document_id: str
+):
+    """
+    Download the original PDF file for viewing.
+    Required for the "Load Document" functionality.
+    """
+    clean_document_id = validate_document_id(document_id)
+    storage_service = request.app.state.storage_service
+    
+    if not storage_service:
+        raise HTTPException(status_code=503, detail="Storage service unavailable")
+    
+    try:
+        logger.info(f"📥 Downloading PDF for document: {clean_document_id}")
+        
+        # Get PDF from main container where original files are stored
+        pdf_bytes = await storage_service.download_blob_as_bytes(
+            container_name=settings.AZURE_CONTAINER_NAME,
+            blob_name=f"{clean_document_id}.pdf"
+        )
+        
+        logger.info(f"✅ PDF downloaded successfully: {len(pdf_bytes)} bytes")
+        
+        # Return PDF with proper headers for inline viewing
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename={clean_document_id}.pdf",
+                "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+                "Content-Length": str(len(pdf_bytes))
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to download PDF {clean_document_id}: {e}")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"PDF file not found for document {clean_document_id}"
+        )
 
 @blueprint_router.post("/documents/{document_id}/chat", response_model=ChatResponse)
 async def chat_with_document(
