@@ -572,7 +572,8 @@ class ProfessionalBlueprintAI:
                 query_session_id,
                 reused_highlights,
                 preserve_existing,
-                storage_service
+                storage_service,
+                author
             )
             
             result.update(highlight_data)
@@ -715,7 +716,8 @@ Remember to think holistically about the building systems and provide insights t
         query_session_id: str,
         reused_highlights: List[Dict],
         preserve_existing: bool,
-        storage_service: StorageService
+        storage_service: StorageService,
+        author: str = None
     ) -> Dict[str, Any]:
         """Process AI response and create highlight data"""
         
