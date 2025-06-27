@@ -1,8 +1,34 @@
-# app/models/schemas.py - ENHANCED WITH AI NOTE SUGGESTIONS
+# app/models/schemas.py - COMPLETE VERSION WITH ALL FEATURES
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import uuid
+
+# === ADD THIS SECTION - Missing models that might be imported elsewhere ===
+
+class HighlightType(str):
+    """Highlight type constants"""
+    AREA = "area"
+    LINE = "line"
+    POINT = "point"
+    TEXT = "text"
+
+class VisualHighlight(BaseModel):
+    """Visual highlight on a document - this was the missing import!"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    type: str  # area, line, point, text
+    coordinates: List[float]  # Format depends on type
+    page: int
+    label: Optional[str] = None
+    color: Optional[str] = "#FF0000"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: Optional[str] = None
+    # Link to annotation if created from AI
+    annotation_id: Optional[str] = None
+    query_session_id: Optional[str] = None
+
+# === END OF ADDED SECTION ===
 
 # --- Document Chat Models ---
 
@@ -296,7 +322,7 @@ class DocumentInfoResponse(BaseModel):
     status: str
     message: str
     exists: bool
-    metadata: Optional[Dict[str, Any]] = None  # Changed from 'any' to 'Any'
+    metadata: Optional[Dict[str, Any]] = None
     # NEW: Public collaboration info only
     total_published_notes: Optional[int] = None  # Count of public notes
     active_collaborators: Optional[int] = None  # Users who have published notes
@@ -304,11 +330,11 @@ class DocumentInfoResponse(BaseModel):
 
 class DocumentListResponse(BaseModel):
     """List of documents response"""
-    documents: List[Dict[str, Any]]  # Changed from 'any' to 'Any'
+    documents: List[Dict[str, Any]]
     total_count: int
     has_more: bool
     # NEW: Filtering info
-    filter_applied: Optional[Dict[str, Any]] = None  # Changed from 'any' to 'Any'
+    filter_applied: Optional[Dict[str, Any]] = None
 
 # --- Enhanced Response Models ---
 
@@ -348,10 +374,36 @@ class SuccessResponse(BaseModel):
     """Generic success response"""
     status: str = "success"
     message: str
-    data: Optional[Dict[str, Any]] = None  # Changed from 'any' to 'Any'
+    data: Optional[Dict[str, Any]] = None
 
 class ErrorResponse(BaseModel):
     """Generic error response"""
     status: str = "error"
     message: str
     details: Optional[str] = None
+
+# === Additional Models that might be referenced elsewhere ===
+
+class SessionResponse(BaseModel):
+    """Session information response"""
+    session_id: str
+    document_id: str
+    filename: str
+    created_at: datetime
+    page_count: int
+    status: str = "active"
+
+class HighlightCreate(BaseModel):
+    """Create a highlight request"""
+    type: str  # area, line, point, text
+    coordinates: List[float]
+    page: int
+    label: Optional[str] = None
+    color: Optional[str] = "#FF0000"
+    note_content: Optional[str] = None
+
+class HighlightResponse(BaseModel):
+    """Highlight response"""
+    highlight: VisualHighlight
+    status: str = "created"
+    message: str = "Highlight created successfully"
