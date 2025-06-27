@@ -79,6 +79,16 @@ class AppSettings:
         self.STORAGE_MAX_CONCURRENT_UPLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_UPLOADS", 5))
         self.STORAGE_MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_DOWNLOADS", 5))
         self.STORAGE_ENABLE_PAGINATION: bool = os.getenv("STORAGE_ENABLE_PAGINATION", "true").lower() == "true"
+
+        # Background Processing Settings
+        self.ENABLE_BACKGROUND_PROCESSING: bool = os.getenv("ENABLE_BACKGROUND_PROCESSING", "true").lower() == "true"
+        self.MAX_CONCURRENT_JOBS: int = int(os.getenv("MAX_CONCURRENT_JOBS", 5))
+        self.JOB_TIMEOUT_SECONDS: int = int(os.getenv("JOB_TIMEOUT_SECONDS", 1800))  # 30 minutes
+        self.PROCESSING_CHECK_INTERVAL: int = int(os.getenv("PROCESSING_CHECK_INTERVAL", 5))  # 5 seconds
+
+        # Timeout Settings
+        self.REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", 600))  # 10 minutes
+        self.UPLOAD_TIMEOUT: int = int(os.getenv("UPLOAD_TIMEOUT", 3600))  # 1 hour
         
         # Trade Configuration
         self.TRADES_LIST: List[str] = os.getenv(
