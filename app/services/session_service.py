@@ -128,8 +128,9 @@ class DocumentSession:
 class SessionService:
     """Enhanced session management with highlight session tracking"""
     
-    def __init__(self, settings: AppSettings):
+    def __init__(self, settings: AppSettings, storage_service=None):
         self.settings = settings
+        self.storage_service = storage_service  # Store reference if provided
         
         # Document sessions with LRU eviction
         self.document_sessions: OrderedDict[str, DocumentSession] = OrderedDict()
