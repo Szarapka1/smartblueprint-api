@@ -1,4 +1,5 @@
-# app/services/pdf_service.py - ENHANCED WITH GRID DETECTION (OPTIMIZED)
+# app/services/pdf_service.py - ENHANCED WITH GRID DETECTION (NO SAFETY CHECKS)
+# WARNING: This version has all safety checks removed - use only for testing!
 
 import logging
 import fitz  # PyMuPDF
@@ -119,7 +120,8 @@ class PDFService:
         self._page_cache = {}
         self._grid_cache = {}
         
-        logger.info(f"✅ PDFService initialized with optimizations")
+        logger.info(f"✅ PDFService initialized with optimizations (NO SAFETY CHECKS)")
+        logger.info(f"   ⚠️ WARNING: All file validation disabled - testing mode only!")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ Image resolutions: Storage={self.image_dpi}, AI={self.ai_image_dpi}, Thumb={self.thumbnail_dpi}")
         logger.info(f"   🎯 Grid detection: {self.grid_detection_method} (deferred OpenCV: {self.defer_opencv_grid})")
@@ -128,15 +130,25 @@ class PDFService:
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService):
-        """Process PDF with grid detection and multi-resolution image generation"""
+        """Process PDF with grid detection and multi-resolution image generation
+        NO SAFETY CHECKS - Will attempt to process any file as PDF"""
         try:
             logger.info(f"🚀 Starting enhanced PDF processing for: {session_id}")
+            logger.info(f"⚠️ Safety checks disabled - processing file without validation")
             pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
-            logger.info(f"📄 PDF Size: {pdf_size_mb:.1f}MB")
+            logger.info(f"📄 File Size: {pdf_size_mb:.1f}MB")
             
             processing_start = time.time()
             
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            # Try to open as PDF - NO VALIDATION
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            except:
+                # If it fails, try without specifying filetype
+                logger.warning("Failed to open as PDF, trying auto-detection...")
+                doc = fitz.open(stream=pdf_bytes)
+            
+            with doc:
                 total_pages = len(doc)
                 pages_to_process = min(total_pages, self.max_pages)
                 
@@ -147,7 +159,7 @@ class PDFService:
                     'document_id': session_id,
                     'page_count': pages_to_process,
                     'total_pages': total_pages,
-                    'document_info': dict(doc.metadata),
+                    'document_info': dict(doc.metadata) if hasattr(doc, 'metadata') else {},
                     'processing_time': 0,
                     'file_size_mb': pdf_size_mb,
                     'page_details': [],
@@ -164,7 +176,8 @@ class PDFService:
                         'total_ai_size_mb': 0,
                         'total_thumbnail_size_mb': 0,
                         'grid_systems_detected': 0
-                    }
+                    },
+                    'safety_checks': 'DISABLED'  # Mark that safety is disabled
                 }
                 
                 # Process pages in batches
@@ -175,11 +188,21 @@ class PDFService:
                 total_thumb_size = 0
                 
                 # Create all page objects once
-                pages = [doc[i] for i in range(pages_to_process)]
+                pages = []
+                for i in range(pages_to_process):
+                    try:
+                        pages.append(doc[i])
+                    except Exception as e:
+                        logger.error(f"Failed to load page {i}: {e}")
+                        # Continue processing other pages
+                        continue
                 
                 for batch_start in range(0, pages_to_process, self.batch_size):
                     batch_end = min(batch_start + self.batch_size, pages_to_process)
-                    batch_pages = list(range(batch_start, batch_end))
+                    batch_pages = list(range(batch_start, min(batch_end, len(pages))))
+                    
+                    if not batch_pages:
+                        continue
                     
                     logger.info(f"📦 Processing batch: pages {batch_start + 1}-{batch_end}")
                     batch_time = time.time()
@@ -219,7 +242,7 @@ class PDFService:
                     
                     # Log batch performance
                     batch_elapsed = time.time() - batch_time
-                    pages_per_second = len(batch_pages) / batch_elapsed
+                    pages_per_second = len(batch_pages) / batch_elapsed if batch_elapsed > 0 else 0
                     logger.info(f"📊 Batch completed in {batch_elapsed:.1f}s ({pages_per_second:.1f} pages/sec)")
                     
                     # Progress update
@@ -271,6 +294,7 @@ class PDFService:
                     ))
                 
                 logger.info(f"✅ Processing complete for {session_id}")
+                logger.info(f"   ⚠️ Safety checks were DISABLED for this processing")
                 logger.info(f"   📝 Text extracted: {len(full_text)} characters")
                 logger.info(f"   🖼️ Pages processed: {pages_to_process}")
                 logger.info(f"   🎯 Grid systems detected: {metadata['optimization_stats']['grid_systems_detected']}")
@@ -297,19 +321,25 @@ class PDFService:
         # Pre-extract text and analyze in parallel
         text_tasks = []
         for page_num in page_numbers:
-            task = asyncio.create_task(self._extract_page_data_fast(pages[page_num], page_num))
-            text_tasks.append(task)
+            if page_num < len(pages):
+                task = asyncio.create_task(self._extract_page_data_fast(pages[page_num], page_num))
+                text_tasks.append(task)
         
         # Wait for text extraction
-        page_data = await asyncio.gather(*text_tasks)
+        page_data = await asyncio.gather(*text_tasks, return_exceptions=True)
         
         # Process pages with extracted data
         process_tasks = []
         for i, (page_num, data) in enumerate(zip(page_numbers, page_data)):
-            task = self._process_single_page_optimized(
-                pages[page_num], page_num, data, session_id, storage_service
-            )
-            process_tasks.append(task)
+            if isinstance(data, Exception):
+                logger.error(f"Failed to extract page {page_num + 1} data: {data}")
+                continue
+            
+            if page_num < len(pages):
+                task = self._process_single_page_optimized(
+                    pages[page_num], page_num, data, session_id, storage_service
+                )
+                process_tasks.append(task)
         
         # Process all pages in parallel
         results = await asyncio.gather(*process_tasks, return_exceptions=True)
@@ -322,7 +352,9 @@ class PDFService:
                 processed_results.append({
                     'success': False,
                     'page_num': page_numbers[i] + 1,
-                    'error': str(result)
+                    'error': str(result),
+                    'text': '',
+                    'metadata': {}
                 })
             else:
                 processed_results.append(result)
@@ -341,8 +373,12 @@ class PDFService:
     def _extract_page_data_sync(self, page, page_num: int) -> Dict:
         """Synchronous page data extraction"""
         try:
-            # Extract text
-            page_text = page.get_text()
+            # Extract text - handle any errors
+            try:
+                page_text = page.get_text()
+            except:
+                page_text = ""
+                logger.warning(f"Could not extract text from page {page_num + 1}")
             
             # Quick analysis
             page_analysis = self._analyze_page_content(page_text, page_num + 1)
@@ -353,10 +389,13 @@ class PDFService:
                 page_tables = page.find_tables()
                 if page_tables:
                     for table in page_tables[:5]:  # Limit to first 5 tables for speed
-                        tables.append({
-                            'data': table.extract(),
-                            'bbox': list(table.bbox)
-                        })
+                        try:
+                            tables.append({
+                                'data': table.extract(),
+                                'bbox': list(table.bbox)
+                            })
+                        except:
+                            pass
             except:
                 pass
             
@@ -428,7 +467,7 @@ class PDFService:
                 upload_tasks.append(('thumbnail', upload_task))
             
             # Wait for uploads
-            await asyncio.gather(*[task for _, task in upload_tasks])
+            await asyncio.gather(*[task for _, task in upload_tasks], return_exceptions=True)
             
             # Prepare page metadata
             page_metadata = {
@@ -482,45 +521,49 @@ class PDFService:
     async def _generate_all_page_images_optimized(self, page, page_num: int) -> Dict[str, bytes]:
         """Generate page images at different resolutions - optimized"""
         
-        # Generate base pixmap once and reuse
-        base_matrix = fitz.Matrix(self.image_dpi / 72, self.image_dpi / 72)
-        base_pix = await asyncio.get_event_loop().run_in_executor(
-            self.executor,
-            lambda: page.get_pixmap(matrix=base_matrix, alpha=False)
-        )
-        
-        # Convert to PIL Image once
-        base_img = Image.frombytes("RGB", [base_pix.width, base_pix.height], base_pix.samples)
-        
-        async def generate_from_base(img_type: str):
-            try:
-                return await asyncio.get_event_loop().run_in_executor(
-                    self.executor,
-                    self._convert_image_optimized,
-                    base_img,
-                    img_type
-                )
-            except Exception as e:
-                logger.error(f"Failed to generate {img_type} image for page {page_num}: {e}")
-                return None
-        
-        # Generate all image types in parallel from base image
-        tasks = {
-            'storage': generate_from_base('storage'),
-            'ai': generate_from_base('ai'),
-            'thumbnail': generate_from_base('thumbnail')
-        }
-        
-        results = {}
-        for img_type, task in tasks.items():
-            result = await task
-            if result:
-                results[img_type] = result
-        
-        # Clean up
-        base_pix = None
-        
-        return results
+        try:
+            # Generate base pixmap once and reuse
+            base_matrix = fitz.Matrix(self.image_dpi / 72, self.image_dpi / 72)
+            base_pix = await asyncio.get_event_loop().run_in_executor(
+                self.executor,
+                lambda: page.get_pixmap(matrix=base_matrix, alpha=False)
+            )
+            
+            # Convert to PIL Image once
+            base_img = Image.frombytes("RGB", [base_pix.width, base_pix.height], base_pix.samples)
+            
+            async def generate_from_base(img_type: str):
+                try:
+                    return await asyncio.get_event_loop().run_in_executor(
+                        self.executor,
+                        self._convert_image_optimized,
+                        base_img,
+                        img_type
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to generate {img_type} image for page {page_num}: {e}")
+                    return None
+            
+            # Generate all image types in parallel from base image
+            tasks = {
+                'storage': generate_from_base('storage'),
+                'ai': generate_from_base('ai'),
+                'thumbnail': generate_from_base('thumbnail')
+            }
+            
+            results = {}
+            for img_type, task in tasks.items():
+                result = await task
+                if result:
+                    results[img_type] = result
+            
+            # Clean up
+            base_pix = None
+            
+            return results
+        except Exception as e:
+            logger.error(f"Failed to generate images for page {page_num}: {e}")
+            return {}
 
     def _convert_image_optimized(self, base_img: Image.Image, image_type: str) -> bytes:
         """Convert base image to optimized format"""
@@ -553,7 +596,8 @@ class PDFService:
             
         except Exception as e:
             logger.error(f"Image conversion error for {image_type}: {e}")
-            raise
+            # Return empty bytes instead of raising
+            return b''
 
     async def _detect_grid_patterns_fast(self, page, page_text: str, page_num: int) -> Optional[GridSystem]:
         """Fast pattern-based grid detection"""
@@ -598,8 +642,12 @@ class PDFService:
             )
             
             # Quick position estimation
-            width = page.rect.width
-            height = page.rect.height
+            try:
+                width = page.rect.width
+                height = page.rect.height
+            except:
+                width = 1000
+                height = 1000
             
             if grid.x_labels:
                 spacing = width / (len(grid.x_labels) + 1)
@@ -786,8 +834,12 @@ class PDFService:
 
     def _create_estimated_grid(self, page, page_num: int) -> GridSystem:
         """Create an estimated grid when detection fails"""
-        width = page.rect.width
-        height = page.rect.height
+        try:
+            width = page.rect.width
+            height = page.rect.height
+        except:
+            width = 1000
+            height = 1000
         
         # Create reasonable default grid
         num_x = min(12, max(6, int(width / 150)))  # 6-12 columns
@@ -922,7 +974,8 @@ class PDFService:
             'drawing_types': defaultdict(list),
             'sheet_numbers': {},
             'grid_pages': [],
-            'element_locations': defaultdict(list)
+            'element_locations': defaultdict(list),
+            'safety_checks': 'DISABLED'  # Mark that safety checks were disabled
         }
         
         # Build index
@@ -983,7 +1036,8 @@ class PDFService:
                 'pages_with_grids': metadata['optimization_stats']['grid_systems_detected'],
                 'detection_method': self.grid_detection_method
             },
-            'storage_breakdown': metadata['optimization_stats']
+            'storage_breakdown': metadata['optimization_stats'],
+            'safety_checks': 'DISABLED'  # Mark that safety checks were disabled
         }
         
         # Analyze drawing types
@@ -1010,7 +1064,8 @@ class PDFService:
             'document_id': session_id,
             'timestamp': datetime.now().isoformat(),
             'error': str(error),
-            'status': 'failed'
+            'status': 'failed',
+            'safety_checks': 'DISABLED'  # Mark that safety checks were disabled
         }
         
         try:
@@ -1026,8 +1081,9 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "3.1.0",
-            "mode": "enhanced_with_grid_detection_optimized",
+            "version": "3.1.0-NO-SAFETY",
+            "mode": "enhanced_with_grid_detection_optimized_no_safety",
+            "safety_checks": "DISABLED",
             "capabilities": {
                 "max_pages": self.max_pages,
                 "parallel_processing": True,
@@ -1036,7 +1092,8 @@ class PDFService:
                 "table_extraction": True,
                 "grid_detection": self.enable_grid_detection,
                 "multi_resolution": True,
-                "deferred_processing": self.defer_opencv_grid
+                "deferred_processing": self.defer_opencv_grid,
+                "file_validation": False  # Disabled
             },
             "performance": {
                 "batch_size": self.batch_size,
