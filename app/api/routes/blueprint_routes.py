@@ -129,7 +129,7 @@ async def upload_document(
         # Get services from app state
         storage_service = request.app.state.storage_service
         pdf_service = request.app.state.pdf_service
-        session_service = request.app.state.session_service
+        session_data = None
         
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service unavailable")
