@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import re
-import asyncio  # THIS WAS MISSING - NOW ADDED!
+import asyncio
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Union
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Header, status
@@ -196,12 +196,11 @@ async def upload_document(
         
         for retry in range(max_retries):
             try:
-                # Fix the TypeError by removing content_type parameter
+                # Fixed: removed content_type parameter
                 upload_success = await storage_service.upload_file(
                     container_name=getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs'),
                     blob_name=pdf_blob_name,
                     data=contents
-                    # REMOVED: content_type='application/pdf'  # This was causing the error
                 )
                 if upload_success:
                     break
@@ -209,7 +208,7 @@ async def upload_document(
                 logger.error(f"Upload attempt {retry + 1} failed: {e}")
                 if retry == max_retries - 1:
                     raise
-                await asyncio.sleep(1)  # Wait before retry - NOW THIS WILL WORK!
+                await asyncio.sleep(1)  # Wait before retry
         
         if not upload_success:
             raise HTTPException(
