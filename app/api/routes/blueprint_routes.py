@@ -94,6 +94,75 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
+# ===== BACKGROUND PROCESSING FUNCTION =====
+
+async def process_pdf_background(
+    session_id: str,
+    pdf_bytes: bytes,
+    storage_service,
+    pdf_service,
+    session_service=None
+):
+    """Background task to process PDF without blocking the response"""
+    try:
+        logger.info(f"🔄 Background PDF processing started for {session_id}")
+        
+        # Process the PDF
+        await pdf_service.process_and_cache_pdf(
+            session_id=session_id,
+            pdf_bytes=pdf_bytes,
+            storage_service=storage_service
+        )
+        
+        logger.info(f"✅ Background PDF processing completed for {session_id}")
+        
+        # Try to update session with results if available
+        if session_service:
+            try:
+                # Load metadata to get processing results
+                metadata_blob = f"{session_id}_metadata.json"
+                cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
+                
+                metadata_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=metadata_blob
+                )
+                metadata = json.loads(metadata_text)
+                
+                # Update session with metadata
+                if hasattr(session_service, 'update_session_metadata'):
+                    session_service.update_session_metadata(
+                        document_id=session_id,
+                        metadata={
+                            'page_count': metadata.get('page_count', 0),
+                            'total_pages': metadata.get('total_pages'),
+                            'has_text': metadata.get('extraction_summary', {}).get('has_text', False),
+                            'grid_systems_detected': metadata.get('optimization_stats', {}).get('grid_systems_detected', 0),
+                            'processing_complete': True
+                        }
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to update session after processing: {e}")
+                
+    except Exception as e:
+        logger.error(f"❌ Background PDF processing failed for {session_id}: {e}")
+        logger.error(traceback.format_exc())
+        # Store error state
+        try:
+            error_info = {
+                'document_id': session_id,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'status': 'failed'
+            }
+            await storage_service.upload_file(
+                container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache'),
+                blob_name=f"{session_id}_error.json",
+                data=json.dumps(error_info).encode('utf-8')
+            )
+        except:
+            pass
+
 # ===== MAIN ROUTES =====
 
 @blueprint_router.post(
@@ -250,112 +319,67 @@ async def upload_document(
             logger.error(f"Session service check failed: {e}")
             # Continue without session
         
-        # Process PDF if service is available
+        # === CRITICAL FIX: NON-BLOCKING PDF PROCESSING ===
         processing_started = False
         processing_error = None
-        pages_processed = 0
-        grid_systems_detected = 0
-        drawing_types_found = []
         
         try:
             pdf_service = getattr(request.app.state, 'pdf_service', None)
             if pdf_service:
-                logger.info("🔄 Starting PDF processing...")
+                logger.info("🔄 Starting PDF processing in background...")
                 
-                # Process PDF synchronously to get immediate results
-                await pdf_service.process_and_cache_pdf(
-                    session_id=session_id,
-                    pdf_bytes=contents,
-                    storage_service=storage_service
+                # Create background task for PDF processing - DON'T AWAIT
+                asyncio.create_task(
+                    process_pdf_background(
+                        session_id=session_id,
+                        pdf_bytes=contents,
+                        storage_service=storage_service,
+                        pdf_service=pdf_service,
+                        session_service=session_service
+                    )
                 )
                 
                 processing_started = True
+                logger.info("📋 PDF processing started in background - returning immediately")
                 
-                # Try to load metadata to get processing results
-                try:
-                    metadata_blob = f"{session_id}_metadata.json"
-                    cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
-                    
-                    metadata_text = await storage_service.download_blob_as_text(
-                        container_name=cache_container,
-                        blob_name=metadata_blob
-                    )
-                    metadata = json.loads(metadata_text)
-                    
-                    # Extract processing results
-                    pages_processed = metadata.get('page_count', 0)
-                    grid_systems_detected = metadata.get('optimization_stats', {}).get('grid_systems_detected', 0)
-                    
-                    # Get unique drawing types
-                    drawing_types = set()
-                    for page in metadata.get('page_details', []):
-                        if page.get('drawing_type'):
-                            drawing_types.add(page['drawing_type'])
-                    drawing_types_found = list(drawing_types)
-                    
-                    # Update session with metadata if available
-                    if session_service and hasattr(session_service, 'update_session_metadata'):
-                        try:
-                            session_service.update_session_metadata(
-                                document_id=session_id,
-                                metadata={
-                                    'page_count': pages_processed,
-                                    'total_pages': metadata.get('total_pages'),
-                                    'has_text': metadata.get('extraction_summary', {}).get('has_text', False),
-                                    'grid_systems_detected': grid_systems_detected
-                                }
-                            )
-                        except Exception as e:
-                            logger.warning(f"Session metadata update failed: {e}")
-                    
-                    logger.info(f"✅ PDF processing completed successfully")
-                    logger.info(f"   Pages processed: {pages_processed}")
-                    logger.info(f"   Grid systems: {grid_systems_detected}")
-                    
-                except Exception as e:
-                    logger.warning(f"Could not load processing metadata: {e}")
-                    # Processing happened but metadata not immediately available
-                    
             else:
                 logger.warning("⚠️  PDF service not available - upload only mode")
                 
         except Exception as e:
             processing_error = str(e)
-            logger.error(f"❌ PDF processing failed: {e}")
+            logger.error(f"❌ Failed to start PDF processing: {e}")
             # Don't fail the upload - document is still available
         
-        # Determine response status
-        if processing_started and not processing_error and pages_processed > 0:
-            status_msg = "success"
-            message = f"Document uploaded and processed successfully. {pages_processed} pages ready for analysis."
-        elif processing_started and not processing_error:
+        # Determine response status - always return quickly
+        if processing_started and not processing_error:
             status_msg = "processing"
-            message = "Document uploaded successfully. Processing in background."
+            message = "Document uploaded successfully. Processing in background - check back in a moment."
         elif processing_error:
             status_msg = "partial"
-            message = f"Document uploaded but processing encountered issues: {processing_error}"
+            message = f"Document uploaded but processing could not start: {processing_error}"
         else:
             status_msg = "uploaded"
             message = "Document uploaded successfully. Processing service unavailable."
         
-        # Build response
+        # Build response - return immediately
         response = DocumentUploadResponse(
             document_id=session_id,
             filename=clean_filename,
             status=status_msg,
             message=message,
             file_size_mb=round(file_size_mb, 2),
-            pages_processed=pages_processed if pages_processed > 0 else None,
-            grid_systems_detected=grid_systems_detected if grid_systems_detected > 0 else None,
-            drawing_types_found=drawing_types_found if drawing_types_found else None,
+            pages_processed=None,  # Will be updated after background processing
+            grid_systems_detected=None,
+            drawing_types_found=None,
             author=author,
             trade=trade,
             session_created=session_created
         )
         
-        logger.info(f"✅ Upload complete for document {session_id}")
+        logger.info(f"✅ Upload response sent for document {session_id}")
         logger.info(f"   Status: {status_msg}")
         logger.info(f"   Session created: {session_created}")
+        logger.info(f"   Processing: BACKGROUND")
         
         return response
         
@@ -497,10 +521,34 @@ async def chat_with_document(
             )
             
             if pdf_exists:
-                raise HTTPException(
-                    status_code=status.HTTP_425_TOO_EARLY,
-                    detail="Document is still being processed. Please try again in a few moments."
+                # Check if there's an error file
+                error_exists = await storage_service.blob_exists(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_error.json"
                 )
+                
+                if error_exists:
+                    # Load error info
+                    try:
+                        error_text = await storage_service.download_blob_as_text(
+                            container_name=cache_container,
+                            blob_name=f"{clean_document_id}_error.json"
+                        )
+                        error_info = json.loads(error_text)
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Document processing failed: {error_info.get('error', 'Unknown error')}"
+                        )
+                    except:
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Document processing failed. Please try uploading again."
+                        )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_425_TOO_EARLY,
+                        detail="Document is still being processed. Please try again in a few moments."
+                    )
             else:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -736,6 +784,33 @@ async def get_document_info(request: Request, document_id: str):
                 message="Document not found",
                 exists=False
             )
+        
+        # Check for error state
+        error_exists = await storage_service.blob_exists(
+            container_name=cache_container,
+            blob_name=f"{clean_document_id}_error.json"
+        )
+        
+        if error_exists:
+            try:
+                error_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_error.json"
+                )
+                error_info = json.loads(error_text)
+                return DocumentInfoResponse(
+                    document_id=clean_document_id,
+                    status="error",
+                    message=f"Processing failed: {error_info.get('error', 'Unknown error')}",
+                    exists=True
+                )
+            except:
+                return DocumentInfoResponse(
+                    document_id=clean_document_id,
+                    status="error",
+                    message="Processing failed",
+                    exists=True
+                )
         
         # Get metadata if processed
         metadata = None
