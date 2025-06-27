@@ -66,7 +66,7 @@ class StorageService:
         
         logger.info("✅ All Azure Storage containers verified successfully")
 
-    async def upload_file(self, container_name: str, blob_name: str, data: bytes) -> str:
+    async def upload_file(self, container_name: str, blob_name: str, data: bytes, content_type: Optional[str] = None) -> str:
         """Upload data to Azure Blob Storage with optimized settings"""
         if not blob_name or not blob_name.strip():
             raise ValueError("Blob name cannot be empty")
@@ -82,17 +82,25 @@ class StorageService:
             
             blob_client = container_client.get_blob_client(blob=blob_name)
             
+            # Prepare upload options
+            upload_options = {
+                'data': data,
+                'overwrite': True
+            }
+            
+            # Add content type if provided
+            if content_type:
+                upload_options['content_settings'] = {'content_type': content_type}
+            
             # For large files (>4MB), use optimized upload settings
             if len(data) > 4 * 1024 * 1024:
-                await blob_client.upload_blob(
-                    data, 
-                    overwrite=True,
-                    max_concurrency=4,  # Parallel upload chunks
-                    validate_content=False  # Skip MD5 validation for speed
-                )
+                upload_options['max_concurrency'] = 4  # Parallel upload chunks
+                upload_options['validate_content'] = False  # Skip MD5 validation for speed
+                
+                await blob_client.upload_blob(**upload_options)
                 logger.info(f"✅ Uploaded large file '{blob_name}' ({len(data)/1024/1024:.1f}MB) with parallel chunks")
             else:
-                await blob_client.upload_blob(data, overwrite=True)
+                await blob_client.upload_blob(**upload_options)
                 logger.debug(f"✅ Uploaded '{blob_name}' ({len(data)/1024:.1f}KB)")
             
             return blob_client.url
@@ -100,6 +108,11 @@ class StorageService:
         except Exception as e:
             logger.error(f"❌ Failed to upload blob '{blob_name}': {e}")
             raise RuntimeError(f"Blob upload failed: {e}")
+
+    # Add async version for compatibility
+    async def upload_file_async(self, container_name: str, blob_name: str, data: bytes, content_type: Optional[str] = None) -> str:
+        """Async wrapper for upload_file for compatibility"""
+        return await self.upload_file(container_name, blob_name, data, content_type)
 
     async def download_blob_as_bytes(self, container_name: str, blob_name: str) -> bytes:
         """Download blob content as bytes with streaming for large files"""
@@ -139,6 +152,11 @@ class StorageService:
         except Exception as e:
             logger.error(f"❌ Failed to download blob '{blob_name}': {e}")
             raise RuntimeError(f"Blob download failed: {e}")
+
+    # Alias for compatibility
+    async def download_file(self, container_name: str, blob_name: str) -> bytes:
+        """Alias for download_blob_as_bytes for compatibility"""
+        return await self.download_blob_as_bytes(container_name, blob_name)
 
     async def download_blob_as_text(self, container_name: str, blob_name: str, 
                                    encoding: str = "utf-8") -> str:
