@@ -5,6 +5,7 @@ import os
 import datetime
 import logging
 import uvicorn
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -85,7 +86,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS - ALLOW EVERYTHING
+# CORS - ALLOW EVERYTHING - MUST BE FIRST
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow ALL origins
@@ -98,13 +99,33 @@ app.add_middleware(
 
 logger.info("⚠️  CORS: Allowing ALL origins, methods, and headers")
 
+# Add custom middleware to ensure CORS headers on all responses
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        logger.error(f"Error during request: {e}")
+        response = JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+    
+    # Always add CORS headers
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
+
 # Global exception handler - always return details
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Return full error details for debugging"""
     import traceback
     
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={
             "error": str(exc),
@@ -114,6 +135,14 @@ async def global_exception_handler(request: Request, exc: Exception):
             "method": request.method
         }
     )
+    
+    # Add CORS headers to error responses
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 # Include all routers
 app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint"])
@@ -154,7 +183,7 @@ async def health():
 
 # Test CORS endpoint
 @app.options("/{full_path:path}")
-async def options_handler():
+async def options_handler(request: Request, full_path: str):
     """Handle OPTIONS requests for CORS"""
     return JSONResponse(
         content={"message": "OK"},
