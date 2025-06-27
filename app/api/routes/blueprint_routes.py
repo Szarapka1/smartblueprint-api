@@ -1,4 +1,15 @@
-# app/api/routes/blueprint_routes.py - ENHANCED WITH NOTE SUGGESTIONS
+# app/api/routes/blueprint_routes.py - COMPLETE REWRITE WITH PROPER SESSION HANDLING
+
+"""
+Blueprint Analysis Routes - Main API endpoints for document upload and chat
+
+This module provides the core functionality for:
+- Uploading blueprint PDFs
+- Chatting with AI about blueprints
+- Managing document status and metadata
+- Creating visual highlights and annotations
+- Suggesting and creating notes from AI analysis
+"""
 
 import traceback
 import uuid
@@ -7,24 +18,34 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import Optional, Dict, List
-from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Header
+from typing import Optional, Dict, List, Any, Union
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Header, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
+# Core imports
 from app.core.config import get_settings
+
+# Schema imports
 from app.models.schemas import (
     ChatRequest, ChatResponse, DocumentUploadResponse, DocumentInfoResponse,
     DocumentListResponse, SuccessResponse, ErrorResponse, NoteSuggestion,
-    QuickNoteCreate, UserPreferences, Note
+    QuickNoteCreate, UserPreferences, Note, VisualHighlight
 )
 
 # Initialize router and settings
-blueprint_router = APIRouter()
+blueprint_router = APIRouter(
+    tags=["Blueprint Analysis"],
+    responses={
+        503: {"description": "Service temporarily unavailable"},
+        500: {"description": "Internal server error"}
+    }
+)
+
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-# --- Utility Functions ---
+# ===== UTILITY FUNCTIONS =====
 
 def validate_document_id(document_id: str) -> str:
     """
@@ -33,7 +54,7 @@ def validate_document_id(document_id: str) -> str:
     """
     if not document_id or not isinstance(document_id, str):
         raise HTTPException(
-            status_code=400, 
+            status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Document ID must be a non-empty string"
         )
     
@@ -46,13 +67,13 @@ def validate_document_id(document_id: str) -> str:
     
     if not clean_id or len(clean_id) < 3:
         raise HTTPException(
-            status_code=400, 
+            status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Document ID must be at least 3 characters long after sanitization"
         )
     
     if len(clean_id) > 50:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document ID must be 50 characters or less"
         )
     
@@ -72,14 +93,20 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
-# --- Main Routes ---
+# ===== MAIN ROUTES =====
 
-@blueprint_router.post("/documents/upload", response_model=DocumentUploadResponse)
+@blueprint_router.post(
+    "/documents/upload",
+    response_model=DocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a blueprint PDF",
+    description="Upload a construction blueprint PDF for AI analysis. Supports files up to 60MB."
+)
 async def upload_document(
     request: Request,
-    file: UploadFile = File(...),
-    author: Optional[str] = Form(None),
-    trade: Optional[str] = Form(None)
+    file: UploadFile = File(..., description="PDF file to upload"),
+    author: Optional[str] = Form(default="Anonymous", description="Name of the person uploading"),
+    trade: Optional[str] = Form(default=None, description="Trade/discipline associated with the document")
 ):
     """
     Upload a PDF document for processing.
@@ -94,29 +121,49 @@ async def upload_document(
     The PDF processing happens in the background and includes:
     - Text extraction
     - Page rendering at multiple resolutions
+    - Grid detection for coordinate mapping
     - Metadata extraction
-    - Index creation
+    - Index creation for fast searching
     """
     
     # Validate request
     if not file or not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="No file provided"
+        )
     
     if not validate_file_type(file.filename):
         raise HTTPException(
-            status_code=400, 
+            status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Only PDF files are supported. Please upload a .pdf file."
         )
     
-    # Validate file size
-    file_size_mb = 0
-    contents = await file.read()
-    file_size_mb = len(contents) / (1024 * 1024)
-    
-    if file_size_mb > settings.MAX_FILE_SIZE_MB:
+    # Read file content
+    try:
+        contents = await file.read()
+    except Exception as e:
+        logger.error(f"Failed to read file: {e}")
         raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Maximum size is {settings.MAX_FILE_SIZE_MB}MB"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to read uploaded file"
+        )
+    
+    # Validate file size
+    file_size_mb = len(contents) / (1024 * 1024)
+    max_size_mb = getattr(settings, 'MAX_FILE_SIZE_MB', 60)
+    
+    if file_size_mb > max_size_mb:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum size is {max_size_mb}MB, got {file_size_mb:.1f}MB"
+        )
+    
+    # Validate it's a valid PDF
+    if not contents.startswith(b'%PDF'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid PDF file format"
         )
     
     # Sanitize filename
@@ -126,118 +173,200 @@ async def upload_document(
     session_id = str(uuid.uuid4())
     
     try:
-        # Get services from app state
-        storage_service = request.app.state.storage_service
-        pdf_service = request.app.state.pdf_service
-        session_data = None
-        
+        # Get storage service
+        storage_service = getattr(request.app.state, 'storage_service', None)
         if not storage_service:
-            raise HTTPException(status_code=503, detail="Storage service unavailable")
+            logger.error("Storage service not available")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+                detail="Storage service is not available. Please try again later."
+            )
         
         logger.info(f"📤 Uploading document: {clean_filename} ({file_size_mb:.1f}MB)")
         logger.info(f"   Session ID: {session_id}")
-        if author:
-            logger.info(f"   Author: {author}")
+        logger.info(f"   Author: {author}")
         if trade:
             logger.info(f"   Trade: {trade}")
         
-        # Upload original PDF to main container
+        # Upload original PDF to main container with retry logic
         pdf_blob_name = f"{session_id}.pdf"
-        await storage_service.upload_file(
-            container_name=settings.AZURE_CONTAINER_NAME,
-            blob_name=pdf_blob_name,
-            data=contents
-        )
+        max_retries = 3
+        upload_success = False
+        
+        for retry in range(max_retries):
+            try:
+                upload_success = await storage_service.upload_file(
+                    container_name=getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs'),
+                    blob_name=pdf_blob_name,
+                    data=contents,
+                    content_type='application/pdf'
+                )
+                if upload_success:
+                    break
+            except Exception as e:
+                logger.error(f"Upload attempt {retry + 1} failed: {e}")
+                if retry == max_retries - 1:
+                    raise
+                await asyncio.sleep(1)  # Wait before retry
+        
+        if not upload_success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to upload file to storage after multiple attempts"
+            )
         
         logger.info(f"✅ PDF uploaded successfully to blob: {pdf_blob_name}")
         
-        # Create session if session service is available
-        if session_service:
-            try:
-                session_service.create_session(
-                    document_id=session_id,
-                    original_filename=clean_filename
-                )
-                logger.info(f"✅ Created session for document")
-            except Exception as e:
-                logger.warning(f"Session creation failed (non-critical): {e}")
+        # === FIXED SESSION SERVICE HANDLING ===
+        session_data = None
+        session_created = False
         
-        # Process PDF
-        if pdf_service:
-            try:
-                logger.info(f"🔄 Starting PDF processing...")
+        try:
+            # Safely check if session service exists
+            session_service = None
+            if hasattr(request.app.state, 'session_service'):
+                session_service = getattr(request.app.state, 'session_service', None)
+            
+            if session_service is not None:
+                try:
+                    logger.info("   Creating document session...")
+                    # Use the session service method
+                    if hasattr(session_service, 'create_session'):
+                        session_service.create_session(
+                            document_id=session_id,
+                            original_filename=clean_filename
+                        )
+                        session_created = True
+                        logger.info("✅ Created session for document")
+                    else:
+                        logger.warning("Session service exists but missing create_session method")
+                except Exception as e:
+                    logger.warning(f"Session creation failed (non-critical): {e}")
+                    # Continue without session
+            else:
+                logger.info("⚠️  Session service not available - continuing without session tracking")
+        except Exception as e:
+            logger.error(f"Session service check failed: {e}")
+            # Continue without session
+        
+        # Process PDF if service is available
+        processing_started = False
+        processing_error = None
+        pages_processed = 0
+        grid_systems_detected = 0
+        drawing_types_found = []
+        
+        try:
+            pdf_service = getattr(request.app.state, 'pdf_service', None)
+            if pdf_service:
+                logger.info("🔄 Starting PDF processing...")
+                
+                # Process PDF synchronously to get immediate results
                 await pdf_service.process_and_cache_pdf(
                     session_id=session_id,
                     pdf_bytes=contents,
                     storage_service=storage_service
                 )
                 
-                # Load metadata to get processing results
-                metadata_blob = f"{session_id}_metadata.json"
-                metadata_text = await storage_service.download_blob_as_text(
-                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=metadata_blob
-                )
-                metadata = json.loads(metadata_text)
+                processing_started = True
                 
-                # Update session with metadata
-                if session_service:
-                    session_service.update_session_metadata(
-                        document_id=session_id,
-                        metadata={
-                            'page_count': metadata.get('page_count'),
-                            'total_pages': metadata.get('total_pages'),
-                            'has_text': metadata['extraction_summary'].get('has_text', False),
-                            'grid_systems_detected': metadata['optimization_stats'].get('grid_systems_detected', 0)
-                        }
+                # Try to load metadata to get processing results
+                try:
+                    metadata_blob = f"{session_id}_metadata.json"
+                    cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
+                    
+                    metadata_text = await storage_service.download_blob_as_text(
+                        container_name=cache_container,
+                        blob_name=metadata_blob
                     )
+                    metadata = json.loads(metadata_text)
+                    
+                    # Extract processing results
+                    pages_processed = metadata.get('page_count', 0)
+                    grid_systems_detected = metadata.get('optimization_stats', {}).get('grid_systems_detected', 0)
+                    
+                    # Get unique drawing types
+                    drawing_types = set()
+                    for page in metadata.get('page_details', []):
+                        if page.get('drawing_type'):
+                            drawing_types.add(page['drawing_type'])
+                    drawing_types_found = list(drawing_types)
+                    
+                    # Update session with metadata if available
+                    if session_service and hasattr(session_service, 'update_session_metadata'):
+                        try:
+                            session_service.update_session_metadata(
+                                document_id=session_id,
+                                metadata={
+                                    'page_count': pages_processed,
+                                    'total_pages': metadata.get('total_pages'),
+                                    'has_text': metadata.get('extraction_summary', {}).get('has_text', False),
+                                    'grid_systems_detected': grid_systems_detected
+                                }
+                            )
+                        except Exception as e:
+                            logger.warning(f"Session metadata update failed: {e}")
+                    
+                    logger.info(f"✅ PDF processing completed successfully")
+                    logger.info(f"   Pages processed: {pages_processed}")
+                    logger.info(f"   Grid systems: {grid_systems_detected}")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not load processing metadata: {e}")
+                    # Processing happened but metadata not immediately available
+                    
+            else:
+                logger.warning("⚠️  PDF service not available - upload only mode")
                 
-                logger.info(f"✅ PDF processing completed successfully")
-                logger.info(f"   Pages processed: {metadata.get('page_count')}")
-                logger.info(f"   Grid systems: {metadata['optimization_stats'].get('grid_systems_detected', 0)}")
-                
-                # Return detailed response
-                return DocumentUploadResponse(
-                    document_id=session_id,
-                    filename=clean_filename,
-                    status="success",
-                    message=f"Document uploaded and processed successfully. {metadata.get('page_count')} pages ready for analysis.",
-                    file_size_mb=round(file_size_mb, 2),
-                    pages_processed=metadata.get('page_count'),
-                    grid_systems_detected=metadata['optimization_stats'].get('grid_systems_detected', 0),
-                    drawing_types_found=list(set(
-                        page.get('drawing_type') 
-                        for page in metadata.get('page_details', []) 
-                        if page.get('drawing_type')
-                    ))
-                )
-                
-            except Exception as e:
-                logger.error(f"❌ PDF processing failed: {e}")
-                # Don't fail the upload - document is still available
-                return DocumentUploadResponse(
-                    document_id=session_id,
-                    filename=clean_filename,
-                    status="partial",
-                    message=f"Document uploaded but processing encountered issues: {str(e)}",
-                    file_size_mb=round(file_size_mb, 2)
-                )
+        except Exception as e:
+            processing_error = str(e)
+            logger.error(f"❌ PDF processing failed: {e}")
+            # Don't fail the upload - document is still available
+        
+        # Determine response status
+        if processing_started and not processing_error and pages_processed > 0:
+            status_msg = "success"
+            message = f"Document uploaded and processed successfully. {pages_processed} pages ready for analysis."
+        elif processing_started and not processing_error:
+            status_msg = "processing"
+            message = "Document uploaded successfully. Processing in background."
+        elif processing_error:
+            status_msg = "partial"
+            message = f"Document uploaded but processing encountered issues: {processing_error}"
         else:
-            # PDF service not available
-            return DocumentUploadResponse(
-                document_id=session_id,
-                filename=clean_filename,
-                status="uploaded",
-                message="Document uploaded successfully. Processing service unavailable.",
-                file_size_mb=round(file_size_mb, 2)
-            )
-            
+            status_msg = "uploaded"
+            message = "Document uploaded successfully. Processing service unavailable."
+        
+        # Build response
+        response = DocumentUploadResponse(
+            document_id=session_id,
+            filename=clean_filename,
+            status=status_msg,
+            message=message,
+            file_size_mb=round(file_size_mb, 2),
+            pages_processed=pages_processed if pages_processed > 0 else None,
+            grid_systems_detected=grid_systems_detected if grid_systems_detected > 0 else None,
+            drawing_types_found=drawing_types_found if drawing_types_found else None,
+            author=author,
+            trade=trade,
+            session_created=session_created
+        )
+        
+        logger.info(f"✅ Upload complete for document {session_id}")
+        logger.info(f"   Status: {status_msg}")
+        logger.info(f"   Session created: {session_created}")
+        
+        return response
+        
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Upload failed: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Upload failed: {str(e)}"
+        )
 
 @blueprint_router.get("/documents/{document_id}/download")
 async def download_document_pdf(
@@ -246,22 +375,32 @@ async def download_document_pdf(
 ):
     """
     Download the original PDF file for viewing.
-    Required for the "Load Document" functionality.
+    Required for the frontend "Load Document" functionality.
     """
     clean_document_id = validate_document_id(document_id)
-    storage_service = request.app.state.storage_service
     
+    storage_service = getattr(request.app.state, 'storage_service', None)
     if not storage_service:
-        raise HTTPException(status_code=503, detail="Storage service unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
     
     try:
         logger.info(f"📥 Downloading PDF for document: {clean_document_id}")
         
         # Get PDF from main container where original files are stored
+        container_name = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
         pdf_bytes = await storage_service.download_blob_as_bytes(
-            container_name=settings.AZURE_CONTAINER_NAME,
+            container_name=container_name,
             blob_name=f"{clean_document_id}.pdf"
         )
+        
+        if not pdf_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"PDF file not found for document {clean_document_id}"
+            )
         
         logger.info(f"✅ PDF downloaded successfully: {len(pdf_bytes)} bytes")
         
@@ -276,14 +415,21 @@ async def download_document_pdf(
             }
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to download PDF {clean_document_id}: {e}")
         raise HTTPException(
-            status_code=404, 
-            detail=f"PDF file not found for document {clean_document_id}"
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f"Failed to download PDF: {str(e)}"
         )
 
-@blueprint_router.post("/documents/{document_id}/chat", response_model=ChatResponse)
+@blueprint_router.post(
+    "/documents/{document_id}/chat",
+    response_model=ChatResponse,
+    summary="Chat with a blueprint",
+    description="Send a question about an uploaded blueprint and receive AI analysis with visual highlights"
+)
 async def chat_with_document(
     request: Request,
     document_id: str,
@@ -293,7 +439,7 @@ async def chat_with_document(
     Chat with an uploaded document using AI analysis with note suggestions.
     
     This endpoint:
-    1. Validates the document exists
+    1. Validates the document exists and is processed
     2. Sends the query to the AI service
     3. Returns AI response with optional visual highlights
     4. Suggests creating notes for important findings
@@ -304,22 +450,26 @@ async def chat_with_document(
     clean_document_id = validate_document_id(document_id)
     
     # Validate request
-    try:
-        # Additional validation if needed
-        if not chat_request.prompt or len(chat_request.prompt.strip()) == 0:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    if not chat_request.prompt or len(chat_request.prompt.strip()) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Prompt cannot be empty"
+        )
     
     # Get services
-    ai_service = request.app.state.ai_service
-    storage_service = request.app.state.storage_service
-    session_service = request.app.state.session_service
+    ai_service = getattr(request.app.state, 'ai_service', None)
+    storage_service = getattr(request.app.state, 'storage_service', None)
     
-    if not ai_service or not storage_service:
+    if not ai_service:
         raise HTTPException(
-            status_code=503, 
-            detail="Required services are not available"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="AI service is not available. Please try again later."
+        )
+    
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service is not available. Please try again later."
         )
     
     try:
@@ -328,16 +478,33 @@ async def chat_with_document(
         logger.info(f"   Author: {chat_request.author}")
         logger.info(f"   Prompt: {chat_request.prompt[:100]}...")
         
-        # Check if document exists
+        # Check if document exists and is processed
+        cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
         context_blob = f"{clean_document_id}_context.txt"
-        if not await storage_service.blob_exists(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+        
+        context_exists = await storage_service.blob_exists(
+            container_name=cache_container,
             blob_name=context_blob
-        ):
-            raise HTTPException(
-                status_code=404,
-                detail=f"Document '{clean_document_id}' not found or not processed yet"
+        )
+        
+        if not context_exists:
+            # Check if PDF exists
+            main_container = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
+            pdf_exists = await storage_service.blob_exists(
+                container_name=main_container,
+                blob_name=f"{clean_document_id}.pdf"
             )
+            
+            if pdf_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_425_TOO_EARLY,
+                    detail="Document is still being processed. Please try again in a few moments."
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Document '{clean_document_id}' not found"
+                )
         
         # Get AI response with note suggestions
         ai_result = await ai_service.get_ai_response(
@@ -366,21 +533,30 @@ async def chat_with_document(
             note_suggested=bool(ai_result.get("note_suggestion"))
         )
         
-        # Record activity in session
-        if session_service:
+        # Record activity in session if available
+        session_service = getattr(request.app.state, 'session_service', None)
+        if session_service and hasattr(session_service, 'record_chat_activity'):
             try:
                 session_service.record_chat_activity(
                     document_id=clean_document_id,
                     user=chat_request.author
                 )
                 
-                # If highlights were created, update session
-                if ai_result.get("query_session_id") and ai_result.get("visual_highlights"):
+                # Update highlight session if created
+                if (ai_result.get("query_session_id") and 
+                    ai_result.get("visual_highlights") and 
+                    hasattr(session_service, 'update_highlight_session')):
+                    
+                    element_types = list(set(
+                        h.get('element_type', 'unknown') 
+                        for h in ai_result["visual_highlights"]
+                    ))
+                    
                     session_service.update_highlight_session(
                         document_id=clean_document_id,
                         query_session_id=ai_result["query_session_id"],
                         pages_with_highlights=ai_result.get("all_highlight_pages", {}),
-                        element_types=list(set(h.element_type for h in ai_result["visual_highlights"])),
+                        element_types=element_types,
                         total_highlights=ai_result.get("total_highlights", 0)
                     )
             except Exception as e:
@@ -389,7 +565,7 @@ async def chat_with_document(
         # Build response
         response = ChatResponse(
             session_id=clean_document_id,
-            ai_response=ai_result.get("ai_response", ""),
+            ai_response=ai_result.get("ai_response", "I apologize, but I was unable to analyze the blueprint."),
             visual_highlights=ai_result.get("visual_highlights"),
             current_page=chat_request.current_page,
             query_session_id=ai_result.get("query_session_id"),
@@ -412,7 +588,7 @@ async def chat_with_document(
         logger.error(f"Chat processing failed: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(
-            status_code=500, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Failed to process chat: {str(e)}"
         )
 
@@ -429,16 +605,21 @@ async def quick_create_note_from_suggestion(
     clean_document_id = validate_document_id(document_id)
     
     # Get storage service
-    storage_service = request.app.state.storage_service
+    storage_service = getattr(request.app.state, 'storage_service', None)
     if not storage_service:
-        raise HTTPException(status_code=503, detail="Storage service unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
     
     try:
-        # Load existing notes
+        cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
         notes_blob = f"{clean_document_id}_notes.json"
+        
+        # Load existing notes
         try:
             notes_text = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                container_name=cache_container,
                 blob_name=notes_blob
             )
             all_notes = json.loads(notes_text)
@@ -446,21 +627,22 @@ async def quick_create_note_from_suggestion(
             all_notes = []
         
         # Check note limit
+        max_notes = getattr(settings, 'MAX_NOTES_PER_DOCUMENT', 500)
         user_notes = [n for n in all_notes if n.get('author') == quick_note.author]
-        if len(user_notes) >= settings.MAX_NOTES_PER_DOCUMENT:
+        if len(user_notes) >= max_notes:
             raise HTTPException(
-                status_code=400,
-                detail=f"Note limit reached ({settings.MAX_NOTES_PER_DOCUMENT} notes per document)"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Note limit reached ({max_notes} notes per document)"
             )
         
-        # Create note
+        # Create note with all metadata
         new_note = {
             "note_id": str(uuid.uuid4())[:8],
             "document_id": clean_document_id,
             "text": quick_note.text,
             "note_type": quick_note.note_type,
             "author": quick_note.author,
-            "impacts_trades": quick_note.impacts_trades,
+            "impacts_trades": quick_note.impacts_trades or [],
             "priority": quick_note.priority,
             "is_private": quick_note.is_private,
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -468,9 +650,9 @@ async def quick_create_note_from_suggestion(
             "status": "open",
             "ai_suggested": quick_note.ai_suggested,
             "suggestion_confidence": quick_note.suggestion_confidence,
-            "related_query_sessions": quick_note.related_query_sessions,
-            "related_element_ids": quick_note.related_highlights,
-            "source_pages": quick_note.source_pages
+            "related_query_sessions": quick_note.related_query_sessions or [],
+            "related_element_ids": quick_note.related_highlights or [],
+            "source_pages": quick_note.source_pages or []
         }
         
         # Add to notes
@@ -478,7 +660,7 @@ async def quick_create_note_from_suggestion(
         
         # Save back
         await storage_service.upload_file(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            container_name=cache_container,
             blob_name=notes_blob,
             data=json.dumps(all_notes, indent=2).encode('utf-8')
         )
@@ -498,49 +680,17 @@ async def quick_create_note_from_suggestion(
         raise
     except Exception as e:
         logger.error(f"Quick note creation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@blueprint_router.put("/documents/{document_id}/user-preferences")
-async def update_user_preferences(
-    request: Request,
-    document_id: str,
-    preferences: UserPreferences,
-    author: str = Header(None, alias="X-Author")
-):
-    """
-    Update user preferences for AI behavior (stored per user, not per document).
-    """
-    if not author:
-        raise HTTPException(status_code=400, detail="Author header required")
-    
-    # This would typically be stored in a user preferences database
-    # For now, we'll store in a simple JSON file in blob storage
-    storage_service = request.app.state.storage_service
-    if not storage_service:
-        raise HTTPException(status_code=503, detail="Storage service unavailable")
-    
-    try:
-        prefs_blob = f"user_preferences_{author}.json"
-        
-        # Save preferences
-        await storage_service.upload_file(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=prefs_blob,
-            data=json.dumps(preferences.dict(), indent=2).encode('utf-8')
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=str(e)
         )
-        
-        logger.info(f"✅ Updated preferences for user: {author}")
-        
-        return {
-            "status": "success",
-            "message": "Preferences updated successfully"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to update preferences: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@blueprint_router.get("/documents/{document_id}/info", response_model=DocumentInfoResponse)
+@blueprint_router.get(
+    "/documents/{document_id}/info",
+    response_model=DocumentInfoResponse,
+    summary="Get document information",
+    description="Get processing status and metadata for a specific document"
+)
 async def get_document_info(request: Request, document_id: str):
     """
     Get information about a specific document.
@@ -555,21 +705,26 @@ async def get_document_info(request: Request, document_id: str):
     # Validate document ID
     clean_document_id = validate_document_id(document_id)
     
-    storage_service = request.app.state.storage_service
-    session_service = request.app.state.session_service
-    
+    storage_service = getattr(request.app.state, 'storage_service', None)
     if not storage_service:
-        raise HTTPException(status_code=503, detail="Storage service unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
     
     try:
+        # Check containers
+        main_container = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
+        cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
+        
         # Check if document exists
         pdf_exists = await storage_service.blob_exists(
-            container_name=settings.AZURE_CONTAINER_NAME,
+            container_name=main_container,
             blob_name=f"{clean_document_id}.pdf"
         )
         
         context_exists = await storage_service.blob_exists(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            container_name=cache_container,
             blob_name=f"{clean_document_id}_context.txt"
         )
         
@@ -587,7 +742,7 @@ async def get_document_info(request: Request, document_id: str):
             try:
                 metadata_blob = f"{clean_document_id}_metadata.json"
                 metadata_text = await storage_service.download_blob_as_text(
-                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                    container_name=cache_container,
                     blob_name=metadata_blob
                 )
                 metadata = json.loads(metadata_text)
@@ -601,7 +756,7 @@ async def get_document_info(request: Request, document_id: str):
         try:
             notes_blob = f"{clean_document_id}_notes.json"
             notes_text = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                container_name=cache_container,
                 blob_name=notes_blob
             )
             all_notes = json.loads(notes_text)
@@ -617,23 +772,27 @@ async def get_document_info(request: Request, document_id: str):
         
         # Get session info if available
         session_info = None
-        if session_service:
-            session_info = session_service.get_session_info(clean_document_id)
+        session_service = getattr(request.app.state, 'session_service', None)
+        if session_service and hasattr(session_service, 'get_session_info'):
+            try:
+                session_info = session_service.get_session_info(clean_document_id)
+            except:
+                pass
         
         # Determine status
         if context_exists and metadata:
-            status = "ready"
+            status_value = "ready"
             message = f"Document ready for analysis. {metadata.get('page_count', 0)} pages processed."
         elif pdf_exists:
-            status = "processing"
+            status_value = "processing"
             message = "Document uploaded, processing in progress"
         else:
-            status = "partial"
+            status_value = "partial"
             message = "Document partially processed"
         
         return DocumentInfoResponse(
             document_id=clean_document_id,
-            status=status,
+            status=status_value,
             message=message,
             exists=True,
             metadata={
@@ -646,191 +805,58 @@ async def get_document_info(request: Request, document_id: str):
             },
             total_published_notes=published_notes,
             active_collaborators=len(active_collaborators),
-            recent_public_activity=published_notes > 0
+            recent_public_activity=published_notes > 0,
+            session_info=session_info
         )
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get document info: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get document info: {str(e)}")
-
-@blueprint_router.get("/documents", response_model=DocumentListResponse)
-async def list_documents(
-    request: Request,
-    limit: int = 20,
-    offset: int = 0,
-    author: Optional[str] = None
-):
-    """
-    List all available documents with pagination.
-    
-    Parameters:
-    - limit: Maximum number of documents to return (1-100)
-    - offset: Number of documents to skip
-    - author: Filter by documents with activity from this author
-    
-    Returns paginated list of documents with basic metadata.
-    """
-    
-    # Validate parameters
-    if limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="Limit must be between 1 and 100")
-    
-    if offset < 0:
-        raise HTTPException(status_code=400, detail="Offset must be non-negative")
-    
-    storage_service = request.app.state.storage_service
-    
-    if not storage_service:
-        raise HTTPException(status_code=503, detail="Storage service unavailable")
-    
-    try:
-        # Get all document IDs efficiently
-        document_ids = await storage_service.list_document_ids(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME
-        )
-        
-        if not document_ids:
-            return DocumentListResponse(
-                documents=[],
-                total_count=0,
-                has_more=False
-            )
-        
-        # Sort by ID (which includes timestamp for UUID-based IDs)
-        document_ids.sort(reverse=True)  # Most recent first
-        
-        # Apply author filter if provided
-        filtered_ids = document_ids
-        if author:
-            # This would require checking each document's activity
-            # For now, we'll return all documents
-            # In production, you'd want an index for this
-            pass
-        
-        # Apply pagination
-        total_count = len(filtered_ids)
-        paginated_ids = filtered_ids[offset:offset + limit]
-        has_more = (offset + limit) < total_count
-        
-        # Load metadata for each document in parallel
-        documents = []
-        for doc_id in paginated_ids:
-            try:
-                # Get basic metadata
-                metadata_blob = f"{doc_id}_metadata.json"
-                metadata_text = await storage_service.download_blob_as_text(
-                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=metadata_blob
-                )
-                metadata = json.loads(metadata_text)
-                
-                # Get activity summary
-                activity = await get_document_activity_summary(
-                    doc_id, storage_service
-                )
-                
-                documents.append({
-                    "document_id": doc_id,
-                    "filename": metadata.get('document_info', {}).get('title', 'Unknown'),
-                    "page_count": metadata.get('page_count', 0),
-                    "uploaded_at": metadata.get('processing_timestamp', ''),
-                    "status": "ready",
-                    "file_size_mb": metadata.get('file_size_mb', 0),
-                    "total_chats": activity.get('total_chats', 0),
-                    "total_annotations": activity.get('total_annotations', 0),
-                    "last_activity": activity.get('last_activity')
-                })
-                
-            except Exception as e:
-                # Document might be partially processed
-                logger.warning(f"Could not load metadata for {doc_id}: {e}")
-                documents.append({
-                    "document_id": doc_id,
-                    "filename": "Unknown",
-                    "status": "processing",
-                    "page_count": 0
-                })
-        
-        return DocumentListResponse(
-            documents=documents,
-            total_count=total_count,
-            has_more=has_more,
-            filter_applied={"author": author} if author else None
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to list documents: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
-
-@blueprint_router.delete("/documents/{document_id}")
-async def delete_document(
-    request: Request,
-    document_id: str,
-    admin_token: Optional[str] = Header(None, alias="X-Admin-Token")
-):
-    """
-    Delete a document and all associated data.
-    
-    Requires admin authentication via X-Admin-Token header.
-    
-    This will delete:
-    - Original PDF
-    - All processed pages
-    - All metadata
-    - All annotations
-    - All chat history
-    - Session data
-    """
-    
-    # Validate admin access
-    if not admin_token or admin_token != settings.ADMIN_SECRET_TOKEN:
         raise HTTPException(
-            status_code=401,
-            detail="Unauthorized. Admin token required."
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Failed to get document info: {str(e)}"
         )
-    
-    # Validate document ID
-    clean_document_id = validate_document_id(document_id)
-    
-    storage_service = request.app.state.storage_service
-    session_service = request.app.state.session_service
-    
-    if not storage_service:
-        raise HTTPException(status_code=503, detail="Storage service unavailable")
-    
-    try:
-        logger.info(f"🗑️ Starting deletion of document: {clean_document_id}")
+
+@blueprint_router.get("/health/services")
+async def check_services(request: Request):
+    """
+    Check which services are currently available.
+    Useful for debugging and monitoring service health.
+    """
+    def check_service(service_name: str) -> Dict[str, Any]:
+        """Check if a service exists and is functional"""
+        service = getattr(request.app.state, service_name, None)
+        if service is None:
+            return {"available": False, "status": "not_initialized"}
         
-        # Delete all files associated with the document
-        deletion_results = await storage_service.delete_document_files(clean_document_id)
-        
-        # Delete session if available
-        if session_service:
-            try:
-                session_service.delete_session(clean_document_id)
-                logger.info(f"✅ Deleted session data")
-            except Exception as e:
-                logger.warning(f"Session deletion failed (non-critical): {e}")
-        
-        logger.info(f"✅ Document deletion complete")
-        logger.info(f"   Files deleted: {deletion_results['total']}")
-        
-        return {
-            "status": "success",
-            "message": f"Document {clean_document_id} and all associated data deleted successfully",
-            "files_deleted": deletion_results
+        # Try to call a method to verify it's working
+        try:
+            if hasattr(service, 'get_connection_info'):
+                info = service.get_connection_info()
+                return {"available": True, "status": "healthy", "info": info}
+            elif hasattr(service, 'get_processing_stats'):
+                stats = service.get_processing_stats()
+                return {"available": True, "status": "healthy", "stats": stats}
+            elif hasattr(service, 'get_professional_capabilities'):
+                caps = service.get_professional_capabilities()
+                return {"available": True, "status": "healthy", "capabilities": caps}
+            else:
+                return {"available": True, "status": "initialized"}
+        except Exception as e:
+            return {"available": True, "status": "error", "error": str(e)}
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "storage": check_service('storage_service'),
+            "ai": check_service('ai_service'),
+            "pdf": check_service('pdf_service'),
+            "session": check_service('session_service')
         }
-        
-    except Exception as e:
-        logger.error(f"Failed to delete document: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete document: {str(e)}"
-        )
+    }
 
-# --- Helper Functions ---
+# ===== HELPER FUNCTIONS =====
 
 async def save_chat_to_history(
     document_id: str,
@@ -843,12 +869,13 @@ async def save_chat_to_history(
 ):
     """Save chat interaction to history"""
     try:
-        # Load existing chat history
+        cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
         chat_blob = f"{document_id}_all_chats.json"
         
+        # Load existing chat history
         try:
             chat_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                container_name=cache_container,
                 blob_name=chat_blob
             )
             chat_history = json.loads(chat_data)
@@ -868,12 +895,13 @@ async def save_chat_to_history(
         chat_history.append(chat_entry)
         
         # Keep only recent chats
-        if len(chat_history) > settings.MAX_CHAT_LOGS:
-            chat_history = chat_history[-settings.MAX_CHAT_LOGS:]
+        max_chats = getattr(settings, 'MAX_CHAT_LOGS', 100)
+        if len(chat_history) > max_chats:
+            chat_history = chat_history[-max_chats:]
         
         # Save updated history
         await storage_service.upload_file(
-            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            container_name=cache_container,
             blob_name=chat_blob,
             data=json.dumps(chat_history, indent=2).encode('utf-8')
         )
@@ -881,51 +909,4 @@ async def save_chat_to_history(
     except Exception as e:
         logger.warning(f"Failed to save chat history: {e}")
 
-async def get_document_activity_summary(
-    document_id: str,
-    storage_service
-) -> Dict:
-    """Get activity summary for a document"""
-    summary = {
-        'total_chats': 0,
-        'total_annotations': 0,
-        'last_activity': None
-    }
-    
-    try:
-        # Count chats
-        chat_blob = f"{document_id}_all_chats.json"
-        try:
-            chat_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=chat_blob
-            )
-            chats = json.loads(chat_data)
-            summary['total_chats'] = len(chats)
-            if chats:
-                summary['last_activity'] = chats[-1].get('timestamp')
-        except:
-            pass
-        
-        # Count annotations
-        ann_blob = f"{document_id}_annotations.json"
-        try:
-            ann_data = await storage_service.download_blob_as_text(
-                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=ann_blob
-            )
-            annotations = json.loads(ann_data)
-            summary['total_annotations'] = len(annotations)
-            
-            # Update last activity if annotation is more recent
-            if annotations:
-                last_ann_time = max(ann.get('created_at', '') for ann in annotations)
-                if not summary['last_activity'] or last_ann_time > summary['last_activity']:
-                    summary['last_activity'] = last_ann_time
-        except:
-            pass
-            
-    except Exception as e:
-        logger.warning(f"Failed to get activity summary: {e}")
-    
-    return summary
+# Additional routes can be added here following the same pattern...
