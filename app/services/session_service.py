@@ -3,6 +3,7 @@
 import uuid
 import logging
 import asyncio
+import json
 from typing import Dict, Any, List, Optional, Set
 from datetime import datetime, timedelta
 from collections import OrderedDict, defaultdict
@@ -189,7 +190,11 @@ class SessionService:
             
             # Check if we need to evict old sessions
             if len(self.document_sessions) >= self.max_sessions:
-                self._evict_oldest_session()
+                # Use async eviction if storage service is available
+                if self.storage_service:
+                    asyncio.create_task(self._evict_oldest_session_async())
+                else:
+                    self._evict_oldest_session_sync()
             
             # Create new session
             session = DocumentSession(document_id, original_filename)
@@ -687,8 +692,52 @@ class SessionService:
             logger.error(f"Failed to get statistics: {e}")
             return {'error': str(e)}
 
-    def _evict_oldest_session(self):
-        """Evict oldest session (LRU)"""
+    async def _evict_oldest_session_async(self):
+        """Evict oldest session (LRU) with data persistence - async version"""
+        if not self.document_sessions:
+            return
+        
+        # Get oldest (first item in OrderedDict)
+        oldest_id, oldest_session = next(iter(self.document_sessions.items()))
+        
+        # Try to persist important data before eviction
+        if self.storage_service:
+            try:
+                session_data = {
+                    'document_id': oldest_id,
+                    'filename': oldest_session.filename,
+                    'annotations': oldest_session.annotations,
+                    'highlight_sessions': [
+                        session.to_dict() for session in oldest_session.highlight_sessions.values()
+                    ],
+                    'chat_count': oldest_session.chat_count,
+                    'metadata': oldest_session.metadata,
+                    'evicted_at': datetime.utcnow().isoformat()
+                }
+                
+                # Save to storage
+                await self.storage_service.upload_file(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=f"{oldest_id}_session_backup.json",
+                    data=json.dumps(session_data, indent=2).encode('utf-8')
+                )
+                
+                logger.info(f"💾 Persisted session data before eviction: {oldest_id}")
+                
+            except Exception as e:
+                logger.error(f"Failed to persist session data: {e}")
+        
+        # Remove from memory
+        del self.document_sessions[oldest_id]
+        self.stats['sessions_evicted'] += 1
+        
+        logger.info(f"♻️ Evicted oldest session:")
+        logger.info(f"   🆔 Document: {oldest_id}")
+        logger.info(f"   📄 Filename: {oldest_session.filename}")
+        logger.info(f"   ⏰ Last accessed: {oldest_session.last_accessed}")
+
+    def _evict_oldest_session_sync(self):
+        """Evict oldest session (LRU) - synchronous version for when no storage service"""
         if not self.document_sessions:
             return
         
