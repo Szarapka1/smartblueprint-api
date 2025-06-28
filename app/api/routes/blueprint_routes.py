@@ -1,14 +1,7 @@
-# app/api/routes/blueprint_routes.py - COMPLETE WORKING VERSION
+# app/api/routes/blueprint_routes.py - FIXED VERSION
 
 """
-Blueprint Analysis Routes - Main API endpoints for document upload and chat
-
-This module provides the core functionality for:
-- Uploading blueprint PDFs
-- Chatting with AI about blueprints
-- Managing document status and metadata
-- Creating visual highlights and annotations
-- Suggesting and creating notes from AI analysis
+Blueprint Analysis Routes - Fixed for proper upload and processing
 """
 
 import traceback
@@ -94,75 +87,6 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
-# ===== BACKGROUND PROCESSING FUNCTION =====
-
-async def process_pdf_background(
-    session_id: str,
-    pdf_bytes: bytes,
-    storage_service,
-    pdf_service,
-    session_service=None
-):
-    """Background task to process PDF without blocking the response"""
-    try:
-        logger.info(f"🔄 Background PDF processing started for {session_id}")
-        
-        # Process the PDF
-        await pdf_service.process_and_cache_pdf(
-            session_id=session_id,
-            pdf_bytes=pdf_bytes,
-            storage_service=storage_service
-        )
-        
-        logger.info(f"✅ Background PDF processing completed for {session_id}")
-        
-        # Try to update session with results if available
-        if session_service:
-            try:
-                # Load metadata to get processing results
-                metadata_blob = f"{session_id}_metadata.json"
-                cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
-                
-                metadata_text = await storage_service.download_blob_as_text(
-                    container_name=cache_container,
-                    blob_name=metadata_blob
-                )
-                metadata = json.loads(metadata_text)
-                
-                # Update session with metadata
-                if hasattr(session_service, 'update_session_metadata'):
-                    session_service.update_session_metadata(
-                        document_id=session_id,
-                        metadata={
-                            'page_count': metadata.get('page_count', 0),
-                            'total_pages': metadata.get('total_pages'),
-                            'has_text': metadata.get('extraction_summary', {}).get('has_text', False),
-                            'grid_systems_detected': metadata.get('grid_systems_detected', 0),
-                            'processing_complete': True
-                        }
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to update session after processing: {e}")
-                
-    except Exception as e:
-        logger.error(f"❌ Background PDF processing failed for {session_id}: {e}")
-        logger.error(traceback.format_exc())
-        # Store error state
-        try:
-            error_info = {
-                'document_id': session_id,
-                'error': str(e),
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'status': 'failed'
-            }
-            await storage_service.upload_file(
-                container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache'),
-                blob_name=f"{session_id}_error.json",
-                data=json.dumps(error_info).encode('utf-8')
-            )
-        except:
-            pass
-
 # ===== MAIN ROUTES =====
 
 @blueprint_router.post(
@@ -174,27 +98,12 @@ async def process_pdf_background(
 )
 async def upload_document(
     request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="PDF file to upload"),
     author: Optional[str] = Form(default="Anonymous", description="Name of the person uploading"),
     trade: Optional[str] = Form(default=None, description="Trade/discipline associated with the document")
 ):
     """
-    Upload a PDF document for processing.
-    
-    This endpoint:
-    1. Validates the uploaded file
-    2. Generates a unique session ID
-    3. Saves the PDF to Azure Storage
-    4. Initiates async processing of the PDF
-    5. Returns immediately with session ID
-    
-    The PDF processing happens in the background and includes:
-    - Text extraction
-    - Page rendering at multiple resolutions
-    - Grid detection for coordinate mapping
-    - Metadata extraction
-    - Index creation for fast searching
+    Upload a PDF document for processing - FIXED VERSION
     """
     
     # Validate request
@@ -227,7 +136,7 @@ async def upload_document(
     if file_size_mb > max_size_mb:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File too large. Maximum size is {max_size_mb}MB, got {file_size_mb:.1f}MB"
+            detail=f"File too large: {file_size_mb:.1f}MB. Maximum size is {max_size_mb}MB."
         )
     
     # Validate it's a valid PDF
@@ -299,26 +208,74 @@ async def upload_document(
                 file_size_mb=round(file_size_mb, 2)
             )
         
-        # Process asynchronously
-        logger.info("🔄 Starting PDF processing in background...")
+        # Process synchronously for testing
+        logger.info("🔄 Processing PDF...")
         
-        # Add background task
-        background_tasks.add_task(
-            process_pdf_background,
-            session_id=session_id,
-            pdf_bytes=contents,
-            storage_service=storage_service,
-            pdf_service=pdf_service,
-            session_service=session_service
-        )
-        
-        return DocumentUploadResponse(
-            document_id=session_id,
-            filename=clean_filename,
-            status="processing",
-            message="Document uploaded successfully. Processing in background - check back in a moment.",
-            file_size_mb=round(file_size_mb, 2)
-        )
+        try:
+            await pdf_service.process_and_cache_pdf(
+                session_id=session_id,
+                pdf_bytes=contents,
+                storage_service=storage_service
+            )
+            
+            # Update session with results if available
+            if session_service and hasattr(session_service, 'update_session_metadata'):
+                try:
+                    # Load metadata to get processing results
+                    metadata_blob = f"{session_id}_metadata.json"
+                    cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
+                    
+                    metadata_text = await storage_service.download_blob_as_text(
+                        container_name=cache_container,
+                        blob_name=metadata_blob
+                    )
+                    metadata = json.loads(metadata_text)
+                    
+                    # Update session with metadata
+                    session_service.update_session_metadata(
+                        document_id=session_id,
+                        metadata={
+                            'page_count': metadata.get('page_count', 0),
+                            'total_pages': metadata.get('total_pages'),
+                            'has_text': metadata.get('extraction_summary', {}).get('has_text', False),
+                            'grid_systems_detected': metadata.get('grid_systems_detected', 0),
+                            'processing_complete': True
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update session after processing: {e}")
+            
+            return DocumentUploadResponse(
+                document_id=session_id,
+                filename=clean_filename,
+                status="ready",
+                message="Document uploaded and processed successfully!",
+                file_size_mb=round(file_size_mb, 2),
+                pages_processed=metadata.get('page_count', 0) if 'metadata' in locals() else None
+            )
+            
+        except Exception as e:
+            logger.error(f"PDF processing failed: {e}")
+            # Store error state
+            error_info = {
+                'document_id': session_id,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'status': 'failed'
+            }
+            await storage_service.upload_file(
+                container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache'),
+                blob_name=f"{session_id}_error.json",
+                data=json.dumps(error_info).encode('utf-8')
+            )
+            
+            return DocumentUploadResponse(
+                document_id=session_id,
+                filename=clean_filename,
+                status="error",
+                message=f"Document uploaded but processing failed: {str(e)}",
+                file_size_mb=round(file_size_mb, 2)
+            )
         
     except HTTPException:
         raise
@@ -351,18 +308,21 @@ async def download_document_pdf(
     try:
         logger.info(f"📥 Downloading PDF for document: {clean_document_id}")
         
-        # Get PDF from main container where original files are stored
+        # Check if PDF exists first
         container_name = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
-        pdf_bytes = await storage_service.download_blob_as_bytes(
-            container_name=container_name,
-            blob_name=f"{clean_document_id}.pdf"
-        )
+        blob_name = f"{clean_document_id}.pdf"
         
-        if not pdf_bytes:
+        if not await storage_service.blob_exists(container_name, blob_name):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"PDF file not found for document {clean_document_id}"
+                detail=f"PDF not found for document {clean_document_id}"
             )
+        
+        # Get PDF from main container where original files are stored
+        pdf_bytes = await storage_service.download_blob_as_bytes(
+            container_name=container_name,
+            blob_name=blob_name
+        )
         
         logger.info(f"✅ PDF downloaded successfully: {len(pdf_bytes)} bytes")
         
@@ -399,13 +359,6 @@ async def chat_with_document(
 ):
     """
     Chat with an uploaded document using AI analysis with note suggestions.
-    
-    This endpoint:
-    1. Validates the document exists and is processed
-    2. Sends the query to the AI service
-    3. Returns AI response with optional visual highlights
-    4. Suggests creating notes for important findings
-    5. Tracks the chat in session history
     """
     
     # Validate document ID
@@ -484,7 +437,7 @@ async def chat_with_document(
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_425_TOO_EARLY,
-                        detail="Document is still being processed. Please try again in 1-2 minutes."
+                        detail="Document is still being processed. Please try again in a few seconds."
                     )
             else:
                 raise HTTPException(
@@ -920,5 +873,3 @@ async def save_chat_to_history(
         
     except Exception as e:
         logger.warning(f"Failed to save chat history: {e}")
-
-# Additional routes can be added here following the same pattern...
