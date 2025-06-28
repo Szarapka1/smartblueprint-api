@@ -1,246 +1,164 @@
-# main.py - UNSAFE TEST VERSION - ALLOW EVERYTHING
-# ⚠️ WARNING: This is for testing only! Never use in production!
+# main.py - SAFE FOR LOCAL DEVELOPMENT & TESTING
+# ⚠️ WARNING: This version is configured for local development.
+# It has open CORS policies and verbose error reporting.
+# DO NOT deploy this version to a production environment.
 
 import os
-import datetime
 import logging
 import uvicorn
-import asyncio
+import traceback
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-# App config and services
+# --- App Modules (using the same namesakes) ---
 from app.core.config import get_settings
 from app.services.storage_service import StorageService
 from app.services.pdf_service import PDFService
 from app.services.ai_service import ProfessionalBlueprintAI
 from app.services.session_service import SessionService
 
-# Routes
+# --- API Routers (using the same namesakes) ---
 from app.api.routes.blueprint_routes import blueprint_router
 from app.api.routes.document_routes import document_router
 from app.api.routes.annotation_routes import annotation_router
 from app.api.routes.note_routes import note_router
 
-# Configure logging
+# --- Application Setup ---
+
+# 1. Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-logger = logging.getLogger("SmartBlueprintAPI")
+logger = logging.getLogger("SmartBlueprintAPI-Dev")
 
-# Load settings
+# 2. Load application settings
 settings = get_settings()
 
-# Application Lifecycle
+# 3. Define the application lifecycle (with robust startup)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Simple startup/shutdown"""
+    """
+    Manages application startup and shutdown.
+    This corrected version ensures all services are initialized before serving requests.
+    """
     logger.info("="*60)
-    logger.info("🚀 SMART BLUEPRINT API - UNSAFE TEST VERSION")
-    logger.info("⚠️  WARNING: ALL SECURITY DISABLED FOR TESTING")
+    logger.info("🚀 Initializing Smart Blueprint API for LOCAL DEVELOPMENT...")
     logger.info("="*60)
-    
-    # Initialize services without any checks
-    try:
-        # Storage Service
-        app.state.storage_service = StorageService(settings)
-        logger.info("✅ Storage Service initialized")
-        
-        # AI Service
-        app.state.ai_service = ProfessionalBlueprintAI(settings)
-        logger.info("✅ AI Service initialized")
-        
-        # PDF Service
-        app.state.pdf_service = PDFService(settings)
-        logger.info("✅ PDF Service initialized")
-        
-        # Session Service
-        app.state.session_service = SessionService(settings, app.state.storage_service)
-        await app.state.session_service.start_background_cleanup()
-        logger.info("✅ Session Service initialized")
-        
-    except Exception as e:
-        logger.error(f"Service initialization error: {e}")
-        # Continue anyway for testing
-    
-    logger.info("="*60)
-    logger.info("🌐 API Ready - http://0.0.0.0:8000")
-    logger.info("📚 Docs - http://0.0.0.0:8000/docs")
-    logger.info("⚠️  CORS: ALLOWING EVERYTHING")
-    logger.info("⚠️  SECURITY: DISABLED")
-    logger.info("="*60)
-    
-    yield
-    
-    logger.info("🛑 Shutting down...")
 
-# Create FastAPI app
+    # Initialize and attach services to the application state.
+    # The app will fail to start if a critical setting (e.g., connection string) is missing.
+    storage_service = StorageService(settings)
+    session_service = SessionService(settings, storage_service)
+    
+    app.state.storage_service = storage_service
+    logger.info("✅ Storage Service initialized.")
+    
+    app.state.ai_service = ProfessionalBlueprintAI(settings)
+    logger.info("✅ AI Service initialized.")
+    
+    app.state.pdf_service = PDFService(settings)
+    logger.info("✅ PDF Service initialized.")
+    
+    app.state.session_service = session_service
+    await app.state.session_service.start_background_cleanup()
+    logger.info("✅ Session Service initialized with background cleanup task.")
+    
+    logger.info("="*60)
+    logger.info("✅ All services initialized. API is ready.")
+    logger.info(f"📚 API Docs available at http://localhost:{settings.PORT}/docs")
+    logger.info("="*60)
+
+    yield  # Application is now running
+
+    # --- Shutdown Logic ---
+    logger.info("="*60)
+    logger.info("🛑 Shutting down API...")
+    if hasattr(app.state, 'session_service') and app.state.session_service.is_running():
+        await app.state.session_service.stop_background_cleanup()
+        logger.info("✅ Session Service background task stopped.")
+    logger.info("✅ Shutdown complete.")
+
+# 4. Create the FastAPI application instance
 app = FastAPI(
-    title="Smart Blueprint API - UNSAFE TEST",
-    description="⚠️ UNSAFE TEST VERSION - ALL SECURITY DISABLED",
-    version="TEST",
-    lifespan=lifespan
+    title="Smart Blueprint API (Local Test Version)",
+    description="An API for intelligent analysis of blueprints. This version has relaxed security for local development.",
+    version="1.0.0-dev",
+    lifespan=lifespan,
+    docs_url="/docs",  # Ensure docs are always on for testing
+    redoc_url="/redoc"
 )
 
-# CORS - ALLOW EVERYTHING - MUST BE FIRST
+# 5. Configure WIDE OPEN CORS for local development
+# This allows your local frontend to connect to the local backend.
+logger.info("⚠️ CORS: Allowing ALL origins, methods, and headers for local testing.")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow ALL origins
-    allow_credentials=True,  # Allow credentials
-    allow_methods=["*"],  # Allow ALL methods
-    allow_headers=["*"],  # Allow ALL headers
-    expose_headers=["*"],  # Expose ALL headers
-    max_age=86400  # Cache for 24 hours
+    allow_origins=["*"],  # DANGEROUS IN PRODUCTION
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-logger.info("⚠️  CORS: Allowing ALL origins, methods, and headers")
-
-# Add custom middleware to ensure CORS headers on all responses
-@app.middleware("http")
-async def add_cors_headers(request: Request, call_next):
-    try:
-        response = await call_next(request)
-    except Exception as e:
-        logger.error(f"Error during request: {e}")
-        response = JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
-    
-    # Always add CORS headers
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    
-    return response
-
-# Global exception handler - always return details
+# 6. Add a VERBOSE global exception handler for easy debugging
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Return full error details for debugging"""
-    import traceback
+async def debug_exception_handler(request: Request, exc: Exception):
+    """
+    Handles any un-caught exception and returns a detailed
+    traceback in the response. ONLY FOR DEVELOPMENT.
+    """
+    logger.error(f"Unhandled exception for request {request.method} {request.url}:")
+    logger.error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     
-    response = JSONResponse(
+    return JSONResponse(
         status_code=500,
         content={
             "error": str(exc),
             "type": type(exc).__name__,
-            "traceback": traceback.format_exc(),
+            "traceback": traceback.format_exc().splitlines(),
             "path": str(request.url),
-            "method": request.method
         }
     )
-    
-    # Add CORS headers to error responses
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    
-    return response
 
-# Include all routers
+# 7. Include API routers
 app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint"])
 app.include_router(document_router, prefix="/api/v1", tags=["Documents"])
 app.include_router(annotation_router, prefix="/api/v1", tags=["Annotations"])
 app.include_router(note_router, prefix="/api/v1", tags=["Notes"])
 
-# Root endpoint
-@app.get("/")
+# 8. Define root and health check endpoints
+@app.get("/", tags=["Root"])
 async def root():
-    """Test endpoint"""
-    return {
-        "status": "running",
-        "mode": "UNSAFE_TEST",
-        "cors": "ALLOW_ALL",
-        "endpoints": {
-            "upload": "POST /api/v1/documents/upload",
-            "chat": "POST /api/v1/documents/{id}/chat",
-            "health": "GET /health"
-        }
-    }
+    """A simple root endpoint to confirm the API is running."""
+    return {"message": "Smart Blueprint API (Local Test Version) is running."}
 
-# Health check
-@app.get("/health")
-async def health():
-    """Simple health check"""
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """Provides a simple health check of the API and its services."""
     return {
         "status": "healthy",
-        "mode": "UNSAFE_TEST",
+        "mode": "local_testing",
         "services": {
-            "storage": hasattr(app.state, 'storage_service'),
-            "ai": hasattr(app.state, 'ai_service'),
-            "pdf": hasattr(app.state, 'pdf_service'),
-            "session": hasattr(app.state, 'session_service')
-        },
-        "timestamp": datetime.datetime.utcnow().isoformat()
-    }
-
-# Test CORS endpoint
-@app.options("/{full_path:path}")
-async def options_handler(request: Request, full_path: str):
-    """Handle OPTIONS requests for CORS"""
-    return JSONResponse(
-        content={"message": "OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "86400"
-        }
-    )
-
-# Debug endpoint
-@app.get("/debug")
-async def debug_info():
-    """Show all debug information"""
-    return {
-        "settings": {
-            "azure_storage": bool(settings.AZURE_STORAGE_CONNECTION_STRING),
-            "openai_key": bool(settings.OPENAI_API_KEY),
-            "environment": getattr(settings, 'ENVIRONMENT', 'unknown'),
-            "debug": getattr(settings, 'DEBUG', False)
-        },
-        "services": {
-            "storage": hasattr(app.state, 'storage_service'),
-            "ai": hasattr(app.state, 'ai_service'),
-            "pdf": hasattr(app.state, 'pdf_service'),
-            "session": hasattr(app.state, 'session_service')
-        },
-        "routes": [route.path for route in app.routes],
-        "cors": {
-            "origins": "*",
-            "methods": "*",
-            "headers": "*",
-            "credentials": True
+            "storage": "ok" if hasattr(app.state, 'storage_service') else "error",
+            "ai": "ok" if hasattr(app.state, 'ai_service') else "error",
+            "pdf": "ok" if hasattr(app.state, 'pdf_service') else "error",
+            "session": "ok" if hasattr(app.state, 'session_service') else "error",
         }
     }
 
-# Test upload endpoint
-@app.post("/test/upload")
-async def test_upload():
-    """Test endpoint to verify API is accessible"""
-    return {
-        "message": "Upload endpoint accessible",
-        "cors": "enabled",
-        "timestamp": datetime.datetime.utcnow().isoformat()
-    }
-
+# 9. Main entry point to run the server for local development
 if __name__ == "__main__":
-    logger.info("⚠️  Starting UNSAFE TEST server...")
-    logger.info("⚠️  ALL SECURITY FEATURES DISABLED")
-    logger.info("⚠️  DO NOT USE IN PRODUCTION")
+    logger.info(f"Starting Uvicorn server on http://localhost:{settings.PORT}")
+    logger.info("Auto-reload is enabled.")
     
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",  # Listen on all interfaces
-        port=8000,
-        reload=True,  # Auto-reload on changes
-        log_level="info",
-        access_log=True
+        host="0.0.0.0",
+        port=settings.PORT,
+        reload=True,
+        log_level="info"
     )
