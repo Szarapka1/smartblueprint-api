@@ -1,7 +1,8 @@
-# app/api/routes/blueprint_routes.py - TRUE ASYNC VERSION
+# app/api/routes/blueprint_routes.py - AZURE COMPATIBLE ASYNC VERSION
 
 """
-Blueprint Analysis Routes - Fixed for true asynchronous upload and processing
+Blueprint Analysis Routes - Azure App Service Compatible with Async Processing
+Uses asyncio.create_task() instead of BackgroundTasks for better Azure compatibility
 """
 
 import traceback
@@ -13,7 +14,7 @@ import re
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Union
-from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Header, status, BackgroundTasks
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Header, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
@@ -38,6 +39,9 @@ blueprint_router = APIRouter(
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+# Store active processing tasks (in production, use Redis or similar)
+processing_tasks = {}
 
 # ===== UTILITY FUNCTIONS =====
 
@@ -87,9 +91,9 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
-# ===== BACKGROUND PROCESSING FUNCTION =====
+# ===== ASYNC PROCESSING FUNCTION =====
 
-async def process_pdf_in_background(
+async def process_pdf_async(
     session_id: str,
     contents: bytes,
     clean_filename: str,
@@ -99,11 +103,11 @@ async def process_pdf_in_background(
     session_service
 ):
     """
-    Process PDF in the background after returning response to user.
-    This function runs after the HTTP response is sent.
+    Process PDF asynchronously using asyncio.create_task()
+    This is more Azure-friendly than BackgroundTasks
     """
     try:
-        logger.info(f"🔄 Starting background processing for document: {session_id}")
+        logger.info(f"🔄 Starting async processing for document: {session_id}")
         
         # Mark as processing in storage
         processing_status = {
@@ -164,10 +168,10 @@ async def process_pdf_in_background(
             except Exception as e:
                 logger.warning(f"Session update failed: {e}")
         
-        logger.info(f"✅ Background processing completed for: {session_id}")
+        logger.info(f"✅ Async processing completed for: {session_id}")
         
     except Exception as e:
-        logger.error(f"❌ Background processing failed for {session_id}: {e}")
+        logger.error(f"❌ Async processing failed for {session_id}: {e}")
         logger.error(traceback.format_exc())
         
         # Save error status
@@ -200,6 +204,10 @@ async def process_pdf_in_background(
             )
         except Exception as storage_error:
             logger.error(f"Failed to save error status: {storage_error}")
+    finally:
+        # Remove from processing tasks
+        if session_id in processing_tasks:
+            del processing_tasks[session_id]
 
 # ===== MAIN ROUTES =====
 
@@ -212,14 +220,13 @@ async def process_pdf_in_background(
 )
 async def upload_document(
     request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="PDF file to upload"),
     author: Optional[str] = Form(default="Anonymous", description="Name of the person uploading"),
     trade: Optional[str] = Form(default=None, description="Trade/discipline associated with the document")
 ):
     """
-    Upload a PDF document for processing - TRUE ASYNC VERSION
-    Returns immediately with processing status, processes in background
+    Upload a PDF document for processing - AZURE COMPATIBLE ASYNC VERSION
+    Returns immediately with processing status, processes asynchronously
     """
     
     # Validate request
@@ -339,17 +346,22 @@ async def upload_document(
                 file_size_mb=round(file_size_mb, 2)
             )
         
-        # Add background task for PDF processing
-        background_tasks.add_task(
-            process_pdf_in_background,
-            session_id=session_id,
-            contents=contents,
-            clean_filename=clean_filename,
-            author=author,
-            storage_service=storage_service,
-            pdf_service=pdf_service,
-            session_service=session_service
+        # Start async processing using asyncio.create_task()
+        # This is more Azure-friendly than BackgroundTasks
+        task = asyncio.create_task(
+            process_pdf_async(
+                session_id=session_id,
+                contents=contents,
+                clean_filename=clean_filename,
+                author=author,
+                storage_service=storage_service,
+                pdf_service=pdf_service,
+                session_service=session_service
+            )
         )
+        
+        # Store task reference (optional, for monitoring)
+        processing_tasks[session_id] = task
         
         # Return immediately with processing status
         logger.info(f"📋 Returning processing status for: {session_id}")
@@ -406,6 +418,17 @@ async def check_document_status(
                 blob_name=status_blob
             )
             status_data = json.loads(status_text)
+            
+            # Calculate estimated time remaining if still processing
+            if status_data.get('status') == 'processing' and status_data.get('started_at'):
+                try:
+                    started = datetime.fromisoformat(status_data['started_at'].rstrip('Z'))
+                    elapsed = (datetime.utcnow() - started).total_seconds()
+                    estimated_total = status_data.get('estimated_processing_time', 60)
+                    remaining = max(0, int(estimated_total - elapsed))
+                    status_data['estimated_time_remaining'] = remaining
+                except:
+                    pass
             
             return {
                 "document_id": clean_document_id,
@@ -576,7 +599,17 @@ async def chat_with_document(
         # Determine actual status
         if status_data:
             if status_data.get('status') == 'processing':
-                estimated_time = status_data.get('estimated_time_remaining', 30)
+                # Calculate estimated time
+                estimated_time = 30
+                if status_data.get('started_at'):
+                    try:
+                        started = datetime.fromisoformat(status_data['started_at'].rstrip('Z'))
+                        elapsed = (datetime.utcnow() - started).total_seconds()
+                        estimated_total = status_data.get('estimated_processing_time', 60)
+                        estimated_time = max(5, int(estimated_total - elapsed))
+                    except:
+                        pass
+                
                 raise HTTPException(
                     status_code=status.HTTP_425_TOO_EARLY,
                     detail=f"Document is still being processed. Please try again in {estimated_time} seconds."
@@ -648,23 +681,6 @@ async def chat_with_document(
                     document_id=clean_document_id,
                     user=chat_request.author
                 )
-                
-                # Update highlight session if created
-                if (ai_result.get("query_session_id") and 
-                    ai_result.get("visual_highlights") and 
-                    hasattr(session_service, 'update_highlight_session')):
-                    
-                    element_types = list(set(
-                        h.element_type for h in ai_result["visual_highlights"]
-                    ))
-                    
-                    session_service.update_highlight_session(
-                        document_id=clean_document_id,
-                        query_session_id=ai_result["query_session_id"],
-                        pages_with_highlights=ai_result.get("all_highlight_pages", {}),
-                        element_types=element_types,
-                        total_highlights=ai_result.get("total_highlights", 0)
-                    )
             except Exception as e:
                 logger.warning(f"Session update failed (non-critical): {e}")
         
@@ -866,13 +882,24 @@ async def get_document_info(request: Request, document_id: str):
                     exists=True
                 )
             elif status_data.get('status') == 'processing':
+                # Calculate estimated time
+                estimated_time = None
+                if status_data.get('started_at'):
+                    try:
+                        started = datetime.fromisoformat(status_data['started_at'].rstrip('Z'))
+                        elapsed = (datetime.utcnow() - started).total_seconds()
+                        estimated_total = status_data.get('estimated_processing_time', 60)
+                        estimated_time = max(0, int(estimated_total - elapsed))
+                    except:
+                        pass
+                
                 return DocumentInfoResponse(
                     document_id=clean_document_id,
                     status="processing",
                     message="Document is being processed",
                     exists=True,
                     metadata={
-                        "estimated_time_remaining": status_data.get('estimated_time_remaining'),
+                        "estimated_time_remaining": estimated_time,
                         "uploaded_at": status_data.get('uploaded_at')
                     }
                 )
@@ -994,7 +1021,8 @@ async def check_services(request: Request):
             "ai": check_service('ai_service'),
             "pdf": check_service('pdf_service'),
             "session": check_service('session_service')
-        }
+        },
+        "processing_tasks": len(processing_tasks)  # Show active tasks
     }
 
 # ===== HELPER FUNCTIONS =====
