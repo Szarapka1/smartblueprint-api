@@ -118,6 +118,7 @@ async def create_highlight_batch(
         all_annotations = await load_all_annotations(clean_document_id, storage_service)
         
         # Clear old highlights from previous queries by this user only
+        # FIXED: Only remove this user's old AI highlights, not other users'
         filtered_annotations = [
             ann for ann in all_annotations
             if not (ann.get("annotation_type") == "ai_highlight" and 
@@ -172,7 +173,7 @@ async def get_active_highlights(
             clean_document_id, query_session_id, storage_service
         )
         
-        # Filter to only highlights created by this user or by ai_system for this user
+        # FIXED: Filter to only highlights created by this user
         user_highlights = [
             h for h in session_highlights
             if h.get("author") == author
