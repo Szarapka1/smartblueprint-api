@@ -147,7 +147,7 @@ class StorageService:
             return data
             
         except ResourceNotFoundError:
-            logger.error(f"❌ Blob '{blob_name}' not found")
+            logger.error(f"❌ Blob '{blob_name}' not found in container '{container_name}'")
             raise FileNotFoundError(f"Blob '{blob_name}' not found in container '{container_name}'")
         except Exception as e:
             logger.error(f"❌ Failed to download blob '{blob_name}': {e}")
@@ -297,6 +297,7 @@ class StorageService:
             )
             
             # Get the first (and only) page
+            next_token = None
             async for page in page_iter:
                 async for blob in page:
                     # Apply suffix filter if needed
@@ -307,8 +308,6 @@ class StorageService:
                 # Get continuation token for next page
                 next_token = page_iter.continuation_token
                 break  # Only process one page
-            else:
-                next_token = None
             
             return {
                 "blobs": blob_names,
@@ -392,16 +391,29 @@ class StorageService:
                 try:
                     data = await self.download_blob_as_bytes(container_name, blob_name)
                     return (blob_name, data)
+                except FileNotFoundError:
+                    logger.warning(f"Blob not found: {blob_name}")
+                    return (blob_name, None)
                 except Exception as e:
                     logger.error(f"Failed to download {blob_name}: {e}")
-                    return (blob_name, None)
+                    raise  # Re-raise non-FileNotFound exceptions
         
         # Download all blobs in parallel with concurrency limit
         tasks = [download_with_semaphore(name) for name in blob_names]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Return as dict, excluding failed downloads
-        downloaded = {name: data for name, data in results if data is not None}
+        # Process results
+        downloaded = {}
+        errors = []
+        
+        for result in results:
+            if isinstance(result, Exception):
+                errors.append(str(result))
+            elif isinstance(result, tuple) and result[1] is not None:
+                downloaded[result[0]] = result[1]
+        
+        if errors:
+            logger.warning(f"Batch download had {len(errors)} errors")
         
         logger.info(f"✅ Batch downloaded {len(downloaded)}/{len(blob_names)} blobs")
         return downloaded
