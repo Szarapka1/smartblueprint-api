@@ -1,25 +1,92 @@
-# app/models/schemas.py - COMPLETE VERSION WITH ALL FEATURES
+# app/models/schemas.py - FIXED AND OPTIMIZED VERSION
 
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
+from enum import Enum
 import uuid
 
-# === ADD THIS SECTION - Missing models that might be imported elsewhere ===
+# --- Enums for type safety ---
 
-class HighlightType(str):
-    """Highlight type constants"""
+class AnnotationType(str, Enum):
+    note = "note"
+    ai_highlight = "ai_highlight"
+    user_annotation = "user_annotation"
+
+class NoteType(str, Enum):
+    general = "general"
+    question = "question"
+    issue = "issue"
+    warning = "warning"
+    coordination = "coordination"
+    suggestion = "suggestion"
+    review = "review"
+
+class Priority(str, Enum):
+    low = "low"
+    normal = "normal"
+    high = "high"
+    critical = "critical"
+
+class Status(str, Enum):
+    open = "open"
+    in_progress = "in_progress"
+    resolved = "resolved"
+    closed = "closed"
+
+class HighlightType(str, Enum):
     AREA = "area"
     LINE = "line"
     POINT = "point"
     TEXT = "text"
 
+class ConflictType(str, Enum):
+    spatial = "spatial"
+    scheduling = "scheduling"
+    system = "system"
+    access = "access"
+
+class NotificationCategory(str, Enum):
+    code_issue = "code_issue"
+    coordination = "coordination"
+    safety = "safety"
+    calculation = "calculation"
+    follow_up = "follow_up"
+
+# --- Core Models ---
+
+class GridReference(BaseModel):
+    """Grid reference on a drawing"""
+    grid_ref: str = Field(..., description="Full grid reference (e.g., W2-WA)")
+    x_grid: str = Field(..., description="X-axis grid label")
+    y_grid: Optional[str] = Field(None, description="Y-axis grid label")
+
+class DrawingGrid(BaseModel):
+    """Drawing grid system information"""
+    x_labels: List[str]
+    y_labels: List[str]
+    scale: Optional[str] = None
+
+class VisualElement(BaseModel):
+    """Visual element to highlight on drawing"""
+    element_id: str
+    element_type: str  # column, outlet, catch_basin, sprinkler_head, etc.
+    grid_location: GridReference
+    label: str
+    dimensions: Optional[str] = None
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    trade: Optional[str] = None  # Which trade this belongs to
+    page_number: int  # Which page this element is on
+    # Enhanced trade coordination
+    related_trades: Optional[List[str]] = Field(default_factory=list, description="Other trades affected")
+    coordination_notes: Optional[str] = None
+
 class VisualHighlight(BaseModel):
-    """Visual highlight on a document - this was the missing import!"""
+    """Visual highlight on a document"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    type: str  # area, line, point, text
-    coordinates: List[float]  # Format depends on type
-    page: int
+    type: str = Field(..., description="Highlight type: area, line, point, text")
+    coordinates: List[float] = Field(..., description="Format depends on type")
+    page: int = Field(..., ge=1)
     label: Optional[str] = None
     color: Optional[str] = "#FF0000"
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -28,45 +95,49 @@ class VisualHighlight(BaseModel):
     annotation_id: Optional[str] = None
     query_session_id: Optional[str] = None
 
-# === END OF ADDED SECTION ===
-
-# --- Document Chat Models ---
+# --- Request Models ---
 
 class ChatRequest(BaseModel):
     """Request for chatting with AI about a document"""
-    session_id: str = Field(..., description="Session ID for the uploaded document")
     prompt: str = Field(..., min_length=1, max_length=2000, description="User's question")
-    current_page: Optional[int] = Field(None, description="Current page being viewed")
-    author: str = Field(..., description="User making the request")
+    author: str = Field(..., min_length=1, max_length=100, description="User making the request")
+    current_page: Optional[int] = Field(None, ge=1, description="Current page being viewed")
     trade: Optional[str] = Field(None, description="User's trade (optional - for context only)")
     reference_previous: Optional[List[str]] = Field(None, description="Element types to include from previous queries")
     preserve_existing: bool = Field(False, description="Keep existing highlights when adding new ones")
-    # Optional features - anyone can use these
+    # Optional features
     show_trade_info: bool = Field(False, description="Include trade information in response")
     detect_conflicts: bool = Field(False, description="Detect potential conflicts between trades")
-    # NEW: User preferences for note suggestions
+    # User preferences for note suggestions
     auto_suggest_notes: bool = Field(True, description="AI should suggest creating notes for important findings")
     note_suggestion_threshold: str = Field("medium", description="Threshold for suggestions: low/medium/high")
+    
+    @validator('note_suggestion_threshold')
+    def validate_threshold(cls, v):
+        if v not in ["low", "medium", "high"]:
+            raise ValueError("Threshold must be low, medium, or high")
+        return v
 
-# --- NEW: Note Suggestion Models ---
+# --- Note Suggestion Models ---
 
 class NoteSuggestion(BaseModel):
     """AI-suggested note based on findings"""
     should_create_note: bool
-    confidence: float = Field(0.0, ge=0.0, le=1.0, description="AI confidence this should be noted")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="AI confidence this should be noted")
     reason: str = Field(..., description="Why AI thinks this should be noted")
-    category: str = Field(..., description="Category: code_issue, coordination, safety, calculation, follow_up")
+    category: NotificationCategory = Field(..., description="Category of the suggestion")
     
     # Suggested note properties
     suggested_text: str
-    suggested_type: str  # general, question, issue, warning, coordination
-    suggested_priority: str  # low, normal, high, critical
+    suggested_type: NoteType = Field(NoteType.general, description="Suggested note type")
+    suggested_priority: Priority = Field(Priority.normal, description="Suggested priority")
     suggested_impacts_trades: List[str] = Field(default_factory=list)
     
     # Context
     related_pages: List[int] = Field(default_factory=list)
     related_grid_refs: List[str] = Field(default_factory=list)
     related_elements: List[str] = Field(default_factory=list)
+    related_query_sessions: List[str] = Field(default_factory=list)
     source_quote: Optional[str] = Field(None, description="Relevant quote from AI response")
 
 class BatchNoteSuggestion(BaseModel):
@@ -79,152 +150,102 @@ class BatchNoteSuggestion(BaseModel):
     suggestions: List[NoteSuggestion]
     summary: str = Field(..., description="Summary of what was found")
 
-# --- Visual Highlighting Models ---
+# --- Note Models ---
 
-class GridReference(BaseModel):
-    """Grid reference on a drawing"""
-    grid_ref: str = Field(..., description="Full grid reference (e.g., W2-WA)")
-    x_grid: str = Field(..., description="X-axis grid label")
-    y_grid: Optional[str] = Field(None, description="Y-axis grid label")
-
-class VisualElement(BaseModel):
-    """Visual element to highlight on drawing"""
-    element_id: str
-    element_type: str  # column, outlet, catch_basin, sprinkler_head, etc.
-    grid_location: GridReference
-    label: str
-    dimensions: Optional[str] = None
-    confidence: float = Field(0.0, ge=0.0, le=1.0)
-    trade: Optional[str] = None  # Which trade this belongs to
-    page_number: int  # Which page this element is on
-    # NEW: Enhanced trade coordination
-    related_trades: Optional[List[str]] = Field(default_factory=list, description="Other trades affected")
-    coordination_notes: Optional[str] = None
-
-class DrawingGrid(BaseModel):
-    """Drawing grid system information"""
-    x_labels: List[str]
-    y_labels: List[str]
-    scale: Optional[str] = None
-
-class ChatResponse(BaseModel):
-    """Enhanced chat response with note suggestions"""
-    session_id: str
-    ai_response: str
-    source_pages: List[int] = Field(default_factory=list)
-    visual_highlights: Optional[List[VisualElement]] = None  # Current page highlights for this user
-    drawing_grid: Optional[DrawingGrid] = None
-    highlight_summary: Optional[Dict[str, int]] = None
-    current_page: Optional[int] = None
-    trade_conflicts: Optional[List[Dict]] = None  # For cross-trade conflicts
-    # NEW fields for multi-page highlighting
-    query_session_id: Optional[str] = None  # Groups highlights from this query (private to user)
-    all_highlight_pages: Optional[Dict[int, int]] = None  # {page_num: element_count}
-    # NEW: Trade analysis
-    trade_summary: Optional[Dict[str, Dict[str, int]]] = None  # {trade: {element_type: count}}
-    detected_conflicts: Optional[List['TradeConflict']] = None
-    
-    # NEW: Note suggestions from AI
-    note_suggestion: Optional[NoteSuggestion] = None
-    batch_suggestions: Optional[BatchNoteSuggestion] = None
-
-# --- Enhanced Note Models ---
+class NoteCreate(BaseModel):
+    """Create a document-level note"""
+    text: str = Field(..., min_length=1, max_length=10000)
+    note_type: NoteType = Field(NoteType.general, description="Type of note")
+    impacts_trades: List[str] = Field(default_factory=list, description="Trades impacted by this note")
+    priority: Priority = Field(Priority.normal, description="Priority level")
+    is_private: bool = Field(True, description="Private to author or public to all")
+    # Related elements
+    related_element_ids: Optional[List[str]] = Field(default_factory=list, description="Related visual elements")
+    related_query_sessions: Optional[List[str]] = Field(default_factory=list, description="Related highlight sessions")
+    # AI suggestion tracking
+    ai_suggested: bool = Field(False, description="Was this suggested by AI?")
+    suggestion_confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="AI confidence if suggested")
 
 class QuickNoteCreate(BaseModel):
     """Quick note creation from AI suggestion"""
-    text: str
-    note_type: str
-    priority: str
+    text: str = Field(..., min_length=1, max_length=5000)
+    note_type: NoteType = Field(NoteType.general)
+    author: str = Field(..., min_length=1, max_length=100)
+    priority: Priority = Field(Priority.normal)
     impacts_trades: List[str] = Field(default_factory=list)
     is_private: bool = Field(True)
     
     # Auto-populated from AI context
     ai_suggested: bool = Field(True)
-    suggestion_confidence: float
-    related_query_session: Optional[str] = None
+    suggestion_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    related_query_sessions: Optional[List[str]] = Field(default_factory=list)
     related_highlights: List[str] = Field(default_factory=list)
     source_pages: List[int] = Field(default_factory=list)
 
-class NoteCreate(BaseModel):
-    """Create a document-level note"""
-    text: str = Field(..., min_length=1, max_length=10000)
-    note_type: str = Field("general", description="Type: general, question, issue, warning, coordination")
-    impacts_trades: List[str] = Field(default_factory=list, description="Trades impacted by this note")
-    priority: str = Field("normal", description="Priority: low, normal, high, critical")
-    is_private: bool = Field(True, description="Private to author or public to all")
-    # NEW: Related elements
-    related_element_ids: Optional[List[str]] = Field(default_factory=list, description="Related visual elements")
-    related_query_sessions: Optional[List[str]] = Field(default_factory=list, description="Related highlight sessions")
-    # NEW: AI suggestion tracking
-    ai_suggested: bool = Field(False, description="Was this suggested by AI?")
-    suggestion_confidence: Optional[float] = Field(None, description="AI confidence if suggested")
+class NoteUpdate(BaseModel):
+    """Update a note"""
+    text: Optional[str] = Field(None, min_length=1, max_length=10000)
+    note_type: Optional[NoteType] = None
+    impacts_trades: Optional[List[str]] = None
+    priority: Optional[Priority] = None
+    status: Optional[Status] = None
+    resolution_notes: Optional[str] = Field(None, max_length=2000)
+    related_element_ids: Optional[List[str]] = None
 
 class Note(BaseModel):
     """Document-level note - private by default until published"""
     note_id: str
     document_id: str
     text: str
-    note_type: str
+    note_type: NoteType
     author: str
     author_trade: Optional[str] = None
     impacts_trades: List[str] = Field(default_factory=list)
-    priority: str = "normal"
+    priority: Priority = Priority.normal
     is_private: bool = True  # Private by default - user must explicitly publish
     timestamp: str
     edited_at: Optional[str] = None
     published_at: Optional[str] = None  # When made public
     char_count: int
-    status: str = "open"  # open, resolved, in_progress
-    # NEW: Related elements
+    status: Status = Status.open
+    # Related elements
     related_element_ids: List[str] = Field(default_factory=list)
     related_query_sessions: List[str] = Field(default_factory=list)
     resolution_notes: Optional[str] = None
     resolved_by: Optional[str] = None
     resolved_at: Optional[str] = None
-    # NEW: AI suggestion tracking
+    # AI suggestion tracking
     ai_suggested: bool = False
     suggestion_confidence: Optional[float] = None
     source_pages: List[int] = Field(default_factory=list)
 
-class NoteUpdate(BaseModel):
-    """Update a note"""
-    text: Optional[str] = None
-    note_type: Optional[str] = None
-    impacts_trades: Optional[List[str]] = None
-    priority: Optional[str] = None
-    status: Optional[str] = None
-    # NEW: Resolution tracking
-    resolution_notes: Optional[str] = None
-    related_element_ids: Optional[List[str]] = None
-
 class NoteList(BaseModel):
-    """List of notes with metadata - includes both private and published notes visible to user"""
+    """List of notes with metadata"""
     notes: List[Note]
     total_count: int
-    filter_applied: Optional[Dict[str, str]] = None
-    # NEW: Note breakdown
-    private_notes_count: Optional[int] = None  # User's private notes
-    published_notes_count: Optional[int] = None  # Public notes from all users
-    notes_by_status: Optional[Dict[str, int]] = None
-    ai_suggested_count: Optional[int] = None  # How many were AI suggested
+    filter_applied: Optional[Dict[str, Any]] = None
+    # Note breakdown
+    private_notes_count: int = 0
+    published_notes_count: int = 0
+    notes_by_status: Dict[str, int] = Field(default_factory=dict)
+    ai_suggested_count: int = 0
+
+class BatchUpdateData(BaseModel):
+    """Data for batch updates"""
+    status: Optional[Status] = None
+    priority: Optional[Priority] = None
 
 class NoteBatch(BaseModel):
     """Batch operations on notes"""
-    note_ids: List[str]
-    # NEW: Batch operations
-    operation: Optional[str] = Field("update", description="Operation: update, resolve, delete")
-    update_data: Optional[NoteUpdate] = None
-
-# --- User Preferences ---
-
-class UserPreferences(BaseModel):
-    """User preferences for AI behavior"""
-    auto_suggest_notes: bool = Field(True, description="Auto-suggest note creation")
-    suggestion_threshold: str = Field("medium", description="low/medium/high")
-    default_note_priority: str = Field("normal")
-    quick_save_enabled: bool = Field(True, description="Enable one-click save")
-    preferred_note_type: str = Field("general")
-    auto_link_highlights: bool = Field(True, description="Auto-link notes to current highlights")
+    note_ids: List[str] = Field(..., min_items=1)
+    operation: str = Field(..., description="Operation: update, resolve, delete")
+    update_data: Optional[BatchUpdateData] = None
+    
+    @validator('operation')
+    def validate_operation(cls, v):
+        if v not in ["update", "resolve", "delete"]:
+            raise ValueError("Operation must be update, resolve, or delete")
+        return v
 
 # --- Trade Coordination Models ---
 
@@ -233,60 +254,70 @@ class TradeConflict(BaseModel):
     conflict_id: str
     location: GridReference
     trades_involved: List[str]
-    conflict_type: str  # spatial, scheduling, system, access
-    severity: str  # low, medium, high, critical
+    conflict_type: ConflictType
+    severity: Priority
     description: str
     resolution_notes: Optional[str] = None
-    status: str = "unresolved"  # unresolved, in_progress, resolved
-    # NEW: Enhanced conflict tracking
+    status: Status = Status.open
+    # Enhanced conflict tracking
     detected_at: str
     detected_by_session: str
-    element_ids: List[str] = Field(default_factory=list, description="Conflicting element IDs")
-    page_numbers: List[int] = Field(default_factory=list, description="Pages with conflicts")
+    element_ids: List[str] = Field(default_factory=list)
+    page_numbers: List[int] = Field(default_factory=list)
     suggested_resolution: Optional[str] = None
     assigned_to_trade: Optional[str] = None
-    # NEW: AI suggested this be noted
     ai_suggested_note: bool = False
 
-class TradeNotification(BaseModel):
-    """Notification for trade coordination"""
-    notification_id: str
-    from_trade: str
-    to_trades: List[str]
-    note_id: Optional[str] = None
-    conflict_id: Optional[str] = None
-    message: str
-    priority: str
-    timestamp: str
-    read_by: Dict[str, bool] = Field(default_factory=dict)
-    # NEW: Enhanced notifications
-    notification_type: str = Field("general", description="Type: general, conflict, resolution, update")
-    related_elements: List[str] = Field(default_factory=list)
-    action_required: bool = Field(False)
-    expires_at: Optional[str] = None
+# Forward reference fix
+ChatResponse.update_forward_refs()
 
-# --- Annotation Models (For Visual Highlights Storage) ---
+# --- Response Models ---
 
-class Annotation(BaseModel):
+class ChatResponse(BaseModel):
+    """Enhanced chat response with note suggestions"""
+    session_id: str
+    ai_response: str
+    source_pages: List[int] = Field(default_factory=list)
+    visual_highlights: Optional[List[VisualElement]] = None
+    drawing_grid: Optional[DrawingGrid] = None
+    highlight_summary: Optional[Dict[str, int]] = None
+    current_page: Optional[int] = None
+    trade_conflicts: Optional[List[TradeConflict]] = None
+    # Multi-page highlighting
+    query_session_id: Optional[str] = None
+    all_highlight_pages: Optional[Dict[int, int]] = None
+    # Trade analysis
+    trade_summary: Optional[Dict[str, Dict[str, int]]] = None
+    detected_conflicts: Optional[List[TradeConflict]] = None
+    
+    # Note suggestions from AI
+    note_suggestion: Optional[NoteSuggestion] = None
+    batch_suggestions: Optional[BatchNoteSuggestion] = None
+
+class AnnotationBase(BaseModel):
+    """Base annotation model"""
+    page_number: int = Field(..., ge=1, description="Page number (1-indexed)")
+    element_type: str = Field(..., description="Type of element being annotated")
+    grid_reference: str = Field(..., description="Grid reference for the element")
+    x: int = Field(0, description="X coordinate on page")
+    y: int = Field(0, description="Y coordinate on page")
+    width: int = Field(100, description="Width of annotation area")
+    height: int = Field(100, description="Height of annotation area")
+    text: str = Field("", description="Annotation text or description")
+    author: str = Field(..., description="Author of the annotation")
+    annotation_type: AnnotationType = Field(AnnotationType.note, description="Type of annotation")
+    is_private: bool = Field(True, description="Whether annotation is private to author")
+    query_session_id: Optional[str] = Field(None, description="Associated query session ID")
+    expires_at: Optional[str] = Field(None, description="When the annotation expires (ISO format)")
+    assigned_trade: Optional[str] = Field(None, description="Trade responsible for this element")
+
+class Annotation(AnnotationBase):
     """Visual highlight storage - private to the user who created the query"""
-    annotation_id: str
-    document_id: str
-    page_number: int
-    element_type: str  # catch_basin, column, sprinkler_head, etc.
-    grid_reference: str  # W2-WA, B-3, etc.
-    label: Optional[str] = None  # CB-301, C-101, etc.
-    x: float = 0  # Keep for backward compatibility
-    y: float = 0  # Keep for backward compatibility
-    text: str  # Description of element
-    annotation_type: str = "ai_highlight"  # Distinguish from user annotations
-    author: str  # User who asked the question (owns these highlights)
-    is_private: bool = True  # AI highlights are private to requesting user
-    query_session_id: str  # Groups all highlights from one question
-    created_at: str
-    expires_at: Optional[str] = None  # When to auto-clear (e.g., 24 hours)
+    annotation_id: Optional[str] = Field(None, description="Unique identifier")
+    document_id: Optional[str] = Field(None, description="Document this annotation belongs to")
+    created_at: Optional[str] = Field(None, description="When annotation was created")
     confidence: float = Field(0.9, ge=0.0, le=1.0)
-    # NEW: Trade assignment
-    assigned_trade: Optional[str] = None
+    # Trade assignment
     related_trades: List[str] = Field(default_factory=list)
     coordination_required: bool = Field(False)
 
@@ -297,9 +328,8 @@ class AnnotationResponse(BaseModel):
     page_number: int
     element_type: str
     grid_reference: str
-    query_session_id: str
+    query_session_id: Optional[str] = None
     created_at: str
-    # NEW: Trade info
     assigned_trade: Optional[str] = None
 
 # --- Document Management Models ---
@@ -311,7 +341,6 @@ class DocumentUploadResponse(BaseModel):
     status: str
     message: str
     file_size_mb: float
-    # NEW: Processing summary
     pages_processed: Optional[int] = None
     grid_systems_detected: Optional[int] = None
     drawing_types_found: Optional[List[str]] = None
@@ -323,50 +352,35 @@ class DocumentInfoResponse(BaseModel):
     message: str
     exists: bool
     metadata: Optional[Dict[str, Any]] = None
-    # NEW: Public collaboration info only
-    total_published_notes: Optional[int] = None  # Count of public notes
-    active_collaborators: Optional[int] = None  # Users who have published notes
-    recent_public_activity: Optional[bool] = None  # Has recent published content
+    total_published_notes: int = 0
+    active_collaborators: int = 0
+    recent_public_activity: bool = False
+    session_info: Optional[Dict[str, Any]] = None
 
 class DocumentListResponse(BaseModel):
     """List of documents response"""
-    documents: List[Dict[str, Any]]
+    documents: List[DocumentInfoResponse]
     total_count: int
-    has_more: bool
-    # NEW: Filtering info
-    filter_applied: Optional[Dict[str, Any]] = None
 
-# --- Enhanced Response Models ---
+# --- User Preferences ---
 
-class HighlightSessionInfo(BaseModel):
-    """Information about a highlight session - private to the user who created it"""
-    query_session_id: str
-    query: str
-    created_at: str
-    expires_at: str
-    pages_with_highlights: Dict[int, int]
-    element_types: List[str]
-    total_highlights: int
-    user: str  # Owner of this highlight session
-    trade: Optional[str] = None
-    is_active: bool
-    can_merge: bool = True
-    # NEW: Notes created from this session
-    notes_created: int = 0
-    ai_suggestions_made: int = 0
-
-class TradeFilterRequest(BaseModel):
-    """Request for filtering by trade"""
-    trades: List[str]
-    include_related: bool = Field(True, description="Include elements that affect multiple trades")
+class UserPreferences(BaseModel):
+    """User preferences for AI behavior"""
+    auto_suggest_notes: bool = Field(True, description="Auto-suggest note creation")
+    note_suggestion_threshold: str = Field("medium", description="low/medium/high")
+    default_note_priority: Priority = Field(Priority.normal)
+    quick_save_enabled: bool = Field(True, description="Enable one-click save")
+    preferred_note_type: NoteType = Field(NoteType.general)
+    auto_link_highlights: bool = Field(True, description="Auto-link notes to current highlights")
+    show_trade_info: bool = Field(False)
+    detect_conflicts: bool = Field(False)
+    default_note_privacy: bool = Field(True)
     
-class ConflictResolutionRequest(BaseModel):
-    """Request to resolve a conflict"""
-    conflict_id: str
-    resolution_notes: str
-    resolved_by: str
-    resolved_by_trade: str
-    notify_trades: bool = Field(True)
+    @validator('note_suggestion_threshold')
+    def validate_threshold(cls, v):
+        if v not in ["low", "medium", "high"]:
+            raise ValueError("Threshold must be low, medium, or high")
+        return v
 
 # --- Generic Response Models ---
 
@@ -381,23 +395,15 @@ class ErrorResponse(BaseModel):
     status: str = "error"
     message: str
     details: Optional[str] = None
+    timestamp: Optional[str] = None
 
-# === Additional Models that might be referenced elsewhere ===
-
-class SessionResponse(BaseModel):
-    """Session information response"""
-    session_id: str
-    document_id: str
-    filename: str
-    created_at: datetime
-    page_count: int
-    status: str = "active"
+# --- Additional Utility Models ---
 
 class HighlightCreate(BaseModel):
     """Create a highlight request"""
-    type: str  # area, line, point, text
+    type: HighlightType
     coordinates: List[float]
-    page: int
+    page: int = Field(..., ge=1)
     label: Optional[str] = None
     color: Optional[str] = "#FF0000"
     note_content: Optional[str] = None
@@ -407,3 +413,55 @@ class HighlightResponse(BaseModel):
     highlight: VisualHighlight
     status: str = "created"
     message: str = "Highlight created successfully"
+
+class ServiceStatus(BaseModel):
+    """Service status information"""
+    service_name: str
+    status: str
+    message: Optional[str] = None
+    last_check: str
+
+class HealthCheck(BaseModel):
+    """Health check response"""
+    overall_status: str
+    timestamp: str
+    services: Dict[str, Dict[str, Any]]
+    version: str
+
+class ConfigurationStatus(BaseModel):
+    """Configuration status response"""
+    features: Dict[str, bool]
+    limits: Dict[str, int]
+    environment: Dict[str, Any]
+
+# --- Export all models ---
+__all__ = [
+    # Enums
+    "AnnotationType", "NoteType", "Priority", "Status", "HighlightType", 
+    "ConflictType", "NotificationCategory",
+    
+    # Core Models
+    "GridReference", "DrawingGrid", "VisualElement", "VisualHighlight",
+    
+    # Request Models
+    "ChatRequest", "NoteCreate", "QuickNoteCreate", "NoteUpdate", 
+    "NoteBatch", "BatchUpdateData", "HighlightCreate",
+    
+    # Response Models
+    "ChatResponse", "NoteSuggestion", "BatchNoteSuggestion", "Note", 
+    "NoteList", "DocumentUploadResponse", "DocumentInfoResponse", 
+    "DocumentListResponse", "AnnotationResponse", "HighlightResponse",
+    
+    # Annotation Models
+    "Annotation", "AnnotationBase",
+    
+    # Trade Models
+    "TradeConflict",
+    
+    # User Models
+    "UserPreferences",
+    
+    # Utility Models
+    "SuccessResponse", "ErrorResponse", "ServiceStatus", "HealthCheck", 
+    "ConfigurationStatus"
+]
