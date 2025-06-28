@@ -36,6 +36,9 @@ logger = logging.getLogger("SmartBlueprintAPI")
 # Load settings
 settings = get_settings()
 
+# Define VERSION constant
+API_VERSION = "1.0.0"
+
 # --- Application Lifecycle Management ---
 
 @asynccontextmanager
@@ -206,7 +209,7 @@ app = FastAPI(
     
     DO NOT USE IN PRODUCTION!
     """,
-    version=f"{settings.VERSION}-TEST",
+    version=f"{API_VERSION}-TEST",
     lifespan=lifespan,
     docs_url="/docs",  # Always enabled in test mode
     redoc_url="/redoc",  # Always enabled in test mode
@@ -300,7 +303,7 @@ async def root():
     return {
         "service": "Smart Blueprint API",
         "mode": "TEST/DEVELOPMENT - UNSAFE",
-        "version": settings.VERSION,
+        "version": API_VERSION,
         "status": "operational",
         "warning": "This API is running in TEST MODE with permissive settings!",
         "documentation": {
@@ -376,7 +379,7 @@ async def health_check():
         )),
         "overall_status": "healthy",
         "mode": "TEST/DEVELOPMENT",
-        "version": settings.VERSION,
+        "version": API_VERSION,
         "initialization_status": getattr(app.state, 'initialization_status', {}),
         "services": {
             "storage": check_service('storage_service'),
@@ -432,7 +435,7 @@ async def get_configuration():
         "environment": {
             "debug_mode": True,  # Always true in test mode
             "cors_origins": ["*"],  # Always permissive in test mode
-            "version": settings.VERSION,
+            "version": API_VERSION,
             "environment": settings.ENVIRONMENT,
             "host": settings.HOST,
             "port": settings.PORT
