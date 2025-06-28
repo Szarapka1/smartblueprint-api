@@ -1,10 +1,10 @@
-# app/api/routes/blueprint_routes.py - ENHANCED VERSION WITH BETTER ASYNC HANDLING
+# app/api/routes/blueprint_routes.py - COMPLETE WORKING VERSION
 
 """
 Blueprint Analysis Routes - Main API endpoints for document upload and chat
 
 This module provides the core functionality for:
-- Uploading blueprint PDFs with status tracking
+- Uploading blueprint PDFs
 - Chatting with AI about blueprints
 - Managing document status and metadata
 - Creating visual highlights and annotations
@@ -45,9 +45,6 @@ blueprint_router = APIRouter(
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
-
-# Global dictionary to track processing status
-PROCESSING_STATUS = {}
 
 # ===== UTILITY FUNCTIONS =====
 
@@ -97,19 +94,6 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
-def update_processing_status(session_id: str, status: str, details: Dict[str, Any] = None):
-    """Update the processing status for a document"""
-    PROCESSING_STATUS[session_id] = {
-        "status": status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "details": details or {}
-    }
-    logger.info(f"📊 Processing status updated for {session_id}: {status}")
-
-def get_processing_status(session_id: str) -> Dict[str, Any]:
-    """Get the current processing status for a document"""
-    return PROCESSING_STATUS.get(session_id, {"status": "unknown"})
-
 # ===== BACKGROUND PROCESSING FUNCTION =====
 
 async def process_pdf_background(
@@ -117,45 +101,20 @@ async def process_pdf_background(
     pdf_bytes: bytes,
     storage_service,
     pdf_service,
-    session_service=None,
-    clean_filename: str = "document.pdf"
+    session_service=None
 ):
     """Background task to process PDF without blocking the response"""
     try:
         logger.info(f"🔄 Background PDF processing started for {session_id}")
-        update_processing_status(session_id, "processing", {"stage": "starting"})
         
-        # Update session if available
-        if session_service:
-            try:
-                session_service.update_session_metadata(
-                    document_id=session_id,
-                    metadata={
-                        'processing_status': 'processing',
-                        'processing_started': datetime.utcnow().isoformat()
-                    }
-                )
-            except:
-                pass
-        
-        # Process the PDF with status updates
-        update_processing_status(session_id, "processing", {"stage": "pdf_extraction"})
-        
+        # Process the PDF
         await pdf_service.process_and_cache_pdf(
             session_id=session_id,
             pdf_bytes=pdf_bytes,
             storage_service=storage_service
         )
         
-        update_processing_status(session_id, "processing", {"stage": "finalizing"})
-        
         logger.info(f"✅ Background PDF processing completed for {session_id}")
-        
-        # Update final status
-        update_processing_status(session_id, "completed", {
-            "stage": "done",
-            "completed_at": datetime.utcnow().isoformat()
-        })
         
         # Try to update session with results if available
         if session_service:
@@ -179,33 +138,22 @@ async def process_pdf_background(
                             'total_pages': metadata.get('total_pages'),
                             'has_text': metadata.get('extraction_summary', {}).get('has_text', False),
                             'grid_systems_detected': metadata.get('grid_systems_detected', 0),
-                            'processing_complete': True,
-                            'processing_status': 'completed',
-                            'processing_time': metadata.get('processing_time', 0)
+                            'processing_complete': True
                         }
                     )
-                    logger.info(f"✅ Session updated with processing results for {session_id}")
             except Exception as e:
                 logger.warning(f"Failed to update session after processing: {e}")
                 
     except Exception as e:
         logger.error(f"❌ Background PDF processing failed for {session_id}: {e}")
         logger.error(traceback.format_exc())
-        
-        # Update status to failed
-        update_processing_status(session_id, "failed", {
-            "error": str(e),
-            "stage": "error"
-        })
-        
         # Store error state
         try:
             error_info = {
                 'document_id': session_id,
                 'error': str(e),
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'status': 'failed',
-                'filename': clean_filename
+                'status': 'failed'
             }
             await storage_service.upload_file(
                 container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache'),
@@ -214,11 +162,6 @@ async def process_pdf_background(
             )
         except:
             pass
-    finally:
-        # Clean up status after some time
-        await asyncio.sleep(300)  # Keep status for 5 minutes
-        if session_id in PROCESSING_STATUS:
-            del PROCESSING_STATUS[session_id]
 
 # ===== MAIN ROUTES =====
 
@@ -234,8 +177,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="PDF file to upload"),
     author: Optional[str] = Form(default="Anonymous", description="Name of the person uploading"),
-    trade: Optional[str] = Form(default=None, description="Trade/discipline associated with the document"),
-    wait_for_processing: Optional[bool] = Form(default=False, description="Wait for processing to complete")
+    trade: Optional[str] = Form(default=None, description="Trade/discipline associated with the document")
 ):
     """
     Upload a PDF document for processing.
@@ -244,10 +186,10 @@ async def upload_document(
     1. Validates the uploaded file
     2. Generates a unique session ID
     3. Saves the PDF to Azure Storage
-    4. Initiates processing of the PDF
-    5. Returns session ID (immediately or after processing based on wait_for_processing)
+    4. Initiates async processing of the PDF
+    5. Returns immediately with session ID
     
-    The PDF processing includes:
+    The PDF processing happens in the background and includes:
     - Text extraction
     - Page rendering at multiple resolutions
     - Grid detection for coordinate mapping
@@ -328,21 +270,19 @@ async def upload_document(
         
         logger.info(f"✅ PDF uploaded successfully to blob: {pdf_blob_name}")
         
-        # Initialize processing status
-        update_processing_status(session_id, "uploaded", {"stage": "pdf_stored"})
-        
         # Create session if service available
         session_created = False
         session_service = getattr(request.app.state, 'session_service', None)
         
         if session_service:
             try:
-                session_service.create_session(
-                    document_id=session_id,
-                    original_filename=clean_filename
-                )
-                session_created = True
-                logger.info("✅ Created session for document")
+                if hasattr(session_service, 'create_session'):
+                    session_service.create_session(
+                        document_id=session_id,
+                        original_filename=clean_filename
+                    )
+                    session_created = True
+                    logger.info("✅ Created session for document")
             except Exception as e:
                 logger.warning(f"Session creation failed (non-critical): {e}")
         
@@ -359,69 +299,26 @@ async def upload_document(
                 file_size_mb=round(file_size_mb, 2)
             )
         
-        # If wait_for_processing is True, process synchronously
-        if wait_for_processing:
-            logger.info("⏳ Processing PDF synchronously (wait_for_processing=True)")
-            
-            try:
-                # Process directly
-                await pdf_service.process_and_cache_pdf(
-                    session_id=session_id,
-                    pdf_bytes=contents,
-                    storage_service=storage_service
-                )
-                
-                # Load metadata
-                metadata_blob = f"{session_id}_metadata.json"
-                metadata_text = await storage_service.download_blob_as_text(
-                    container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache'),
-                    blob_name=metadata_blob
-                )
-                metadata = json.loads(metadata_text)
-                
-                return DocumentUploadResponse(
-                    document_id=session_id,
-                    filename=clean_filename,
-                    status="ready",
-                    message="Document uploaded and processed successfully.",
-                    file_size_mb=round(file_size_mb, 2),
-                    pages_processed=metadata.get('page_count'),
-                    grid_systems_detected=metadata.get('grid_systems_detected', 0),
-                    drawing_types_found=metadata.get('page_details', [])
-                )
-                
-            except Exception as e:
-                logger.error(f"Synchronous processing failed: {e}")
-                return DocumentUploadResponse(
-                    document_id=session_id,
-                    filename=clean_filename,
-                    status="error",
-                    message=f"Document uploaded but processing failed: {str(e)}",
-                    file_size_mb=round(file_size_mb, 2)
-                )
+        # Process asynchronously
+        logger.info("🔄 Starting PDF processing in background...")
         
-        else:
-            # Process asynchronously
-            logger.info("🔄 Starting PDF processing in background...")
-            
-            # Add background task
-            background_tasks.add_task(
-                process_pdf_background,
-                session_id=session_id,
-                pdf_bytes=contents,
-                storage_service=storage_service,
-                pdf_service=pdf_service,
-                session_service=session_service,
-                clean_filename=clean_filename
-            )
-            
-            return DocumentUploadResponse(
-                document_id=session_id,
-                filename=clean_filename,
-                status="processing",
-                message="Document uploaded successfully. Processing in background - use /info endpoint to check status.",
-                file_size_mb=round(file_size_mb, 2)
-            )
+        # Add background task
+        background_tasks.add_task(
+            process_pdf_background,
+            session_id=session_id,
+            pdf_bytes=contents,
+            storage_service=storage_service,
+            pdf_service=pdf_service,
+            session_service=session_service
+        )
+        
+        return DocumentUploadResponse(
+            document_id=session_id,
+            filename=clean_filename,
+            status="processing",
+            message="Document uploaded successfully. Processing in background - check back in a moment.",
+            file_size_mb=round(file_size_mb, 2)
+        )
         
     except HTTPException:
         raise
@@ -432,282 +329,6 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Upload failed: {str(e)}"
         )
-
-@blueprint_router.get(
-    "/documents/{document_id}/info",
-    response_model=DocumentInfoResponse,
-    summary="Get document information",
-    description="Get processing status and metadata for a specific document"
-)
-async def get_document_info(
-    request: Request, 
-    document_id: str,
-    include_processing_status: bool = True
-):
-    """
-    Get information about a specific document.
-    
-    Returns:
-    - Document existence status
-    - Processing status (if still processing)
-    - Basic metadata (page count, etc.)
-    - Public collaboration info (published notes count)
-    """
-    
-    # Validate document ID
-    clean_document_id = validate_document_id(document_id)
-    
-    storage_service = getattr(request.app.state, 'storage_service', None)
-    if not storage_service:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
-            detail="Storage service unavailable"
-        )
-    
-    try:
-        # Check if we have processing status
-        if include_processing_status:
-            proc_status = get_processing_status(clean_document_id)
-            if proc_status.get("status") == "processing":
-                return DocumentInfoResponse(
-                    document_id=clean_document_id,
-                    status="processing",
-                    message=f"Document is being processed. Stage: {proc_status.get('details', {}).get('stage', 'unknown')}",
-                    exists=True,
-                    processing_details=proc_status
-                )
-        
-        # Check containers
-        main_container = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
-        cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
-        
-        # Check if document exists
-        pdf_exists = await storage_service.blob_exists(
-            container_name=main_container,
-            blob_name=f"{clean_document_id}.pdf"
-        )
-        
-        context_exists = await storage_service.blob_exists(
-            container_name=cache_container,
-            blob_name=f"{clean_document_id}_context.txt"
-        )
-        
-        if not pdf_exists and not context_exists:
-            return DocumentInfoResponse(
-                document_id=clean_document_id,
-                status="not_found",
-                message="Document not found",
-                exists=False
-            )
-        
-        # Check for error state
-        error_exists = await storage_service.blob_exists(
-            container_name=cache_container,
-            blob_name=f"{clean_document_id}_error.json"
-        )
-        
-        if error_exists:
-            try:
-                error_text = await storage_service.download_blob_as_text(
-                    container_name=cache_container,
-                    blob_name=f"{clean_document_id}_error.json"
-                )
-                error_info = json.loads(error_text)
-                return DocumentInfoResponse(
-                    document_id=clean_document_id,
-                    status="error",
-                    message=f"Processing failed: {error_info.get('error', 'Unknown error')}",
-                    exists=True,
-                    error_details=error_info
-                )
-            except:
-                return DocumentInfoResponse(
-                    document_id=clean_document_id,
-                    status="error",
-                    message="Processing failed",
-                    exists=True
-                )
-        
-        # Get metadata if processed
-        metadata = None
-        if context_exists:
-            try:
-                metadata_blob = f"{clean_document_id}_metadata.json"
-                metadata_text = await storage_service.download_blob_as_text(
-                    container_name=cache_container,
-                    blob_name=metadata_blob
-                )
-                metadata = json.loads(metadata_text)
-            except:
-                pass
-        
-        # Get public collaboration info
-        published_notes = 0
-        active_collaborators = set()
-        
-        try:
-            notes_blob = f"{clean_document_id}_notes.json"
-            notes_text = await storage_service.download_blob_as_text(
-                container_name=cache_container,
-                blob_name=notes_blob
-            )
-            all_notes = json.loads(notes_text)
-            
-            for note in all_notes:
-                if not note.get('is_private', True):
-                    published_notes += 1
-                    active_collaborators.add(note.get('author'))
-                    
-        except:
-            pass
-        
-        # Get session info if available
-        session_info = None
-        session_service = getattr(request.app.state, 'session_service', None)
-        if session_service and hasattr(session_service, 'get_session_info'):
-            try:
-                session_info = session_service.get_session_info(clean_document_id)
-            except:
-                pass
-        
-        # Determine status
-        if context_exists and metadata:
-            status_value = "ready"
-            message = f"Document ready for analysis. {metadata.get('page_count', 0)} pages processed."
-        elif pdf_exists:
-            # Check processing status one more time
-            proc_status = get_processing_status(clean_document_id)
-            if proc_status.get("status") == "processing":
-                status_value = "processing"
-                message = "Document uploaded, processing in progress"
-            else:
-                status_value = "uploaded"
-                message = "Document uploaded, awaiting processing"
-        else:
-            status_value = "partial"
-            message = "Document partially processed"
-        
-        return DocumentInfoResponse(
-            document_id=clean_document_id,
-            status=status_value,
-            message=message,
-            exists=True,
-            metadata={
-                "page_count": metadata.get('page_count') if metadata else None,
-                "total_pages": metadata.get('total_pages') if metadata else None,
-                "processing_time": metadata.get('processing_time') if metadata else None,
-                "grid_systems_detected": metadata.get('grid_systems_detected', 0) if metadata else None,
-                "has_text": metadata.get('extraction_summary', {}).get('has_text', False) if metadata else None,
-                "file_size_mb": metadata.get('file_size_mb') if metadata else None,
-                "drawing_types": metadata.get('page_details', []) if metadata else None
-            },
-            total_published_notes=published_notes,
-            active_collaborators=len(active_collaborators),
-            recent_public_activity=published_notes > 0,
-            session_info=session_info
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get document info: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=f"Failed to get document info: {str(e)}"
-        )
-
-@blueprint_router.get("/documents/{document_id}/processing-status")
-async def get_processing_status_endpoint(
-    request: Request,
-    document_id: str
-):
-    """
-    Get real-time processing status for a document.
-    Useful for polling while document is being processed.
-    """
-    clean_document_id = validate_document_id(document_id)
-    
-    proc_status = get_processing_status(clean_document_id)
-    
-    if proc_status.get("status") == "unknown":
-        # Check if document is actually ready
-        storage_service = getattr(request.app.state, 'storage_service', None)
-        if storage_service:
-            cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
-            context_exists = await storage_service.blob_exists(
-                container_name=cache_container,
-                blob_name=f"{clean_document_id}_context.txt"
-            )
-            
-            if context_exists:
-                return {
-                    "document_id": clean_document_id,
-                    "status": "ready",
-                    "message": "Document is ready for use"
-                }
-    
-    return {
-        "document_id": clean_document_id,
-        "status": proc_status.get("status", "unknown"),
-        "details": proc_status.get("details", {}),
-        "timestamp": proc_status.get("timestamp")
-    }
-
-@blueprint_router.post("/documents/upload-and-wait")
-async def upload_and_wait_for_processing(
-    request: Request,
-    file: UploadFile = File(...),
-    author: Optional[str] = Form(default="Anonymous"),
-    trade: Optional[str] = Form(default=None),
-    timeout_seconds: int = Form(default=300, description="Max time to wait for processing")
-):
-    """
-    Upload a document and wait for processing to complete.
-    This is a convenience endpoint that combines upload and waiting.
-    """
-    # First upload with wait_for_processing=False to get session ID
-    upload_response = await upload_document(
-        request=request,
-        background_tasks=BackgroundTasks(),
-        file=file,
-        author=author,
-        trade=trade,
-        wait_for_processing=False
-    )
-    
-    session_id = upload_response.document_id
-    start_time = datetime.utcnow()
-    
-    # Poll for completion
-    while True:
-        # Check timeout
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
-        if elapsed > timeout_seconds:
-            return {
-                "document_id": session_id,
-                "status": "timeout",
-                "message": f"Processing did not complete within {timeout_seconds} seconds",
-                "filename": upload_response.filename
-            }
-        
-        # Check status
-        proc_status = get_processing_status(session_id)
-        
-        if proc_status.get("status") == "completed":
-            # Get full info
-            info_response = await get_document_info(request, session_id, include_processing_status=False)
-            return info_response
-        
-        elif proc_status.get("status") == "failed":
-            return {
-                "document_id": session_id,
-                "status": "error",
-                "message": "Processing failed",
-                "error": proc_status.get("details", {}).get("error")
-            }
-        
-        # Wait before next check
-        await asyncio.sleep(2)
 
 @blueprint_router.get("/documents/{document_id}/download")
 async def download_document_pdf(
@@ -829,19 +450,6 @@ async def chat_with_document(
         )
         
         if not context_exists:
-            # Check processing status first
-            proc_status = get_processing_status(clean_document_id)
-            
-            if proc_status.get("status") == "processing":
-                estimated_time = "Please try again in 30-60 seconds."
-                if proc_status.get("details", {}).get("stage") == "pdf_extraction":
-                    estimated_time = "PDF is being analyzed. Please try again in 1-2 minutes."
-                
-                raise HTTPException(
-                    status_code=status.HTTP_425_TOO_EARLY,
-                    detail=f"Document is still being processed. Stage: {proc_status.get('details', {}).get('stage', 'unknown')}. {estimated_time}"
-                )
-            
             # Check if PDF exists
             main_container = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
             pdf_exists = await storage_service.blob_exists(
@@ -876,16 +484,13 @@ async def chat_with_document(
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_425_TOO_EARLY,
-                        detail="Document processing not started or in queue. Please check status using /info endpoint."
+                        detail="Document is still being processed. Please try again in 1-2 minutes."
                     )
             else:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Document '{clean_document_id}' not found"
                 )
-        
-        # Document is ready - proceed with chat
-        logger.info(f"✅ Document is ready, proceeding with AI analysis")
         
         # Get AI response with note suggestions
         ai_result = await ai_service.get_ai_response(
@@ -976,18 +581,13 @@ async def chat_with_document(
 async def quick_create_note_from_suggestion(
     request: Request,
     document_id: str,
-    quick_note: QuickNoteCreate,
-    author: str = None
+    quick_note: QuickNoteCreate
 ):
     """
     Quick endpoint to create a note from AI suggestion with one click.
     """
     # Validate document ID
     clean_document_id = validate_document_id(document_id)
-    
-    # Use author from request body if not provided
-    if not author:
-        author = quick_note.author
     
     # Get storage service
     storage_service = getattr(request.app.state, 'storage_service', None)
@@ -1013,7 +613,7 @@ async def quick_create_note_from_suggestion(
         
         # Check note limit
         max_notes = getattr(settings, 'MAX_NOTES_PER_DOCUMENT', 500)
-        user_notes = [n for n in all_notes if n.get('author') == author]
+        user_notes = [n for n in all_notes if n.get('author') == quick_note.author]
         if len(user_notes) >= max_notes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1026,7 +626,7 @@ async def quick_create_note_from_suggestion(
             "document_id": clean_document_id,
             "text": quick_note.text,
             "note_type": quick_note.note_type,
-            "author": author,
+            "author": quick_note.author,
             "impacts_trades": quick_note.impacts_trades or [],
             "priority": quick_note.priority,
             "is_private": quick_note.is_private,
@@ -1070,6 +670,166 @@ async def quick_create_note_from_suggestion(
             detail=str(e)
         )
 
+@blueprint_router.get(
+    "/documents/{document_id}/info",
+    response_model=DocumentInfoResponse,
+    summary="Get document information",
+    description="Get processing status and metadata for a specific document"
+)
+async def get_document_info(request: Request, document_id: str):
+    """
+    Get information about a specific document.
+    
+    Returns:
+    - Document existence status
+    - Processing status
+    - Basic metadata (page count, etc.)
+    - Public collaboration info (published notes count)
+    """
+    
+    # Validate document ID
+    clean_document_id = validate_document_id(document_id)
+    
+    storage_service = getattr(request.app.state, 'storage_service', None)
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
+    
+    try:
+        # Check containers
+        main_container = getattr(settings, 'AZURE_CONTAINER_NAME', 'pdfs')
+        cache_container = getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
+        
+        # Check if document exists
+        pdf_exists = await storage_service.blob_exists(
+            container_name=main_container,
+            blob_name=f"{clean_document_id}.pdf"
+        )
+        
+        context_exists = await storage_service.blob_exists(
+            container_name=cache_container,
+            blob_name=f"{clean_document_id}_context.txt"
+        )
+        
+        if not pdf_exists and not context_exists:
+            return DocumentInfoResponse(
+                document_id=clean_document_id,
+                status="not_found",
+                message="Document not found",
+                exists=False
+            )
+        
+        # Check for error state
+        error_exists = await storage_service.blob_exists(
+            container_name=cache_container,
+            blob_name=f"{clean_document_id}_error.json"
+        )
+        
+        if error_exists:
+            try:
+                error_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_error.json"
+                )
+                error_info = json.loads(error_text)
+                return DocumentInfoResponse(
+                    document_id=clean_document_id,
+                    status="error",
+                    message=f"Processing failed: {error_info.get('error', 'Unknown error')}",
+                    exists=True
+                )
+            except:
+                return DocumentInfoResponse(
+                    document_id=clean_document_id,
+                    status="error",
+                    message="Processing failed",
+                    exists=True
+                )
+        
+        # Get metadata if processed
+        metadata = None
+        if context_exists:
+            try:
+                metadata_blob = f"{clean_document_id}_metadata.json"
+                metadata_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=metadata_blob
+                )
+                metadata = json.loads(metadata_text)
+            except:
+                pass
+        
+        # Get public collaboration info
+        published_notes = 0
+        active_collaborators = set()
+        
+        try:
+            notes_blob = f"{clean_document_id}_notes.json"
+            notes_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=notes_blob
+            )
+            all_notes = json.loads(notes_text)
+            
+            # Count only published notes
+            for note in all_notes:
+                if not note.get('is_private', True):
+                    published_notes += 1
+                    active_collaborators.add(note.get('author'))
+                    
+        except:
+            pass
+        
+        # Get session info if available
+        session_info = None
+        session_service = getattr(request.app.state, 'session_service', None)
+        if session_service and hasattr(session_service, 'get_session_info'):
+            try:
+                session_info = session_service.get_session_info(clean_document_id)
+            except:
+                pass
+        
+        # Determine status
+        if context_exists and metadata:
+            status_value = "ready"
+            message = f"Document ready for analysis. {metadata.get('page_count', 0)} pages processed."
+        elif pdf_exists:
+            status_value = "processing"
+            message = "Document uploaded, processing in progress"
+        else:
+            status_value = "partial"
+            message = "Document partially processed"
+        
+        return DocumentInfoResponse(
+            document_id=clean_document_id,
+            status=status_value,
+            message=message,
+            exists=True,
+            metadata={
+                "page_count": metadata.get('page_count') if metadata else None,
+                "total_pages": metadata.get('total_pages') if metadata else None,
+                "processing_time": metadata.get('processing_time') if metadata else None,
+                "grid_systems_detected": metadata.get('grid_systems_detected', 0) if metadata else None,
+                "has_text": metadata.get('extraction_summary', {}).get('has_text', False) if metadata else None,
+                "file_size_mb": metadata.get('file_size_mb') if metadata else None
+            },
+            total_published_notes=published_notes,
+            active_collaborators=len(active_collaborators),
+            recent_public_activity=published_notes > 0,
+            session_info=session_info
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document info: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Failed to get document info: {str(e)}"
+        )
+
 @blueprint_router.get("/health/services")
 async def check_services(request: Request):
     """
@@ -1098,10 +858,6 @@ async def check_services(request: Request):
         except Exception as e:
             return {"available": True, "status": "error", "error": str(e)}
     
-    # Check processing queue
-    processing_count = sum(1 for _, status in PROCESSING_STATUS.items() 
-                          if status.get("status") == "processing")
-    
     return {
         "timestamp": datetime.utcnow().isoformat(),
         "services": {
@@ -1109,91 +865,8 @@ async def check_services(request: Request):
             "ai": check_service('ai_service'),
             "pdf": check_service('pdf_service'),
             "session": check_service('session_service')
-        },
-        "processing_queue": {
-            "documents_processing": processing_count,
-            "total_tracked": len(PROCESSING_STATUS)
         }
     }
-
-@blueprint_router.get("/documents")
-async def list_documents(
-    request: Request,
-    limit: int = 50,
-    include_processing: bool = False
-):
-    """
-    List all documents in the system.
-    """
-    storage_service = getattr(request.app.state, 'storage_service', None)
-    if not storage_service:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
-            detail="Storage service unavailable"
-        )
-    
-    try:
-        # Get all document IDs
-        document_ids = await storage_service.list_document_ids(
-            container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache')
-        )
-        
-        # Add processing documents if requested
-        if include_processing:
-            for session_id, status in PROCESSING_STATUS.items():
-                if status.get("status") == "processing" and session_id not in document_ids:
-                    document_ids.append(session_id)
-        
-        # Limit results
-        document_ids = document_ids[:limit]
-        
-        # Get basic info for each document
-        documents = []
-        for doc_id in document_ids:
-            try:
-                # Check processing status
-                proc_status = get_processing_status(doc_id)
-                if proc_status.get("status") == "processing":
-                    documents.append({
-                        "document_id": doc_id,
-                        "status": "processing",
-                        "stage": proc_status.get("details", {}).get("stage")
-                    })
-                    continue
-                
-                # Get metadata
-                metadata_blob = f"{doc_id}_metadata.json"
-                metadata_text = await storage_service.download_blob_as_text(
-                    container_name=getattr(settings, 'AZURE_CACHE_CONTAINER_NAME', 'cache'),
-                    blob_name=metadata_blob
-                )
-                metadata = json.loads(metadata_text)
-                
-                documents.append({
-                    "document_id": doc_id,
-                    "status": "ready",
-                    "page_count": metadata.get('page_count'),
-                    "processing_time": metadata.get('processing_time'),
-                    "file_size_mb": metadata.get('file_size_mb')
-                })
-            except:
-                documents.append({
-                    "document_id": doc_id,
-                    "status": "unknown"
-                })
-        
-        return DocumentListResponse(
-            documents=documents,
-            total_count=len(documents),
-            has_more=len(document_ids) == limit
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to list documents: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=str(e)
-        )
 
 # ===== HELPER FUNCTIONS =====
 
@@ -1248,4 +921,4 @@ async def save_chat_to_history(
     except Exception as e:
         logger.warning(f"Failed to save chat history: {e}")
 
-# Additional utility routes can be added here...
+# Additional routes can be added here following the same pattern...
