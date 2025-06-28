@@ -91,12 +91,24 @@ class PDFService:
         self.gc_frequency = 3  # Garbage collect every 3 pages
         self.processing_delay = 0.5  # Delay between batches
         
+        # Grid detection patterns
+        self.grid_patterns = {
+            'column_line': re.compile(r'(?:COLUMN\s*LINE|COL\.?\s*LINE|C\.?L\.?)\s*([A-Z]+)', re.IGNORECASE),
+            'grid_line': re.compile(r'(?:GRID\s*LINE|GRID)\s*([A-Z0-9]+)', re.IGNORECASE),
+            'axis': re.compile(r'(?:AXIS|AX\.?)\s*([A-Z0-9]+)', re.IGNORECASE),
+            'row': re.compile(r'(?:ROW|R\.?)\s*([0-9]+)', re.IGNORECASE),
+            'column': re.compile(r'(?:COLUMN|COL\.?|C\.?)\s*([A-Z]+)(?:\s|$)', re.IGNORECASE),
+            'grid_ref': re.compile(r'([A-Z]+)[-/]([0-9]+)', re.IGNORECASE),
+            'coordinate': re.compile(r'(?:@|AT)\s*([A-Z]+)[-/]([0-9]+)', re.IGNORECASE)
+        }
+        
         logger.info(f"✅ PDFService initialized - SMART MEMORY MODE")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ Image quality: Storage={self.storage_dpi}, AI={self.ai_image_dpi}")
         logger.info(f"   📦 Batch size: {self.batch_size} pages")
         logger.info(f"   🎯 Full visual analysis: ENABLED")
         logger.info(f"   💾 Memory management: ACTIVE")
+        logger.info(f"   🎯 Grid detection patterns: {len(self.grid_patterns)}")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService):
@@ -422,15 +434,26 @@ class PDFService:
             # Search in first 10000 chars
             search_text = page_text[:10000] if len(page_text) > 10000 else page_text
             
+            # Look for grid patterns
             for pattern_name, pattern in self.grid_patterns.items():
                 matches = list(pattern.finditer(search_text))[:20]
                 for match in matches:
-                    if pattern_name in ['column_line', 'grid_line', 'axis']:
+                    if pattern_name == 'grid_ref':
+                        # Handle A-1 style references
+                        x_refs.add(match.group(1))
+                        y_refs.add(match.group(2))
+                    elif pattern_name == 'coordinate':
+                        # Handle @A-1 style references
+                        x_refs.add(match.group(1))
+                        y_refs.add(match.group(2))
+                    elif pattern_name in ['column_line', 'grid_line', 'axis', 'column']:
                         ref = match.group(1)
                         if ref.isalpha():
                             x_refs.add(ref)
                         elif ref.isdigit():
                             y_refs.add(ref)
+                    elif pattern_name == 'row':
+                        y_refs.add(match.group(1))
             
             if not x_refs and not y_refs:
                 return None
@@ -458,6 +481,8 @@ class PDFService:
                 for i, label in enumerate(grid.y_labels):
                     grid.y_coordinates[label] = int((i + 1) * spacing)
                 grid.cell_height = int(spacing)
+            
+            logger.info(f"🎯 Grid detected on page {page_num}: {len(grid.x_labels)}x{len(grid.y_labels)}")
             
             return grid
             
