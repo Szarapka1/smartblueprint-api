@@ -1,4 +1,4 @@
-# app/core/config.py - OPTIMIZED FOR MULTI-USER COLLABORATION
+# app/core/config.py - FIXED VERSION OF YOUR EXISTING CONFIG
 from functools import lru_cache
 from typing import List
 import os
@@ -50,7 +50,7 @@ class AppSettings:
         self.MAX_CHAT_LOGS: int = int(os.getenv("MAX_CHAT_LOGS", 1000))
         self.MAX_USER_CHAT_HISTORY: int = int(os.getenv("MAX_USER_CHAT_HISTORY", 100))
         
-        # --- NEW SETTINGS FOR NOTES AND HIGHLIGHTING ---
+        # --- NOTES AND HIGHLIGHTING SETTINGS ---
         
         # Note System Settings
         self.MAX_NOTES_PER_DOCUMENT: int = int(os.getenv("MAX_NOTES_PER_DOCUMENT", 500))
@@ -58,9 +58,10 @@ class AppSettings:
         self.MAX_TOTAL_NOTE_CHARS: int = int(os.getenv("MAX_TOTAL_NOTE_CHARS", 500000))
         self.NOTE_TYPES: List[str] = os.getenv("NOTE_TYPES", "general,question,issue,suggestion,review,coordination,warning").split(",")
         
-        # Session Service Settings
+        # Session Service Settings - FIXED: Added the missing setting
         self.MAX_SESSIONS_IN_MEMORY: int = int(os.getenv("MAX_SESSIONS_IN_MEMORY", 100))
         self.SESSION_CLEANUP_HOURS: int = int(os.getenv("SESSION_CLEANUP_HOURS", 24))
+        self.SESSION_CLEANUP_INTERVAL_SECONDS: int = int(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", 3600))  # THIS WAS MISSING
         self.MAX_SESSION_MEMORY_MB: int = int(os.getenv("MAX_SESSION_MEMORY_MB", 500))
         self.MAX_ANNOTATIONS_PER_SESSION: int = int(os.getenv("MAX_ANNOTATIONS_PER_SESSION", 1000))
         
@@ -134,6 +135,55 @@ class AppSettings:
             except:
                 return ["*"]
         return self.CORS_ORIGINS
+    
+    # NEW HELPER METHODS for compatibility with the session service
+    def get_session_settings(self) -> dict:
+        """Get session management settings in the format expected by SessionService"""
+        return {
+            "cleanup_interval": self.SESSION_CLEANUP_INTERVAL_SECONDS,
+            "max_sessions": self.MAX_SESSIONS_IN_MEMORY,
+            "max_memory_mb": self.MAX_SESSION_MEMORY_MB,
+            "expiry_hours": self.SESSION_CLEANUP_HOURS
+        }
+    
+    def get_storage_settings(self) -> dict:
+        """Get storage-specific settings"""
+        return {
+            "connection_string": self.AZURE_STORAGE_CONNECTION_STRING,
+            "main_container": self.AZURE_CONTAINER_NAME,
+            "cache_container": self.AZURE_CACHE_CONTAINER_NAME,
+            "max_concurrent_uploads": self.STORAGE_MAX_CONCURRENT_UPLOADS,
+            "max_concurrent_downloads": self.STORAGE_MAX_CONCURRENT_DOWNLOADS
+        }
+    
+    def get_ai_settings(self) -> dict:
+        """Get AI service settings"""
+        return {
+            "api_key": self.OPENAI_API_KEY,
+            "model": self.OPENAI_MODEL,
+            "max_tokens": self.OPENAI_MAX_TOKENS,
+            "temperature": self.OPENAI_TEMPERATURE,
+            "max_pages": self.AI_MAX_PAGES,
+            "batch_size": self.AI_BATCH_SIZE,
+            "image_quality": self.AI_IMAGE_QUALITY,
+            "max_image_dimension": self.AI_MAX_IMAGE_DIMENSION
+        }
+    
+    def is_feature_enabled(self, feature: str) -> bool:
+        """Check if a feature is enabled"""
+        feature_checks = {
+            "storage": bool(self.AZURE_STORAGE_CONNECTION_STRING),
+            "ai": bool(self.OPENAI_API_KEY),
+            "admin": bool(self.ADMIN_SECRET_TOKEN),
+            "notes": self.ENABLE_DOCUMENT_NOTES,
+            "highlighting": self.ENABLE_AI_HIGHLIGHTING,
+            "private_notes": self.ENABLE_PRIVATE_NOTES,
+            "note_publishing": self.ENABLE_NOTE_PUBLISHING,
+            "trade_coordination": self.ENABLE_TRADE_COORDINATION,
+            "pdf_processing": bool(self.AZURE_STORAGE_CONNECTION_STRING),
+            "sessions": True,  # Always enabled
+        }
+        return feature_checks.get(feature, False)
 
 
 @lru_cache()
