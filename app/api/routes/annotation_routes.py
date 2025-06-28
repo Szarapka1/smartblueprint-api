@@ -73,7 +73,7 @@ async def clear_expired_highlights(annotations: List[dict]) -> List[dict]:
         # Skip if it has an expiry time that's passed
         if ann.get("expires_at"):
             try:
-                expires = datetime.fromisoformat(ann["expires_at"].replace('Z', '+00:00'))
+                expires = datetime.fromisoformat(ann["expires_at"].replace('Z', ''))
                 if expires < current_time:
                     continue
             except:
@@ -111,15 +111,18 @@ async def create_highlight_batch(
         # Generate query session ID if not provided
         query_session_id = highlights[0].query_session_id if highlights else str(uuid.uuid4())
         
+        # Get author from first highlight
+        author = highlights[0].author if highlights else "ai_system"
+        
         # Load existing annotations
         all_annotations = await load_all_annotations(clean_document_id, storage_service)
         
-        # Clear old highlights from previous queries by this user
-        # Keep only non-AI highlights and highlights from other query sessions
+        # Clear old highlights from previous queries by this user only
         filtered_annotations = [
             ann for ann in all_annotations
-            if ann.get("annotation_type") != "ai_highlight" or 
-               ann.get("query_session_id") != query_session_id
+            if not (ann.get("annotation_type") == "ai_highlight" and 
+                    ann.get("author") == author and
+                    ann.get("query_session_id") != query_session_id)
         ]
         
         # Add new highlights
@@ -127,7 +130,7 @@ async def create_highlight_batch(
         for highlight in highlights:
             new_annotation = highlight.dict()
             new_annotation["annotation_id"] = str(uuid.uuid4())[:8]
-            new_annotation["created_at"] = datetime.utcnow().isoformat() + "Z"
+            new_annotation["created_at"] = datetime.utcnow().isoformat()
             new_annotation["document_id"] = clean_document_id
             new_annotation["query_session_id"] = query_session_id
             
@@ -169,10 +172,10 @@ async def get_active_highlights(
             clean_document_id, query_session_id, storage_service
         )
         
-        # Filter to only highlights created by this user
+        # Filter to only highlights created by this user or by ai_system for this user
         user_highlights = [
             h for h in session_highlights
-            if h.get("author") == author or h.get("author") == "ai_system"
+            if h.get("author") == author
         ]
         
         # Filter by page if requested
@@ -331,12 +334,12 @@ async def create_annotation(
         new_annotation = annotation.dict()
         new_annotation["annotation_id"] = str(uuid.uuid4())[:8]
         new_annotation["document_id"] = clean_document_id
-        new_annotation["created_at"] = datetime.utcnow().isoformat() + "Z"
+        new_annotation["created_at"] = datetime.utcnow().isoformat()
         
         # If it's an AI highlight and no expiry set, expire after 24 hours
         if annotation.annotation_type == "ai_highlight" and not annotation.expires_at:
             expiry = datetime.utcnow() + timedelta(hours=24)
-            new_annotation["expires_at"] = expiry.isoformat() + "Z"
+            new_annotation["expires_at"] = expiry.isoformat()
         
         # Add to annotations
         all_annotations.append(new_annotation)
