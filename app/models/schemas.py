@@ -268,9 +268,6 @@ class TradeConflict(BaseModel):
     assigned_to_trade: Optional[str] = None
     ai_suggested_note: bool = False
 
-# Forward reference fix
-ChatResponse.update_forward_refs()
-
 # --- Response Models ---
 
 class ChatResponse(BaseModel):
@@ -465,3 +462,6 @@ __all__ = [
     "SuccessResponse", "ErrorResponse", "ServiceStatus", "HealthCheck", 
     "ConfigurationStatus"
 ]
+
+# Fix forward references after all models are defined
+ChatResponse.update_forward_refs()
