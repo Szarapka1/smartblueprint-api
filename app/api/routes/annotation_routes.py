@@ -12,7 +12,7 @@ import logging
 from app.core.config import get_settings
 from app.models.schemas import Annotation, AnnotationResponse
 
-@annotation_router = APIRouter()
+annotation_router = APIRouter()  # FIXED: Removed @ symbol
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
