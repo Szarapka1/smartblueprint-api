@@ -1527,222 +1527,219 @@ Remember to think holistically about the building systems and provide insights t
             ]
             
             if not page_highlights:
-
-
-
-               return None
-           
-           # Load page image
-           page_blob = f"{document_id}_page_{page_num}.png"
-           page_bytes = await storage_service.download_blob_as_bytes(
-               container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-               blob_name=page_blob
-           )
-           
-           # Draw highlights
-           highlighted_bytes = await self._draw_highlights(
-               page_bytes, page_highlights
-           )
-           
-           # Return as data URL
-           highlighted_b64 = base64.b64encode(highlighted_bytes).decode('utf-8')
-           return f"data:image/png;base64,{highlighted_b64}"
-           
-       except Exception as e:
-           logger.error(f"Failed to generate highlighted page: {e}")
-           return None
-   
-   async def _draw_highlights(
-       self,
-       image_bytes: bytes,
-       highlights: List[Dict]
-   ) -> bytes:
-       """Draw highlights on image using executor to avoid blocking"""
-       def draw():
-           # Open image
-           img = Image.open(io.BytesIO(image_bytes))
-           
-           # Convert to RGBA for transparency
-           if img.mode != 'RGBA':
-               img = img.convert('RGBA')
-           
-           # Create overlay
-           overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
-           draw = ImageDraw.Draw(overlay)
-           
-           # Try to load font
-           try:
-               font = ImageFont.truetype("arial.ttf", self.label_font_size)
-           except:
-               font = ImageFont.load_default()
-           
-           # Draw each highlight
-           for highlight in highlights:
-               x = highlight.get('x', 100)
-               y = highlight.get('y', 100)
-               width = highlight.get('width', 100)
-               height = highlight.get('height', 100)
-               
-               # Draw rectangle
-               draw.rectangle(
-                   [x, y, x + width, y + height],
-                   fill=self.highlight_color,
-                   outline=self.highlight_border,
-                   width=self.highlight_border_width
-               )
-               
-               # Add label with trade info
-               label = highlight.get('label', highlight['element_type'])
-               if highlight.get('assigned_trade'):
-                   label += f" ({highlight['assigned_trade']})"
-               
-               # Draw label background
-               bbox = draw.textbbox((x, y - 20), label, font=font)
-               draw.rectangle(
-                   [bbox[0] - 2, bbox[1] - 2, bbox[2] + 2, bbox[3] + 2],
-                   fill=(255, 255, 255, 200)
-               )
-               
-               # Draw label text
-               draw.text(
-                   (x, y - 20),
-                   label,
-                   fill=(255, 0, 0),
-                   font=font
-               )
-           
-           # Composite overlay onto image
-           img = Image.alpha_composite(img, overlay)
-           
-           # Convert to RGB for saving
-           final = Image.new('RGB', img.size, (255, 255, 255))
-           final.paste(img, mask=img.split()[3])
-           
-           # Save
-           output = io.BytesIO()
-           final.save(output, format='PNG', optimize=True)
-           return output.getvalue()
-       
-       # Run in executor to avoid blocking event loop
-       loop = asyncio.get_event_loop()
-       return await loop.run_in_executor(self.executor, draw)
-   
-   async def cleanup_expired_highlights(self, storage_service: StorageService) -> int:
-       """Remove expired highlights from all documents"""
-       cleaned_count = 0
-       
-       try:
-           # List all annotation files
-           annotation_files = await storage_service.list_blobs(
-               container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-               suffix="_annotations.json"
-           )
-           
-           current_time = datetime.utcnow()
-           
-           for ann_file in annotation_files:
-               document_id = ann_file.replace('_annotations.json', '')
-               
-               # Load annotations
-               annotations_text = await storage_service.download_blob_as_text(
-                   container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                   blob_name=ann_file
-               )
-               
-               annotations = json.loads(annotations_text)
-               active_annotations = []
-               
-               # Filter out expired
-               for ann in annotations:
-                   if ann.get('annotation_type') == 'ai_highlight' and ann.get('expires_at'):
-                       try:
-                           expires = datetime.fromisoformat(ann['expires_at'].replace('Z', '+00:00'))
-                           if expires < current_time:
-                               cleaned_count += 1
-                               continue
-                       except:
-                           pass
-                   
-                   active_annotations.append(ann)
-               
-               # Save if changed
-               if len(active_annotations) < len(annotations):
-                   await storage_service.upload_file(
-                       container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                       blob_name=ann_file,
-                       data=json.dumps(active_annotations, indent=2).encode('utf-8')
-                   )
-           
-           logger.info(f"Cleaned {cleaned_count} expired highlights")
-           
-       except Exception as e:
-           logger.error(f"Cleanup error: {e}")
-       
-       return cleaned_count
-   
-   def get_professional_capabilities(self) -> Dict[str, List[str]]:
-       """Get service capabilities"""
-       return {
-           "building_codes": [
-               "2018 BCBC (British Columbia Building Code)",
-               "NBC (National Building Code of Canada)",
-               "CSA Standards",
-               "NFPA Standards"
-           ],
-           "engineering_disciplines": [
-               "Structural Engineering",
-               "MEP Coordination",
-               "Fire Protection Systems",
-               "Electrical Distribution",
-               "HVAC Design",
-               "Plumbing Systems"
-           ],
-           "features": [
-               "Multi-page analysis",
-               "Grid-based element detection",
-               "On-demand highlight generation",
-               "Automatic highlight expiration",
-               "Reference previous highlights",
-               "Trade-specific filtering",
-               "Cross-trade conflict detection",
-               "No storage of highlighted images",
-               "AI-powered note suggestions",
-               "Smart page loading based on query type",
-               "Progressive result streaming"
-           ],
-           "note_suggestion_capabilities": [
-               "Automatic detection of missing information",
-               "Code compliance issue identification",
-               "Coordination conflict detection",
-               "Safety concern flagging",
-               "Important calculation tracking",
-               "Customizable suggestion thresholds",
-               "Trade impact analysis"
-           ],
-           "optimization": [
-               f"Max {self.max_pages_to_load} pages per analysis",
-               f"Batch processing ({self.batch_size} pages)",
-               f"Image compression ({self.image_quality}% quality)",
-               f"LRU grid cache ({self.grid_cache_size} documents, {self.max_grid_data_size/1024/1024:.1f}MB max each)",
-               f"Highlight expiration ({self.highlight_cache_ttl_hours}h)",
-               "Smart query classification",
-               "Async image operations"
-           ]
-       }
-   
-   async def __aenter__(self):
-       return self
-   
-   async def __aexit__(self, exc_type, exc_val, exc_tb):
-       """Proper cleanup of executor and resources"""
-       if hasattr(self, 'executor'):
-           self.executor.shutdown(wait=True)
-           logger.info("✅ AI service executor shut down")
-       
-       # Clear grid cache to free memory
-       self.grid_cache.clear()
-       self.grid_cache_sizes.clear()
-       logger.info("✅ Grid cache cleared")
+                return None
+            
+            # Load page image
+            page_blob = f"{document_id}_page_{page_num}.png"
+            page_bytes = await storage_service.download_blob_as_bytes(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=page_blob
+            )
+            
+            # Draw highlights
+            highlighted_bytes = await self._draw_highlights(
+                page_bytes, page_highlights
+            )
+            
+            # Return as data URL
+            highlighted_b64 = base64.b64encode(highlighted_bytes).decode('utf-8')
+            return f"data:image/png;base64,{highlighted_b64}"
+            
+        except Exception as e:
+            logger.error(f"Failed to generate highlighted page: {e}")
+            return None
+    
+    async def _draw_highlights(
+        self,
+        image_bytes: bytes,
+        highlights: List[Dict]
+    ) -> bytes:
+        """Draw highlights on image using executor to avoid blocking"""
+        def draw():
+            # Open image
+            img = Image.open(io.BytesIO(image_bytes))
+            
+            # Convert to RGBA for transparency
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            
+            # Create overlay
+            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            
+            # Try to load font
+            try:
+                font = ImageFont.truetype("arial.ttf", self.label_font_size)
+            except:
+                font = ImageFont.load_default()
+            
+            # Draw each highlight
+            for highlight in highlights:
+                x = highlight.get('x', 100)
+                y = highlight.get('y', 100)
+                width = highlight.get('width', 100)
+                height = highlight.get('height', 100)
+                
+                # Draw rectangle
+                draw.rectangle(
+                    [x, y, x + width, y + height],
+                    fill=self.highlight_color,
+                    outline=self.highlight_border,
+                    width=self.highlight_border_width
+                )
+                
+                # Add label with trade info
+                label = highlight.get('label', highlight['element_type'])
+                if highlight.get('assigned_trade'):
+                    label += f" ({highlight['assigned_trade']})"
+                
+                # Draw label background
+                bbox = draw.textbbox((x, y - 20), label, font=font)
+                draw.rectangle(
+                    [bbox[0] - 2, bbox[1] - 2, bbox[2] + 2, bbox[3] + 2],
+                    fill=(255, 255, 255, 200)
+                )
+                
+                # Draw label text
+                draw.text(
+                    (x, y - 20),
+                    label,
+                    fill=(255, 0, 0),
+                    font=font
+                )
+            
+            # Composite overlay onto image
+            img = Image.alpha_composite(img, overlay)
+            
+            # Convert to RGB for saving
+            final = Image.new('RGB', img.size, (255, 255, 255))
+            final.paste(img, mask=img.split()[3])
+            
+            # Save
+            output = io.BytesIO()
+            final.save(output, format='PNG', optimize=True)
+            return output.getvalue()
+        
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, draw)
+    
+    async def cleanup_expired_highlights(self, storage_service: StorageService) -> int:
+        """Remove expired highlights from all documents"""
+        cleaned_count = 0
+        
+        try:
+            # List all annotation files
+            annotation_files = await storage_service.list_blobs(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                suffix="_annotations.json"
+            )
+            
+            current_time = datetime.utcnow()
+            
+            for ann_file in annotation_files:
+                document_id = ann_file.replace('_annotations.json', '')
+                
+                # Load annotations
+                annotations_text = await storage_service.download_blob_as_text(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=ann_file
+                )
+                
+                annotations = json.loads(annotations_text)
+                active_annotations = []
+                
+                # Filter out expired
+                for ann in annotations:
+                    if ann.get('annotation_type') == 'ai_highlight' and ann.get('expires_at'):
+                        try:
+                            expires = datetime.fromisoformat(ann['expires_at'].replace('Z', '+00:00'))
+                            if expires < current_time:
+                                cleaned_count += 1
+                                continue
+                        except:
+                            pass
+                    
+                    active_annotations.append(ann)
+                
+                # Save if changed
+                if len(active_annotations) < len(annotations):
+                    await storage_service.upload_file(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=ann_file,
+                        data=json.dumps(active_annotations, indent=2).encode('utf-8')
+                    )
+            
+            logger.info(f"Cleaned {cleaned_count} expired highlights")
+            
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+        
+        return cleaned_count
+    
+    def get_professional_capabilities(self) -> Dict[str, List[str]]:
+        """Get service capabilities"""
+        return {
+            "building_codes": [
+                "2018 BCBC (British Columbia Building Code)",
+                "NBC (National Building Code of Canada)",
+                "CSA Standards",
+                "NFPA Standards"
+            ],
+            "engineering_disciplines": [
+                "Structural Engineering",
+                "MEP Coordination",
+                "Fire Protection Systems",
+                "Electrical Distribution",
+                "HVAC Design",
+                "Plumbing Systems"
+            ],
+            "features": [
+                "Multi-page analysis",
+                "Grid-based element detection",
+                "On-demand highlight generation",
+                "Automatic highlight expiration",
+                "Reference previous highlights",
+                "Trade-specific filtering",
+                "Cross-trade conflict detection",
+                "No storage of highlighted images",
+                "AI-powered note suggestions",
+                "Smart page loading based on query type",
+                "Progressive result streaming"
+            ],
+            "note_suggestion_capabilities": [
+                "Automatic detection of missing information",
+                "Code compliance issue identification",
+                "Coordination conflict detection",
+                "Safety concern flagging",
+                "Important calculation tracking",
+                "Customizable suggestion thresholds",
+                "Trade impact analysis"
+            ],
+            "optimization": [
+                f"Max {self.max_pages_to_load} pages per analysis",
+                f"Batch processing ({self.batch_size} pages)",
+                f"Image compression ({self.image_quality}% quality)",
+                f"LRU grid cache ({self.grid_cache_size} documents, {self.max_grid_data_size/1024/1024:.1f}MB max each)",
+                f"Highlight expiration ({self.highlight_cache_ttl_hours}h)",
+                "Smart query classification",
+                "Async image operations"
+            ]
+        }
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Proper cleanup of executor and resources"""
+        if hasattr(self, 'executor'):
+            self.executor.shutdown(wait=True)
+            logger.info("✅ AI service executor shut down")
+        
+        # Clear grid cache to free memory
+        self.grid_cache.clear()
+        self.grid_cache_sizes.clear()
+        logger.info("✅ Grid cache cleared")
 
 
 # Export aliases for compatibility
