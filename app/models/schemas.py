@@ -53,6 +53,17 @@ class NotificationCategory(str, Enum):
     calculation = "calculation"
     follow_up = "follow_up"
 
+class QuestionType(Enum):
+    """Types of questions users can ask about blueprints"""
+    COUNT = ("count", "How many X are there?")
+    LOCATION = ("location", "Where are the X located?")
+    IDENTIFY = ("identify", "What is this? What type?")
+    SPECIFICATION = ("specification", "What are the specs/dimensions?")
+    COMPLIANCE = ("compliance", "Does this meet code?")
+    DETAILED = ("detailed", "Detailed technical analysis")
+    ESTIMATE = ("estimate", "Estimate cost/materials/time")
+    GENERAL = ("general", "General or open-ended question")
+
 # --- Core Models ---
 
 class GridReference(BaseModel):
@@ -95,6 +106,94 @@ class VisualHighlight(BaseModel):
     annotation_id: Optional[str] = None
     query_session_id: Optional[str] = None
 
+# --- Vision Intelligence Models ---
+
+class ElementGeometry(BaseModel):
+    """Geometry information for a detected element"""
+    element_type: str
+    geometry_type: str
+    center_point: Dict[str, float]
+    boundary_points: List[Dict[str, float]] = Field(default_factory=list)
+    dimensions: Dict[str, float] = Field(default_factory=dict)
+    orientation: float = 0.0
+    special_features: Dict[str, Any] = Field(default_factory=dict)
+
+class VisualIntelligenceResult(BaseModel):
+    """Result from visual intelligence analysis"""
+    element_type: str
+    count: int
+    locations: List[Dict[str, Any]] = Field(default_factory=list)
+    confidence: float
+    visual_evidence: List[str] = Field(default_factory=list)
+    pattern_matches: List[str] = Field(default_factory=list)
+    grid_references: List[str] = Field(default_factory=list)
+    verification_notes: List[str] = Field(default_factory=list)
+    page_number: int
+    analysis_metadata: Dict[str, Any] = Field(default_factory=dict)
+    element_geometries: List[ElementGeometry] = Field(default_factory=list)
+    semantic_highlights: List['SemanticHighlight'] = Field(default_factory=list)
+
+class SemanticHighlight(BaseModel):
+    """Semantic highlight for AI-detected elements"""
+    element_id: str = ""
+    element_type: str
+    geometry_type: str
+    path_points: List[Dict[str, float]] = Field(default_factory=list)
+    path_type: str = "polygon"  # polygon, polyline, composite
+    visual_description: str = ""
+    confidence: float = Field(0.9, ge=0.0, le=1.0)
+    page: int
+    stroke_color: str = "#FFD700"
+    stroke_width: float = 3.0
+    fill_opacity: float = 0.2
+
+# FIXED: These are the correct models for validation_system.py
+class ValidationResult(BaseModel):
+    """Result from a single validation pass"""
+    pass_number: int
+    methodology: str
+    findings: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    trust_score: float = Field(0.0, ge=0.0, le=1.0)
+    discrepancies: List[str] = Field(default_factory=list)
+    cross_references: List[str] = Field(default_factory=list)
+    pattern_matches_verified: bool = False
+
+class TrustMetrics(BaseModel):
+    """Trust metrics for validation results"""
+    visual_intelligence_score: float = Field(0.0, ge=0.0, le=1.0)
+    perfect_accuracy_achieved: bool = False
+    reliability_score: float = Field(0.0, ge=0.0, le=1.0)
+    confidence_basis: str = ""
+    validation_consensus: bool = False
+    accuracy_sources: List[str] = Field(default_factory=list)
+    uncertainty_factors: List[str] = Field(default_factory=list)
+    source_quality_scores: Dict[str, float] = Field(default_factory=dict)
+
+# Legacy validation models (renamed to avoid conflicts)
+class LegacyValidationResult(BaseModel):
+    """Legacy validation result - kept for compatibility"""
+    is_valid: bool
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    trust_metrics: 'LegacyTrustMetrics'
+    validation_messages: List[str] = Field(default_factory=list)
+    element_count: int = 0
+    validated_elements: List[Dict[str, Any]] = Field(default_factory=list)
+    discrepancies: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+    validation_timestamp: datetime = Field(default_factory=datetime.utcnow)
+    validation_method: str = "multi_phase_validation"
+
+class LegacyTrustMetrics(BaseModel):
+    """Legacy trust metrics - kept for compatibility"""
+    visual_confidence: float = Field(0.0, ge=0.0, le=1.0)
+    ocr_confidence: float = Field(0.0, ge=0.0, le=1.0)
+    context_confidence: float = Field(0.0, ge=0.0, le=1.0)
+    pattern_match_score: float = Field(0.0, ge=0.0, le=1.0)
+    cross_reference_score: float = Field(0.0, ge=0.0, le=1.0)
+    overall_trust: float = Field(0.0, ge=0.0, le=1.0)
+    confidence_factors: Dict[str, float] = Field(default_factory=dict)
+
 # --- Request Models ---
 
 class ChatRequest(BaseModel):
@@ -122,23 +221,16 @@ class ChatRequest(BaseModel):
 
 class NoteSuggestion(BaseModel):
     """AI-suggested note based on findings"""
-    should_create_note: bool
-    confidence: float = Field(..., ge=0.0, le=1.0, description="AI confidence this should be noted")
-    reason: str = Field(..., description="Why AI thinks this should be noted")
-    category: NotificationCategory = Field(..., description="Category of the suggestion")
-    
-    # Suggested note properties
-    suggested_text: str
-    suggested_type: NoteType = Field(NoteType.general, description="Suggested note type")
-    suggested_priority: Priority = Field(Priority.normal, description="Suggested priority")
-    suggested_impacts_trades: List[str] = Field(default_factory=list)
-    
-    # Context
-    related_pages: List[int] = Field(default_factory=list)
-    related_grid_refs: List[str] = Field(default_factory=list)
-    related_elements: List[str] = Field(default_factory=list)
-    related_query_sessions: List[str] = Field(default_factory=list)
-    source_quote: Optional[str] = Field(None, description="Relevant quote from AI response")
+    id: str = Field(default_factory=lambda: f"note_{uuid.uuid4().hex[:8]}")
+    element_id: str
+    title: str
+    content: str
+    element_type: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(0.9, ge=0.0, le=1.0)
+    author: str
+    timestamp: str
+    tags: List[str] = Field(default_factory=list)
 
 class BatchNoteSuggestion(BaseModel):
     """Multiple note suggestions from comprehensive analysis"""
@@ -435,10 +527,17 @@ class ConfigurationStatus(BaseModel):
 __all__ = [
     # Enums
     "AnnotationType", "NoteType", "Priority", "Status", "HighlightType", 
-    "ConflictType", "NotificationCategory",
+    "ConflictType", "NotificationCategory", "QuestionType",
     
     # Core Models
     "GridReference", "DrawingGrid", "VisualElement", "VisualHighlight",
+    
+    # Vision Intelligence Models
+    "ElementGeometry", "VisualIntelligenceResult", "SemanticHighlight",
+    "TrustMetrics", "ValidationResult",
+    
+    # Legacy Models (kept for compatibility)
+    "LegacyTrustMetrics", "LegacyValidationResult",
     
     # Request Models
     "ChatRequest", "NoteCreate", "QuickNoteCreate", "NoteUpdate", 
@@ -465,3 +564,5 @@ __all__ = [
 
 # Fix forward references after all models are defined
 ChatResponse.update_forward_refs()
+VisualIntelligenceResult.update_forward_refs()
+LegacyValidationResult.update_forward_refs()
