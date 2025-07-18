@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 class VisualIntelligenceFirst:
     """Visual Intelligence First Construction AI - Core Orchestrator"""
     
-def __init__(self, settings):
+    def __init__(self, settings):
         self.settings = settings
         
         # Initialize all modules
