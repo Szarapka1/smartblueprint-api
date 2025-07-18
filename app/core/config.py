@@ -68,23 +68,28 @@ class AppSettings:
         self.PDF_AI_DPI: int = int(os.getenv("PDF_AI_DPI", 100))
         self.PDF_THUMBNAIL_DPI: int = int(os.getenv("PDF_THUMBNAIL_DPI", 72))
         self.PDF_MAX_PAGES: int = int(os.getenv("PDF_MAX_PAGES", 200))  # Increased from 100
-        self.PROCESSING_BATCH_SIZE: int = int(os.getenv("PROCESSING_BATCH_SIZE", 10))  # Increased from 5
+        self.PROCESSING_BATCH_SIZE: int = int(os.getenv("PROCESSING_BATCH_SIZE", 25))  # Updated: Increased from 10
         self.PDF_PNG_COMPRESSION: int = int(os.getenv("PDF_PNG_COMPRESSION", 6))
         self.PDF_JPEG_QUALITY: int = int(os.getenv("PDF_JPEG_QUALITY", 85))
         
         # === CACHE AND MEMORY LIMITS ===
         self.MAX_MEMORY_CACHE_SIZE: int = int(os.getenv("MAX_MEMORY_CACHE_SIZE", 100))
-        self.MAX_CACHE_SIZE_MB: int = int(os.getenv("MAX_CACHE_SIZE_MB", 1000))
+        self.MAX_CACHE_SIZE_MB: int = int(os.getenv("MAX_CACHE_SIZE_MB", 10000))  # Updated: 10GB (was 1000)
         self.CACHE_DIR: str = os.getenv("CACHE_DIR", "/tmp/blueprint_cache")
         self.CACHE_DIR_PATH: Path = Path(self.CACHE_DIR)
         self.ENABLE_DISK_CACHE: bool = os.getenv("ENABLE_DISK_CACHE", "true").lower() == "true"
         
-        # Cache TTL Settings
-        self.CACHE_TTL_SECONDS: int = int(os.getenv("CACHE_TTL_SECONDS", 7200))  # 2 hours
-        self.METADATA_CACHE_TTL: int = int(os.getenv("METADATA_CACHE_TTL", 3600))  # 1 hour
-        self.IMAGE_CACHE_TTL: int = int(os.getenv("IMAGE_CACHE_TTL", 7200))  # 2 hours
-        self.ANALYSIS_CACHE_TTL: int = int(os.getenv("ANALYSIS_CACHE_TTL", 14400))  # 4 hours
-        self.THUMBNAIL_CACHE_TTL: int = int(os.getenv("THUMBNAIL_CACHE_TTL", 10800))  # 3 hours
+        # Cache TTL Settings - Updated for better performance with large documents
+        self.CACHE_TTL_SECONDS: int = int(os.getenv("CACHE_TTL_SECONDS", 21600))  # Updated: 6 hours (was 7200)
+        self.METADATA_CACHE_TTL: int = int(os.getenv("METADATA_CACHE_TTL", 14400))  # Updated: 4 hours (was 3600)
+        self.IMAGE_CACHE_TTL: int = int(os.getenv("IMAGE_CACHE_TTL", 21600))  # Updated: 6 hours (was 7200)
+        self.ANALYSIS_CACHE_TTL: int = int(os.getenv("ANALYSIS_CACHE_TTL", 28800))  # Updated: 8 hours (was 14400)
+        self.THUMBNAIL_CACHE_TTL: int = int(os.getenv("THUMBNAIL_CACHE_TTL", 28800))  # Updated: 8 hours (was 10800)
+        
+        # Memory Cache Limits - Updated for large documents
+        self.MAX_MEMORY_ITEMS: int = int(os.getenv("MAX_MEMORY_ITEMS", 5000))  # Updated from enhanced_cache.py
+        self.MAX_THUMBNAIL_ITEMS: int = int(os.getenv("MAX_THUMBNAIL_ITEMS", 1500))  # Updated from enhanced_cache.py
+        self.MAX_MEMORY_ITEM_SIZE_MB: int = int(os.getenv("MAX_MEMORY_ITEM_SIZE_MB", 50))  # Updated from enhanced_cache.py
         
         # === SECURITY AND ADMIN ===
         self.ADMIN_SECRET_TOKEN: str = os.getenv("ADMIN_SECRET_TOKEN", "blueprintreader789")
@@ -116,20 +121,20 @@ class AppSettings:
         
         # === AI VISUAL HIGHLIGHTING SETTINGS ===
         self.AI_MAX_PAGES: int = int(os.getenv("AI_MAX_PAGES", 200))  # Increased to support larger documents
-        self.AI_BATCH_SIZE: int = int(os.getenv("AI_BATCH_SIZE", 20))  # Increased from 10
+        self.AI_BATCH_SIZE: int = int(os.getenv("AI_BATCH_SIZE", 25))  # Updated: Increased from 20
         self.AI_IMAGE_QUALITY: int = int(os.getenv("AI_IMAGE_QUALITY", 85))
         self.AI_MAX_IMAGE_DIMENSION: int = int(os.getenv("AI_MAX_IMAGE_DIMENSION", 2000))
         self.AI_ENABLE_HIGHLIGHTING: bool = os.getenv("AI_ENABLE_HIGHLIGHTING", "true").lower() == "true"
         
-        # === VISION INTELLIGENCE SETTINGS ===
-        self.VISION_TIMEOUT: float = float(os.getenv("VISION_TIMEOUT", 60.0))
-        self.VISION_REQUEST_TIMEOUT: float = float(os.getenv("VISION_REQUEST_TIMEOUT", 120.0))
+        # === VISION INTELLIGENCE SETTINGS - UPDATED FOR LARGE DOCUMENTS ===
+        self.VISION_TIMEOUT: float = float(os.getenv("VISION_TIMEOUT", 300.0))  # Updated: 5 minutes (was 60.0)
+        self.VISION_REQUEST_TIMEOUT: float = float(os.getenv("VISION_REQUEST_TIMEOUT", 600.0))  # Updated: 10 minutes (was 120.0)
         self.VISION_MAX_RETRIES: int = int(os.getenv("VISION_MAX_RETRIES", 3))
         self.VISION_INFERENCE_LIMIT: int = int(os.getenv("VISION_INFERENCE_LIMIT", 10))
         self.VISION_PRODUCTION_TOKENS: int = int(os.getenv("VISION_PRODUCTION_TOKENS", 8000))
-        self.VISION_BATCH_SIZE: int = int(os.getenv("VISION_BATCH_SIZE", 10))  # Increased from 5
+        self.VISION_BATCH_SIZE: int = int(os.getenv("VISION_BATCH_SIZE", 20))  # Updated: Increased from 10
         self.VISION_PARALLEL_PROCESSING: bool = os.getenv("VISION_PARALLEL_PROCESSING", "true").lower() == "true"
-        self.VISION_VALIDATION_TIMEOUT: float = float(os.getenv("VISION_VALIDATION_TIMEOUT", 30.0))
+        self.VISION_VALIDATION_TIMEOUT: float = float(os.getenv("VISION_VALIDATION_TIMEOUT", 120.0))  # Updated: 2 minutes (was 30.0)
         
         # === DATA LOADER SETTINGS ===
         # Philosophy: Load ALL available thumbnails - no artificial limits
@@ -138,43 +143,45 @@ class AppSettings:
         self.RETRY_DELAY: float = float(os.getenv("RETRY_DELAY", 1.0))
         self.RETRY_BACKOFF_FACTOR: float = float(os.getenv("RETRY_BACKOFF_FACTOR", 2.0))
         self.THUMBNAIL_PROBE_LIMIT: int = int(os.getenv("THUMBNAIL_PROBE_LIMIT", 200))  # Increased probe limit
-        self.BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", 10))  # Increased from 5 for faster loading
+        self.BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", 25))  # Updated: Increased from 10
         self.PARALLEL_PROCESSING: bool = os.getenv("PARALLEL_PROCESSING", "true").lower() == "true"
         self.AGGRESSIVE_CACHING: bool = os.getenv("AGGRESSIVE_CACHING", "true").lower() == "true"
         
         # Thumbnail specific settings - LOAD ALL AVAILABLE
         self.LOAD_ALL_THUMBNAILS: bool = os.getenv("LOAD_ALL_THUMBNAILS", "true").lower() == "true"  # Always true
-        self.THUMBNAIL_LOAD_TIMEOUT: float = float(os.getenv("THUMBNAIL_LOAD_TIMEOUT", 120.0))  # Increased for large docs
+        self.THUMBNAIL_LOAD_TIMEOUT: float = float(os.getenv("THUMBNAIL_LOAD_TIMEOUT", 900.0))  # Updated: 15 minutes (was 120.0)
         self.THUMBNAIL_BATCH_DELAY: float = float(os.getenv("THUMBNAIL_BATCH_DELAY", 0.1))
         self.THUMBNAIL_PROBE_MAX_PAGES: int = int(os.getenv("THUMBNAIL_PROBE_MAX_PAGES", 200))  # Probe up to 200 pages
+        self.PAGE_LOAD_TIMEOUT: float = float(os.getenv("PAGE_LOAD_TIMEOUT", 600.0))  # Added: 10 minutes
         
         # === PAGE SELECTION SETTINGS ===
         # No artificial limits - smart selection based on query needs
         self.MAX_PAGES_FOR_ANALYSIS: int = int(os.getenv("MAX_PAGES_FOR_ANALYSIS", 100))  # Analyze up to 100 pages
         self.UNLIMITED_PAGE_LOADING: bool = os.getenv("UNLIMITED_PAGE_LOADING", "true").lower() == "true"
-        self.PAGE_SELECTION_CHUNK_SIZE: int = int(os.getenv("PAGE_SELECTION_CHUNK_SIZE", 10))
+        self.PAGE_SELECTION_CHUNK_SIZE: int = int(os.getenv("PAGE_SELECTION_CHUNK_SIZE", 25))  # Updated: Increased from 10
         self.ENABLE_SMART_PAGE_SELECTION: bool = os.getenv("ENABLE_SMART_PAGE_SELECTION", "true").lower() == "true"
         
         # === GRID SYSTEM SETTINGS ===
         self.GRID_DETECTION_CONFIDENCE: float = float(os.getenv("GRID_DETECTION_CONFIDENCE", 0.8))
         self.MAX_VISUAL_ELEMENTS: int = int(os.getenv("MAX_VISUAL_ELEMENTS", 200))
         
-        # === STORAGE OPTIMIZATION SETTINGS ===
-        self.STORAGE_MAX_CONCURRENT_UPLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_UPLOADS", 10))  # Increased
-        self.STORAGE_MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_DOWNLOADS", 10))  # Increased
+        # === STORAGE OPTIMIZATION SETTINGS - UPDATED ===
+        self.STORAGE_MAX_CONCURRENT_UPLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_UPLOADS", 25))  # Updated: Increased from 10
+        self.STORAGE_MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_DOWNLOADS", 25))  # Updated: Increased from 10
         self.STORAGE_ENABLE_PAGINATION: bool = os.getenv("STORAGE_ENABLE_PAGINATION", "true").lower() == "true"
-        self.STORAGE_DOWNLOAD_TIMEOUT: float = float(os.getenv("STORAGE_DOWNLOAD_TIMEOUT", 60.0))
-        self.STORAGE_UPLOAD_TIMEOUT: float = float(os.getenv("STORAGE_UPLOAD_TIMEOUT", 120.0))
+        self.STORAGE_DOWNLOAD_TIMEOUT: float = float(os.getenv("STORAGE_DOWNLOAD_TIMEOUT", 300.0))  # Updated: 5 minutes (was 60.0)
+        self.STORAGE_UPLOAD_TIMEOUT: float = float(os.getenv("STORAGE_UPLOAD_TIMEOUT", 600.0))  # Updated: 10 minutes (was 120.0)
+        self.STORAGE_BATCH_TIMEOUT: float = float(os.getenv("STORAGE_BATCH_TIMEOUT", 1200.0))  # Added: 20 minutes
         
         # === BACKGROUND PROCESSING SETTINGS ===
         self.ENABLE_BACKGROUND_PROCESSING: bool = os.getenv("ENABLE_BACKGROUND_PROCESSING", "true").lower() == "true"
         self.MAX_CONCURRENT_JOBS: int = int(os.getenv("MAX_CONCURRENT_JOBS", 5))
-        self.JOB_TIMEOUT_SECONDS: int = int(os.getenv("JOB_TIMEOUT_SECONDS", 1800))
+        self.JOB_TIMEOUT_SECONDS: int = int(os.getenv("JOB_TIMEOUT_SECONDS", 7200))  # Updated: 2 hours (was 1800)
         self.PROCESSING_CHECK_INTERVAL: int = int(os.getenv("PROCESSING_CHECK_INTERVAL", 5))
         
-        # === TIMEOUT SETTINGS ===
-        self.REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", 600))
-        self.UPLOAD_TIMEOUT: int = int(os.getenv("UPLOAD_TIMEOUT", 3600))
+        # === TIMEOUT SETTINGS - UPDATED FOR LARGE DOCUMENTS ===
+        self.REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", 3600))  # Updated: 60 minutes (was 600)
+        self.UPLOAD_TIMEOUT: int = int(os.getenv("UPLOAD_TIMEOUT", 3600))  # Already 1 hour
         
         # === TRADE CONFIGURATION ===
         self.TRADES_LIST: List[str] = os.getenv(
@@ -189,14 +196,18 @@ class AppSettings:
         self.ENABLE_PRIVATE_NOTES: bool = os.getenv("ENABLE_PRIVATE_NOTES", "true").lower() == "true"
         self.ENABLE_NOTE_PUBLISHING: bool = os.getenv("ENABLE_NOTE_PUBLISHING", "true").lower() == "true"
         
-        # === VALIDATION SETTINGS ===
-        self.VALIDATION_TIMEOUT: float = float(os.getenv("VALIDATION_TIMEOUT", 60.0))
+        # === VALIDATION SETTINGS - UPDATED ===
+        self.VALIDATION_TIMEOUT: float = float(os.getenv("VALIDATION_TIMEOUT", 300.0))  # Updated: 5 minutes (was 60.0)
         self.VALIDATION_MAX_RETRIES: int = int(os.getenv("VALIDATION_MAX_RETRIES", 2))
         self.ENABLE_4X_VALIDATION: bool = os.getenv("ENABLE_4X_VALIDATION", "true").lower() == "true"
+        self.MAX_CONCURRENT_VALIDATIONS: int = int(os.getenv("MAX_CONCURRENT_VALIDATIONS", 6))  # Updated: 6 (was 4)
         
-        # === ELEMENT DETECTION SETTINGS ===
+        # === ELEMENT DETECTION SETTINGS - UPDATED ===
         self.ELEMENT_DETECTION_CONFIDENCE: float = float(os.getenv("ELEMENT_DETECTION_CONFIDENCE", 0.7))
-        self.ELEMENT_DETECTION_TIMEOUT: float = float(os.getenv("ELEMENT_DETECTION_TIMEOUT", 10.0))
+        self.ELEMENT_DETECTION_TIMEOUT: float = float(os.getenv("ELEMENT_DETECTION_TIMEOUT", 60.0))  # Updated: 1 minute (was 10.0)
+        
+        # === MONITORING & WARNINGS ===
+        self.WARNING_THRESHOLD: float = float(os.getenv("WARNING_THRESHOLD", 300.0))  # Added: 5 minutes
         
         # === BACKWARD COMPATIBILITY ATTRIBUTES ===
         # Lowercase aliases for vision_ai module compatibility
@@ -261,7 +272,8 @@ class AppSettings:
             "max_concurrent_downloads": self.STORAGE_MAX_CONCURRENT_DOWNLOADS,
             "enable_pagination": self.STORAGE_ENABLE_PAGINATION,
             "download_timeout": self.STORAGE_DOWNLOAD_TIMEOUT,
-            "upload_timeout": self.STORAGE_UPLOAD_TIMEOUT
+            "upload_timeout": self.STORAGE_UPLOAD_TIMEOUT,
+            "batch_timeout": self.STORAGE_BATCH_TIMEOUT
         }
     
     def get_ai_settings(self) -> Dict[str, Any]:
@@ -302,7 +314,10 @@ class AppSettings:
             "image_ttl": self.IMAGE_CACHE_TTL,
             "analysis_ttl": self.ANALYSIS_CACHE_TTL,
             "thumbnail_ttl": self.THUMBNAIL_CACHE_TTL,
-            "default_ttl": self.CACHE_TTL_SECONDS
+            "default_ttl": self.CACHE_TTL_SECONDS,
+            "max_memory_items": self.MAX_MEMORY_ITEMS,
+            "max_thumbnail_items": self.MAX_THUMBNAIL_ITEMS,
+            "max_memory_item_size_mb": self.MAX_MEMORY_ITEM_SIZE_MB
         }
     
     def get_data_loader_settings(self) -> Dict[str, Any]:
@@ -325,7 +340,8 @@ class AppSettings:
             "load_all_thumbnails": self.LOAD_ALL_THUMBNAILS,
             "thumbnail_load_timeout": self.THUMBNAIL_LOAD_TIMEOUT,
             "thumbnail_batch_delay": self.THUMBNAIL_BATCH_DELAY,
-            "thumbnail_probe_max_pages": self.THUMBNAIL_PROBE_MAX_PAGES
+            "thumbnail_probe_max_pages": self.THUMBNAIL_PROBE_MAX_PAGES,
+            "page_load_timeout": self.PAGE_LOAD_TIMEOUT
         }
     
     def get_page_selection_settings(self) -> Dict[str, Any]:
@@ -349,7 +365,8 @@ class AppSettings:
         return {
             "timeout": self.VALIDATION_TIMEOUT,
             "max_retries": self.VALIDATION_MAX_RETRIES,
-            "enable_4x": self.ENABLE_4X_VALIDATION
+            "enable_4x": self.ENABLE_4X_VALIDATION,
+            "max_concurrent": self.MAX_CONCURRENT_VALIDATIONS
         }
     
     def get_unlimited_loading_settings(self) -> Dict[str, Any]:
@@ -430,6 +447,7 @@ CONFIG = {
     "thumbnail_load_timeout": _settings.THUMBNAIL_LOAD_TIMEOUT,
     "thumbnail_batch_delay": _settings.THUMBNAIL_BATCH_DELAY,
     "thumbnail_probe_max_pages": _settings.THUMBNAIL_PROBE_MAX_PAGES,
+    "page_load_timeout": _settings.PAGE_LOAD_TIMEOUT,
     
     # Cache settings
     "max_cache_size_mb": _settings.MAX_CACHE_SIZE_MB,
@@ -441,6 +459,9 @@ CONFIG = {
     "analysis_cache_ttl": _settings.ANALYSIS_CACHE_TTL,
     "thumbnail_cache_ttl": _settings.THUMBNAIL_CACHE_TTL,
     "cache_ttl_seconds": _settings.CACHE_TTL_SECONDS,
+    "max_memory_items": _settings.MAX_MEMORY_ITEMS,
+    "max_thumbnail_items": _settings.MAX_THUMBNAIL_ITEMS,
+    "max_memory_item_size_mb": _settings.MAX_MEMORY_ITEM_SIZE_MB,
     
     # Page selection settings
     "max_pages_for_analysis": _settings.MAX_PAGES_FOR_ANALYSIS,
@@ -462,6 +483,7 @@ CONFIG = {
     "VALIDATION_TIMEOUT": _settings.VALIDATION_TIMEOUT,
     "VALIDATION_MAX_RETRIES": _settings.VALIDATION_MAX_RETRIES,
     "enable_4x_validation": _settings.ENABLE_4X_VALIDATION,
+    "max_concurrent_validations": _settings.MAX_CONCURRENT_VALIDATIONS,
     
     # Element detection settings
     "element_detection_confidence": _settings.ELEMENT_DETECTION_CONFIDENCE,
@@ -474,10 +496,15 @@ CONFIG = {
     # Storage settings
     "storage_download_timeout": _settings.STORAGE_DOWNLOAD_TIMEOUT,
     "storage_upload_timeout": _settings.STORAGE_UPLOAD_TIMEOUT,
+    "storage_batch_timeout": _settings.STORAGE_BATCH_TIMEOUT,
+    "storage_max_concurrent_downloads": _settings.STORAGE_MAX_CONCURRENT_DOWNLOADS,
+    "storage_max_concurrent_uploads": _settings.STORAGE_MAX_CONCURRENT_UPLOADS,
     
     # General timeouts
     "request_timeout": _settings.REQUEST_TIMEOUT,
     "upload_timeout": _settings.UPLOAD_TIMEOUT,
+    "job_timeout_seconds": _settings.JOB_TIMEOUT_SECONDS,
+    "warning_threshold": _settings.WARNING_THRESHOLD,
 }
 
 # Export settings for convenience

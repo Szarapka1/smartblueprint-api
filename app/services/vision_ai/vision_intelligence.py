@@ -76,11 +76,16 @@ class VisionIntelligence:
         return self._client
     
     def _ensure_semaphores_initialized(self):
-        """Initialize semaphores for rate limiting"""
-        if self.vision_semaphore is None:
-            self.vision_semaphore = asyncio.Semaphore(3)
-        if self.inference_semaphore is None:
-            self.inference_semaphore = asyncio.Semaphore(CONFIG["VISION_INFERENCE_LIMIT"])
+    """Initialize semaphores for rate limiting"""
+    if self.vision_semaphore is None:
+        # Use CONFIG value instead of hardcoded 3
+        vision_limit = CONFIG.get("VISION_INFERENCE_LIMIT", 10)
+        self.vision_semaphore = asyncio.Semaphore(vision_limit)
+        logger.info(f"🔧 Vision semaphore initialized with limit: {vision_limit}")
+        
+    if self.inference_semaphore is None:
+        # Use the same limit from CONFIG
+        self.inference_semaphore = asyncio.Semaphore(CONFIG.get("VISION_INFERENCE_LIMIT", 10))
     
     async def analyze(
         self,

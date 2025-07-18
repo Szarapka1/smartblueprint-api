@@ -34,10 +34,12 @@ logger = logging.getLogger(__name__)
 class VisualIntelligenceFirst:
     """Visual Intelligence First Construction AI - Core Orchestrator"""
     
-    def __init__(self, settings):
+def __init__(self, settings):
         self.settings = settings
         
         # Initialize all modules
+        logger.info("🔧 Initializing VisualIntelligenceFirst modules...")
+        
         self.vision = VisionIntelligence(settings)
         self.page_selector = PageSelector(settings)
         self.validator = ValidationSystem(settings)
@@ -49,15 +51,58 @@ class VisualIntelligenceFirst:
         self.note_generator = NoteGenerator(settings)
         self.post_processor = PostProcessor(settings)
         
-        # FIXED: Set vision client for all modules that need it
-        vision_client = self.vision.client  # This will lazy-initialize the client
-        self.page_selector.set_vision_client(vision_client)
-        self.validator.set_vision_client(vision_client)
-        self.post_processor.set_vision_client(vision_client)
-        self.question_analyzer.set_vision_client(vision_client)
+        # Initialize vision client properly with error handling
+        try:
+            logger.info("🔧 Initializing OpenAI vision client...")
+            
+            # Force initialization by accessing the client property
+            # This will trigger the lazy initialization in VisionIntelligence
+            _ = self.vision.client  
+            
+            # Now get the initialized client
+            vision_client = self.vision.client
+            
+            # Set vision client for all modules that need it
+            self.page_selector.set_vision_client(vision_client)
+            self.validator.set_vision_client(vision_client)
+            self.post_processor.set_vision_client(vision_client)
+            self.question_analyzer.set_vision_client(vision_client)
+            
+            # Ensure semaphores are initialized
+            self.vision._ensure_semaphores_initialized()
+            
+            logger.info("✅ Vision client initialized successfully for all modules")
+            
+        except ValueError as e:
+            # This happens if OpenAI API key is missing
+            logger.error(f"❌ Vision client initialization failed - Missing API key: {e}")
+            raise ValueError(f"OpenAI API key is required. Please set OPENAI_API_KEY in your environment: {e}")
+        except Exception as e:
+            # Any other initialization error
+            logger.error(f"❌ Vision client initialization failed: {e}")
+            raise RuntimeError(f"Failed to initialize vision client: {e}")
         
         self.current_prompt = None
         self.current_response = None
+        
+        logger.info("✅ VisualIntelligenceFirst initialized successfully")
+    
+    async def ensure_initialized(self):
+        """Ensure all components are properly initialized - call this before first use"""
+        try:
+            # Test vision client is working
+            if not self.vision.client:
+                raise ValueError("Vision client not initialized")
+            
+            # Ensure cache directory exists if disk cache is enabled
+            if self.cache.config["enable_disk_cache"]:
+                self.cache.config["cache_dir"].mkdir(parents=True, exist_ok=True)
+            
+            logger.info("✅ All AI service components verified")
+            
+        except Exception as e:
+            logger.error(f"❌ Component verification failed: {e}")
+            raise RuntimeError(f"AI service component verification failed: {e}")
     
     async def get_ai_response(
         self,

@@ -80,7 +80,7 @@ class ValidationSystem:
         try:
             validation_results = await asyncio.wait_for(
                 asyncio.gather(*tasks, return_exceptions=True),
-                timeout=CONFIG.get("validation_timeout", 60.0)
+                timeout=CONFIG.get("validation_timeout", 360.0)
             )
         except asyncio.TimeoutError:
             logger.error("⚠️ Validation timeout - using partial results")
