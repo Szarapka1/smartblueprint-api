@@ -3,10 +3,10 @@
 import logging
 import asyncio
 from typing import List, Optional, Dict, Any, AsyncGenerator
-from app.core.config import AppSettings
+from app.core.config import get_settings, CONFIG  # Fixed: Import actual config
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
-from azure.storage.blob import BlobPrefix
+from azure.storage.blob import BlobPrefix, ContentSettings
 import re
 
 logger = logging.getLogger(__name__)
@@ -14,30 +14,29 @@ logger = logging.getLogger(__name__)
 class StorageService:
     """Production-grade Azure Blob Storage service with robust error handling"""
     
-    def __init__(self, settings: AppSettings):
-        if not settings:
-            raise ValueError("AppSettings instance is required")
-            
-        if not settings.AZURE_STORAGE_CONNECTION_STRING:
+    def __init__(self, settings=None):
+        # Use provided settings or get from config
+        self.settings = settings or get_settings()
+        
+        if not self.settings.AZURE_STORAGE_CONNECTION_STRING:
             raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
         
-        self.settings = settings
         self._lock = asyncio.Lock()  # Thread safety for operations
         
         try:
             # Create blob service client with optimized settings
             self.blob_service_client = BlobServiceClient.from_connection_string(
-                settings.AZURE_STORAGE_CONNECTION_STRING,
+                self.settings.AZURE_STORAGE_CONNECTION_STRING,
                 max_single_get_size=32*1024*1024,  # 32MB chunks for large files
                 max_chunk_get_size=4*1024*1024     # 4MB chunks for streaming
             )
             
             # Pre-create container clients for better performance
             self.main_container_client = self.blob_service_client.get_container_client(
-                settings.AZURE_CONTAINER_NAME
+                self.settings.AZURE_CONTAINER_NAME
             )
             self.cache_container_client = self.blob_service_client.get_container_client(
-                settings.AZURE_CACHE_CONTAINER_NAME
+                self.settings.AZURE_CACHE_CONTAINER_NAME
             )
             
             logger.info("✅ StorageService initialized successfully")
@@ -77,8 +76,8 @@ class StorageService:
         # Remove any path traversal attempts
         blob_name = blob_name.replace("../", "").replace("..\\", "")
         
-        # Ensure valid characters
-        if not re.match(r'^[a-zA-Z0-9_\-./]+$', blob_name):
+        # Ensure valid characters (optimized regex)
+        if not re.match(r'^[\w\-./]+$', blob_name):
             raise ValueError("Blob name contains invalid characters")
         
         # Strip leading/trailing slashes
@@ -119,9 +118,15 @@ class StorageService:
                 'overwrite': True
             }
             
-            # Add content type if provided
+            # Add content type if provided (with smart defaults for images)
             if content_type:
-                upload_options['content_settings'] = {'content_type': content_type}
+                upload_options['content_settings'] = ContentSettings(content_type=content_type)
+            elif blob_name.lower().endswith('.png'):
+                upload_options['content_settings'] = ContentSettings(content_type='image/png')
+            elif blob_name.lower().endswith(('.jpg', '.jpeg')):
+                upload_options['content_settings'] = ContentSettings(content_type='image/jpeg')
+            elif blob_name.lower().endswith('.pdf'):
+                upload_options['content_settings'] = ContentSettings(content_type='application/pdf')
             
             # For large files (>4MB), use optimized upload settings
             if len(data) > 4 * 1024 * 1024:
@@ -192,10 +197,10 @@ class StorageService:
                                   self.settings.AZURE_CACHE_CONTAINER_NAME]:
             raise ValueError(f"Invalid container name: {container_name}")
         
-        # Validate prefix and suffix
-        if prefix and not re.match(r'^[a-zA-Z0-9_\-./]*$', prefix):
+        # Validate prefix and suffix (optimized regex)
+        if prefix and not re.match(r'^[\w\-./]*$', prefix):
             raise ValueError("Prefix contains invalid characters")
-        if suffix and not re.match(r'^[a-zA-Z0-9_\-./]*$', suffix):
+        if suffix and not re.match(r'^[\w\-./]*$', suffix):
             raise ValueError("Suffix contains invalid characters")
         
         try:
@@ -382,8 +387,8 @@ class StorageService:
 
     async def delete_document_files(self, document_id: str) -> Dict[str, int]:
         """Delete all files associated with a document ID"""
-        # Validate document ID
-        if not document_id or not re.match(r'^[a-zA-Z0-9_\-]+$', document_id):
+        # Validate document ID (optimized regex)
+        if not document_id or not re.match(r'^[\w\-]+$', document_id):
             raise ValueError("Invalid document ID")
         
         async with self._lock:  # Thread safety for bulk delete
@@ -410,24 +415,36 @@ class StorageService:
                     prefix=f"{document_id}_"
                 )
                 
-                # Delete all cache files
+                # Batch delete operations for better performance
+                delete_tasks = []
+                
                 for filename in cache_files:
-                    try:
-                        await self.delete_blob(self.settings.AZURE_CACHE_CONTAINER_NAME, filename)
-                        deleted_counts["total"] += 1
+                    # Categorize files
+                    if "_page_" in filename and filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        deleted_counts["pages"] += 1
+                    elif filename.endswith(("_metadata.json", "_context.txt", "_document_index.json")):
+                        deleted_counts["metadata"] += 1
+                    elif "_annotations.json" in filename:
+                        deleted_counts["annotations"] += 1
+                    elif "_chat" in filename or "_all_chats.json" in filename:
+                        deleted_counts["chats"] += 1
+                    
+                    # Create delete task
+                    delete_tasks.append(self.delete_blob(self.settings.AZURE_CACHE_CONTAINER_NAME, filename))
+                
+                # Execute all deletes in parallel (with controlled concurrency)
+                if delete_tasks:
+                    # Process in batches of 10
+                    for i in range(0, len(delete_tasks), 10):
+                        batch = delete_tasks[i:i+10]
+                        results = await asyncio.gather(*batch, return_exceptions=True)
                         
-                        # Categorize deleted files
-                        if "_page_" in filename:
-                            deleted_counts["pages"] += 1
-                        elif filename.endswith(("_metadata.json", "_context.txt", "_document_index.json")):
-                            deleted_counts["metadata"] += 1
-                        elif "_annotations.json" in filename:
-                            deleted_counts["annotations"] += 1
-                        elif "_chat" in filename or "_all_chats.json" in filename:
-                            deleted_counts["chats"] += 1
-                            
-                    except Exception as e:
-                        logger.warning(f"Failed to delete {filename}: {e}")
+                        # Count successful deletes
+                        for result in results:
+                            if result is True:
+                                deleted_counts["total"] += 1
+                            elif isinstance(result, Exception):
+                                logger.warning(f"Delete error: {result}")
                 
                 deleted_counts["total"] += deleted_counts["pdfs"]
                 
@@ -451,7 +468,13 @@ class StorageService:
                 "parallel_downloads": "Supported",
                 "parallel_uploads": "Supported",
                 "pre_created_clients": True,
-                "thread_safety": "Full asyncio locking"
+                "thread_safety": "Full asyncio locking",
+                "batch_operations": "Optimized with controlled concurrency"
+            },
+            "supported_formats": {
+                "documents": ["pdf"],
+                "images": ["png", "jpg", "jpeg"],  # Optimized for these formats
+                "metadata": ["json", "txt"]
             },
             "has_connection_string": bool(self.settings.AZURE_STORAGE_CONNECTION_STRING),
             "connection_string_length": len(self.settings.AZURE_STORAGE_CONNECTION_STRING) if self.settings.AZURE_STORAGE_CONNECTION_STRING else 0
@@ -468,3 +491,13 @@ class StorageService:
             logger.info("✅ Storage service cleaned up successfully")
         except Exception as e:
             logger.warning(f"⚠️ Storage service cleanup warning: {e}")
+
+# Singleton instance for easy access
+_storage_instance = None
+
+def get_storage_service():
+    """Get or create storage service instance"""
+    global _storage_instance
+    if _storage_instance is None:
+        _storage_instance = StorageService()
+    return _storage_instance
