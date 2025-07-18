@@ -104,64 +104,64 @@ class EnhancedCache:
                 logger.error(f"Failed to initialize disk cache: {e}")
                 self.config["enable_disk_cache"] = False
     
-def get(self, key: str, cache_type: str = "default") -> Optional[Any]:
-    """
-    Get value from cache with type-specific TTL
-    Checks memory first, then disk
-    """
-    with self._lock:
-        # Check memory cache
-        if key in self._memory_cache:
-            value, timestamp, size = self._memory_cache[key]
-            # Get the stored cache type if available
-            stored_type = self._cache_types.get(key, cache_type)
-            ttl = self._get_ttl(stored_type)
-            
-            if time.time() - timestamp <= ttl:
-                # IMPORTANT: Validate the cached value
-                if value is None or (isinstance(value, (list, dict, str)) and not value):
-                    # Empty or None value - remove from cache and miss
-                    logger.warning(f"⚠️ Cache contained empty data for key: {key[:20]}...")
+    def get(self, key: str, cache_type: str = "default") -> Optional[Any]:
+        """
+        Get value from cache with type-specific TTL
+        Checks memory first, then disk
+        """
+        with self._lock:
+            # Check memory cache
+            if key in self._memory_cache:
+                value, timestamp, size = self._memory_cache[key]
+                # Get the stored cache type if available
+                stored_type = self._cache_types.get(key, cache_type)
+                ttl = self._get_ttl(stored_type)
+                
+                if time.time() - timestamp <= ttl:
+                    # IMPORTANT: Validate the cached value
+                    if value is None or (isinstance(value, (list, dict, str)) and not value):
+                        # Empty or None value - remove from cache and miss
+                        logger.warning(f"⚠️ Cache contained empty data for key: {key[:20]}...")
+                        self._remove_from_memory(key)
+                        self.stats.misses += 1
+                        return None
+                        
+                    # Cache hit - update access time
+                    self._access_order[key] = time.time()
+                    self.stats.hits += 1
+                    logger.debug(f"✅ Memory cache hit: {key[:20]}... ({stored_type})")
+                    return value
+                else:
+                    # Expired - remove from cache
                     self._remove_from_memory(key)
+        
+        # Check disk cache if enabled
+        if self.config["enable_disk_cache"]:
+            disk_value = self._get_from_disk(key, cache_type)
+            if disk_value is not None:
+                # Validate disk value too
+                if isinstance(disk_value, (list, dict, str)) and not disk_value:
+                    logger.warning(f"⚠️ Disk cache contained empty data for key: {key[:20]}...")
+                    # Remove the bad cache file
+                    disk_path = self._get_disk_path(key)
+                    try:
+                        disk_path.unlink()
+                    except:
+                        pass
                     self.stats.misses += 1
                     return None
                     
-                # Cache hit - update access time
-                self._access_order[key] = time.time()
+                # Valid data - promote to memory cache if not too large
+                size_estimate = self._estimate_size(disk_value)
+                if size_estimate < self.config["max_memory_item_size_mb"] * 1024 * 1024:
+                    self.set(key, disk_value, cache_type, persist_only=False)
                 self.stats.hits += 1
-                logger.debug(f"✅ Memory cache hit: {key[:20]}... ({stored_type})")
-                return value
-            else:
-                # Expired - remove from cache
-                self._remove_from_memory(key)
-    
-    # Check disk cache if enabled
-    if self.config["enable_disk_cache"]:
-        disk_value = self._get_from_disk(key, cache_type)
-        if disk_value is not None:
-            # Validate disk value too
-            if isinstance(disk_value, (list, dict, str)) and not disk_value:
-                logger.warning(f"⚠️ Disk cache contained empty data for key: {key[:20]}...")
-                # Remove the bad cache file
-                disk_path = self._get_disk_path(key)
-                try:
-                    disk_path.unlink()
-                except:
-                    pass
-                self.stats.misses += 1
-                return None
-                
-            # Valid data - promote to memory cache if not too large
-            size_estimate = self._estimate_size(disk_value)
-            if size_estimate < self.config["max_memory_item_size_mb"] * 1024 * 1024:
-                self.set(key, disk_value, cache_type, persist_only=False)
-            self.stats.hits += 1
-            return disk_value
-    
-    # Cache miss
-    self.stats.misses += 1
-    logger.debug(f"❌ Cache miss: {key[:20]}... ({cache_type})")
-    return None
+                return disk_value
+        
+        # Cache miss
+        self.stats.misses += 1
+        logger.debug(f"❌ Cache miss: {key[:20]}... ({cache_type})")
+        return None
     
     def set(
         self,
@@ -600,6 +600,15 @@ def get(self, key: str, cache_type: str = "default") -> Optional[Any]:
         
         return count
     
+    def _recalculate_thumbnail_count(self) -> None:
+        """Recalculate thumbnail count from current cache"""
+        count = 0
+        for key in self._memory_cache:
+            cache_type = self._cache_types.get(key, "default")
+            if cache_type in ["thumbnail", "thumbnail_batch"] or "thumb" in key.lower():
+                count += 1
+        self._thumbnail_count = count
+    
     def warmup(self, keys: List[Tuple[str, str]]) -> None:
         """
         Warmup cache by preloading common keys from disk
@@ -633,15 +642,6 @@ def get(self, key: str, cache_type: str = "default") -> Optional[Any]:
                     persisted += 1
         
         logger.info(f"💾 Persisted {persisted} important cache entries to disk")
-    
-    def _recalculate_thumbnail_count(self) -> None:
-        """Recalculate thumbnail count from current cache"""
-        count = 0
-        for key in self._memory_cache:
-            cache_type = self._cache_types.get(key, "default")
-            if cache_type in ["thumbnail", "thumbnail_batch"] or "thumb" in key.lower():
-                count += 1
-        self._thumbnail_count = count
     
     def optimize_for_thumbnails(self, document_id: str, expected_pages: int) -> None:
         """
