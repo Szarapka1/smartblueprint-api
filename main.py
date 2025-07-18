@@ -16,7 +16,7 @@ from app.core.config import get_settings
 # Import services
 from app.services.storage_service import StorageService
 from app.services.pdf_service import PDFService
-from app.services.ai_service import ProfessionalBlueprintAI
+from app.services.vision_ai.ai_service_core import VisualIntelligenceFirst
 from app.services.session_service import SessionService
 
 # Import API routers
@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI):
         initialization_status["ai"]["status"] = "initializing"
         try:
             if settings.OPENAI_API_KEY:
-                ai_service = ProfessionalBlueprintAI(settings)
+                ai_service = VisualIntelligenceFirst(settings)
                 app.state.ai_service = ai_service
                 initialization_status["ai"]["status"] = "success"
                 logger.info("✅ AI Service initialized successfully")
@@ -191,7 +191,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Critical error during application lifecycle: {e}")
         logger.error(traceback.format_exc())
-        # In test mode, we continue anyway
         yield
 
 # --- Create FastAPI Application ---
@@ -229,27 +228,16 @@ app.add_middleware(
 logger.warning("⚠️ CORS: Allowing ALL origins, methods, and headers - TEST MODE ONLY!")
 
 # --- VERBOSE Global Exception Handler ---
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """
-    VERBOSE exception handler for TEST MODE - exposes everything for debugging.
-    """
-    # Get full traceback
     tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    
-    # Log the full error
     logger.error(f"Unhandled exception for {request.method} {request.url}:")
     logger.error("".join(tb_lines))
-    
-    # Get request details for debugging
     try:
         body = await request.body()
         body_str = body.decode('utf-8') if body else "No body"
     except:
         body_str = "Could not read body"
-    
-    # Return EVERYTHING for debugging
     return JSONResponse(
         status_code=500,
         content={
@@ -276,7 +264,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Handle HTTP exceptions with VERBOSE formatting for testing."""
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -289,17 +276,14 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 # --- Include API Routers ---
-
 app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Analysis"])
 app.include_router(document_router, prefix="/api/v1", tags=["Document Management"])
 app.include_router(annotation_router, prefix="/api/v1", tags=["Annotations"])
 app.include_router(note_router, prefix="/api/v1", tags=["Notes"])
 
 # --- Root Endpoints ---
-
 @app.get("/", tags=["System"])
 async def root():
-    """Root endpoint with DETAILED system information for testing."""
     return {
         "service": "Smart Blueprint API",
         "mode": "TEST/DEVELOPMENT - UNSAFE",
@@ -328,11 +312,9 @@ async def root():
         }
     }
 
-@app.get("/health", tags=["System"])
+@app.get("/api/v1/health", tags=["System"])
 async def health_check():
-    """DETAILED health check endpoint for testing."""
     def check_service(service_name: str) -> dict:
-        """Check if a service is available and get detailed info."""
         service = getattr(app.state, service_name, None)
         if service is None:
             return {
@@ -342,36 +324,27 @@ async def health_check():
                     service_name.replace('_service', ''), {}
                 ).get('error')
             }
-        
         try:
-            # Try to get detailed service info
             result = {"status": "healthy", "details": {}}
-            
             if hasattr(service, 'get_connection_info'):
                 result["details"]["connection_info"] = service.get_connection_info()
-            
             if hasattr(service, 'get_service_statistics'):
                 result["details"]["statistics"] = service.get_service_statistics()
-            
             if hasattr(service, 'get_processing_stats'):
                 result["details"]["processing_stats"] = service.get_processing_stats()
-            
             if hasattr(service, 'get_professional_capabilities'):
                 result["details"]["capabilities"] = service.get_professional_capabilities()
-            
             if hasattr(service, 'is_running'):
                 result["details"]["is_running"] = service.is_running()
-            
             return result
-            
         except Exception as e:
             return {
                 "status": "error",
                 "error": str(e),
                 "error_type": type(e).__name__,
-                "traceback": traceback.format_exc().splitlines()[-5:]  # Last 5 lines
+                "traceback": traceback.format_exc().splitlines()[-5:]
             }
-    
+
     health_status = {
         "timestamp": logging.Formatter().formatTime(logging.LogRecord(
             name="", level=0, pathname="", lineno=0,
@@ -393,19 +366,17 @@ async def health_check():
             "python_version": os.sys.version
         }
     }
-    
-    # Determine overall status
+
     service_statuses = [s.get("status", "unknown") for s in health_status["services"].values()]
     if "error" in service_statuses:
         health_status["overall_status"] = "degraded"
     elif all(status == "unavailable" for status in service_statuses):
         health_status["overall_status"] = "critical"
-    
+
     return health_status
 
 @app.get("/config", tags=["System"])
 async def get_configuration():
-    """Get FULL configuration details for testing."""
     return {
         "mode": "TEST/DEVELOPMENT - UNSAFE",
         "features": {
@@ -433,8 +404,8 @@ async def get_configuration():
             "session_expiry_hours": settings.SESSION_CLEANUP_HOURS
         },
         "environment": {
-            "debug_mode": True,  # Always true in test mode
-            "cors_origins": ["*"],  # Always permissive in test mode
+            "debug_mode": True,
+            "cors_origins": ["*"],
             "version": API_VERSION,
             "environment": settings.ENVIRONMENT,
             "host": settings.HOST,
@@ -462,12 +433,9 @@ async def get_configuration():
 
 @app.get("/debug/error-test", tags=["Debug"])
 async def test_error_handling():
-    """Test endpoint to verify verbose error handling is working."""
-    # This will trigger the global exception handler
     raise ValueError("This is a test error to verify verbose error handling is working correctly!")
 
 # --- Application Entry Point ---
-
 if __name__ == "__main__":
     logger.info("="*60)
     logger.info("🚀 Starting Smart Blueprint API in TEST MODE")
@@ -479,7 +447,6 @@ if __name__ == "__main__":
     logger.info(f"🔓 Authentication: DISABLED")
     logger.info("="*60)
     
-    # Run the application with reload for development
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
@@ -488,3 +455,4 @@ if __name__ == "__main__":
         log_level="debug",  # Verbose logging
         access_log=True  # Log all requests
     )
+
