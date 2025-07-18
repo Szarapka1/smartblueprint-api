@@ -225,7 +225,9 @@ class PDFService:
                 'has_text': False,
                 'has_images': True,
                 'has_tables': False,
-                'has_grid_systems': False
+                'has_grid_systems': False,
+                'total_tables_extracted': 0,
+                'total_tables_found': 0
             }
         }
 
@@ -236,6 +238,12 @@ class PDFService:
         
         if result.get('has_tables'):
             metadata['extraction_summary']['has_tables'] = True
+        
+        # Update table counts
+        if 'tables_found' in result:
+            metadata['extraction_summary']['total_tables_found'] += result['tables_found']
+        if 'tables_extracted' in result:
+            metadata['extraction_summary']['total_tables_extracted'] += result['tables_extracted']
 
     async def _process_batch_safe(self, doc: fitz.Document, page_numbers: List[int], 
                                  session_id: str, storage_service: StorageService) -> List[Dict]:
@@ -278,8 +286,13 @@ class PDFService:
             
             # Extract tables if enabled and present
             tables = []
+            tables_found = 0
+            tables_extracted = 0
             if self.enable_tables:
-                tables = await self._extract_tables_safe(page)
+                table_result = await self._extract_tables_safe(page)
+                tables = table_result['tables']
+                tables_found = table_result['found']
+                tables_extracted = table_result['extracted']
             
             # Grid detection
             grid_system = None
@@ -298,6 +311,15 @@ class PDFService:
                 'has_text': bool(page_text.strip()),
                 'has_tables': len(tables) > 0,
                 'table_count': len(tables),
+                'tables_found': tables_found,
+                'tables_extracted': tables_extracted,
+                'table_details': [
+                    {
+                        'rows': t.get('row_count', 0),
+                        'cols': t.get('col_count', 0),
+                        'extraction': t.get('extraction_note', 'complete')
+                    } for t in tables
+                ] if tables else [],
                 'drawing_type': page_analysis.get('drawing_type'),
                 'sheet_number': page_analysis.get('sheet_number'),
                 'scale': page_analysis.get('scale'),
@@ -318,32 +340,164 @@ class PDFService:
                 'metadata': page_metadata,
                 'tables': tables,
                 'grid_system': grid_system,
-                'has_tables': len(tables) > 0
+                'has_tables': len(tables) > 0,
+                'tables_found': tables_found,
+                'tables_extracted': tables_extracted
             }
             
         except Exception as e:
             logger.error(f"Error processing page {page_num + 1}: {e}")
             raise
 
-    async def _extract_tables_safe(self, page: fitz.Page) -> List[Dict]:
-        """Safely extract tables from page"""
+    async def _extract_tables_safe(self, page: fitz.Page) -> Dict[str, Any]:
+        """Safely extract ALL tables from page with robust error handling"""
         tables = []
+        tables_found = 0
+        tables_extracted = 0
+        tables_failed = 0
+        
         try:
             page_tables = page.find_tables()
             if page_tables:
-                for i, table in enumerate(page_tables[:3]):  # Limit to 3 tables
+                tables_found = len(page_tables)
+                logger.info(f"📊 Found {tables_found} tables on page")
+                
+                for i, table in enumerate(page_tables):  # No limit - extract ALL tables
                     try:
-                        tables.append({
-                            'index': i,
-                            'data': table.extract(),
-                            'bbox': list(table.bbox) if hasattr(table, 'bbox') else None
-                        })
+                        # Try to extract table data
+                        table_data = None
+                        bbox_data = None
+                        
+                        # Safely extract table content with specific error handling
+                        try:
+                            table_data = table.extract()
+                            
+                            # Validate extracted data
+                            if table_data and len(table_data) > 0:
+                                # Count non-empty cells
+                                non_empty_cells = sum(
+                                    1 for row in table_data 
+                                    for cell in row 
+                                    if cell and str(cell).strip()
+                                )
+                                
+                                # Skip tables that are mostly empty
+                                total_cells = sum(len(row) for row in table_data)
+                                if total_cells > 0 and non_empty_cells / total_cells < 0.1:
+                                    logger.debug(f"Skipping mostly empty table {i+1}")
+                                    continue
+                                    
+                        except TypeError as e:
+                            if "slice" in str(e) and "int" in str(e):
+                                logger.warning(f"Complex table structure in table {i+1}/{tables_found}, attempting workaround...")
+                                # Try to get basic table info without full extraction
+                                try:
+                                    # Get table boundaries at least
+                                    if hasattr(table, 'bbox'):
+                                        bbox_data = list(table.bbox)
+                                        table_data = [["[Complex table - see PDF image]"]]
+                                        logger.info(f"Captured table {i+1} location, full extraction failed")
+                                except:
+                                    logger.warning(f"Could not extract table {i+1} at all")
+                                    tables_failed += 1
+                                    continue
+                            else:
+                                raise
+                        
+                        # Safely get bbox if available
+                        try:
+                            if hasattr(table, 'bbox') and bbox_data is None:
+                                bbox_data = list(table.bbox)
+                        except Exception:
+                            bbox_data = None
+                        
+                        if table_data:
+                            # Clean up table data - remove excessive empty rows/columns
+                            cleaned_data = self._clean_table_data(table_data)
+                            
+                            if cleaned_data:  # Only add if table has content after cleaning
+                                tables.append({
+                                    'index': i,
+                                    'data': cleaned_data,
+                                    'bbox': bbox_data,
+                                    'row_count': len(cleaned_data),
+                                    'col_count': max(len(row) for row in cleaned_data) if cleaned_data else 0,
+                                    'extraction_note': 'partial' if "[Complex table" in str(cleaned_data) else 'complete'
+                                })
+                                tables_extracted += 1
+                                
+                                # Log large tables
+                                if len(cleaned_data) > 20:
+                                    logger.info(f"📋 Extracted large table {i+1}: {len(cleaned_data)} rows")
+                            
                     except Exception as e:
-                        logger.warning(f"Failed to extract table {i}: {e}")
+                        logger.warning(f"Failed to extract table {i+1}/{tables_found}: {str(e)[:100]}")
+                        tables_failed += 1
+                        # Continue to next table instead of failing completely
+                        continue
+                
+                # Summary logging
+                if tables_found > 0:
+                    logger.info(f"📊 Table extraction complete: {tables_extracted}/{tables_found} extracted, {tables_failed} failed")
+                        
         except Exception as e:
-            logger.warning(f"Table extraction failed: {e}")
+            # Check if it's the specific slice/int comparison error
+            if "'>=' not supported between instances of 'slice' and 'int'" in str(e):
+                logger.warning(f"Table detection failed due to complex structure, no tables extracted")
+            else:
+                logger.warning(f"Table extraction failed: {str(e)[:200]}")
         
-        return tables
+        return {
+            'tables': tables,
+            'found': tables_found,
+            'extracted': tables_extracted
+        }
+
+    def _clean_table_data(self, table_data: List[List[Any]]) -> List[List[str]]:
+        """Clean and normalize table data"""
+        if not table_data:
+            return []
+        
+        cleaned = []
+        
+        for row in table_data:
+            # Convert all cells to strings and strip whitespace
+            cleaned_row = []
+            for cell in row:
+                cell_str = str(cell) if cell is not None else ""
+                cell_str = cell_str.strip()
+                # Replace multiple spaces with single space
+                cell_str = " ".join(cell_str.split())
+                cleaned_row.append(cell_str)
+            
+            # Only include rows that have at least one non-empty cell
+            if any(cell for cell in cleaned_row):
+                cleaned.append(cleaned_row)
+        
+        # Remove columns that are completely empty
+        if cleaned:
+            # Find columns with any content
+            col_count = max(len(row) for row in cleaned)
+            non_empty_cols = []
+            
+            for col_idx in range(col_count):
+                col_has_content = False
+                for row in cleaned:
+                    if col_idx < len(row) and row[col_idx]:
+                        col_has_content = True
+                        break
+                if col_has_content:
+                    non_empty_cols.append(col_idx)
+            
+            # Keep only non-empty columns
+            if non_empty_cols:
+                filtered_cleaned = []
+                for row in cleaned:
+                    filtered_row = [row[idx] if idx < len(row) else "" for idx in non_empty_cols]
+                    filtered_cleaned.append(filtered_row)
+                cleaned = filtered_cleaned
+        
+        return cleaned
 
     def _format_page_text(self, page_num: int, page_analysis: Dict[str, Any], 
                          grid_system: Optional[GridSystem], page_text: str) -> str:
@@ -663,7 +817,12 @@ class PDFService:
                 'page_index': {},
                 'drawing_types': defaultdict(list),
                 'sheet_numbers': {},
-                'grid_pages': []
+                'grid_pages': [],
+                'table_summary': {
+                    'total_tables_found': 0,
+                    'total_tables_extracted': 0,
+                    'pages_with_tables': []
+                }
             }
             
             for page_detail in page_details:
@@ -673,7 +832,9 @@ class PDFService:
                     'has_text': page_detail['has_text'],
                     'drawing_type': page_detail.get('drawing_type'),
                     'sheet_number': page_detail.get('sheet_number'),
-                    'has_grid': page_detail.get('has_grid', False)
+                    'has_grid': page_detail.get('has_grid', False),
+                    'has_tables': page_detail.get('has_tables', False),
+                    'table_count': page_detail.get('table_count', 0)
                 }
                 
                 if page_detail.get('drawing_type'):
@@ -684,6 +845,13 @@ class PDFService:
                 
                 if page_detail.get('has_grid'):
                     index['grid_pages'].append(page_num)
+                
+                # Track table information
+                if page_detail.get('has_tables'):
+                    index['table_summary']['pages_with_tables'].append(page_num)
+                
+                index['table_summary']['total_tables_found'] += page_detail.get('tables_found', 0)
+                index['table_summary']['total_tables_extracted'] += page_detail.get('tables_extracted', 0)
             
             # Convert defaultdict to regular dict for JSON serialization
             index['drawing_types'] = dict(index['drawing_types'])
@@ -730,6 +898,7 @@ class PDFService:
                 "batch_size": self.batch_size,
                 "full_text_extraction": True,
                 "table_extraction": True,
+                "unlimited_tables": True,  # Added to show unlimited capability
                 "grid_detection": True,
                 "multi_resolution_images": True,
                 "ai_optimized": True,
