@@ -56,7 +56,6 @@ def validate_document_id(document_id: str) -> str:
             detail="Document ID must be a non-empty string"
         )
     
-    # Remove any potentially dangerous characters
     # Allow only alphanumeric, underscore, and hyphen
     clean_id = re.sub(r'[^a-zA-Z0-9_-]', '_', document_id.strip())
     
@@ -157,7 +156,8 @@ async def process_pdf_async(
         # Update session if available
         if session_service and hasattr(session_service, 'update_session_metadata'):
             try:
-                session_service.update_session_metadata(
+                # FIXED: Added await for the async function call
+                await session_service.update_session_metadata(
                     document_id=session_id,
                     metadata={
                         'processing_complete': True,
@@ -325,7 +325,8 @@ async def upload_document(
         if session_service:
             try:
                 if hasattr(session_service, 'create_session'):
-                    session_service.create_session(
+                    # FIXED: Added await for the async function call
+                    await session_service.create_session(
                         document_id=session_id,
                         original_filename=clean_filename
                     )
@@ -371,8 +372,7 @@ async def upload_document(
             filename=clean_filename,
             status="processing",
             message=f"Document uploaded successfully! Processing will take approximately {initial_status['estimated_processing_time']} seconds.",
-            file_size_mb=round(file_size_mb, 2),
-            estimated_time=initial_status['estimated_processing_time']
+            file_size_mb=round(file_size_mb, 2)
         )
         
     except HTTPException:
@@ -677,7 +677,8 @@ async def chat_with_document(
         session_service = getattr(request.app.state, 'session_service', None)
         if session_service and hasattr(session_service, 'record_chat_activity'):
             try:
-                session_service.record_chat_activity(
+                # FIXED: Added await for the async function call
+                await session_service.record_chat_activity(
                     document_id=clean_document_id,
                     user=chat_request.author
                 )

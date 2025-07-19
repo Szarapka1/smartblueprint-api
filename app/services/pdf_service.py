@@ -530,9 +530,8 @@ class PDFService:
             # AI optimized (JPEG)
             await self._generate_ai_image(page, page_num, session_id, storage_service)
             
-            # Thumbnail (first 5 pages only)
-            if page_num <= 5:
-                await self._generate_thumbnail(page, page_num, session_id, storage_service)
+            # FIXED: Generate a thumbnail for EVERY page, not just the first 5
+            await self._generate_thumbnail(page, page_num, session_id, storage_service)
             
             # Force cleanup
             gc.collect()

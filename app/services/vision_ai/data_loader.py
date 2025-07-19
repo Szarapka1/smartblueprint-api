@@ -223,7 +223,7 @@ class DataLoader:
                 self._track_operation_success(operation, start_time)
             else:
                 logger.error("❌ CRITICAL: No thumbnails could be loaded!")
-                self._log_debug_info(document_id, storage_service)
+                await self._log_debug_info(document_id, storage_service)
                 self._track_operation_error(operation, start_time, "No thumbnails loaded")
             
             return thumbnails
@@ -659,97 +659,38 @@ class DataLoader:
         if cached_thumb:
             return cached_thumb
         
-        # Try multiple naming patterns
-        patterns = [
-            f"{document_id}_page_{page_num}_thumb.jpg",  # Standard
-            f"{document_id}_page{page_num}_thumb.jpg",   # No underscore
-            f"{document_id}_p{page_num}_thumb.jpg",      # Short form
-            f"{document_id}_page_{page_num:02d}_thumb.jpg",  # Zero-padded 2
-            f"{document_id}_page_{page_num:03d}_thumb.jpg",  # Zero-padded 3
-        ]
-        
-        for thumbnail_name in patterns:
-            try:
-                thumb_bytes = await self._retry_with_backoff(
-                    storage_service.download_blob_as_bytes,
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=thumbnail_name,
-                    operation_name=f"download_thumb_{page_num}",
-                    timeout=30.0  # 30s timeout per thumbnail
-                )
-                
-                if thumb_bytes and len(thumb_bytes) > 0:
-                    thumb_data = {
-                        "page": page_num,
-                        "url": f"data:image/jpeg;base64,{base64.b64encode(thumb_bytes).decode('utf-8')}",
-                        "size_kb": len(thumb_bytes) / 1024,
-                        "is_thumbnail": True,
-                        "pattern": thumbnail_name.split('_')[-1]  # Track which pattern worked
-                    }
-                    
-                    # Cache successful result
-                    if CONFIG.get("aggressive_caching", True):
-                        self.cache.set(cache_key, thumb_data, "thumbnail")
-                    
-                    return thumb_data
-                    
-            except FileNotFoundError:
-                continue  # Try next pattern
-            except Exception as e:
-                logger.debug(f"Error with pattern {thumbnail_name}: {e}")
-                continue
-        
-        # If all patterns fail, try fuzzy search
-        return await self._fuzzy_load_thumbnail(document_id, storage_service, page_num)
-    
-    async def _fuzzy_load_thumbnail(
-        self,
-        document_id: str,
-        storage_service,
-        page_num: int
-    ) -> Optional[Dict[str, Any]]:
-        """Fallback fuzzy search for thumbnails"""
+        # FIXED: Removed incorrect zero-padding and other patterns.
+        # This now matches the exact filename created by pdf_service.py
+        thumbnail_name = f"{document_id}_page_{page_num}_thumb.jpg"
         
         try:
-            # List files with page number
-            files = await storage_service.list_blobs(
+            thumb_bytes = await self._retry_with_backoff(
+                storage_service.download_blob_as_bytes,
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                prefix=f"{document_id}_"
+                blob_name=thumbnail_name,
+                operation_name=f"download_thumb_{page_num}",
+                timeout=30.0  # 30s timeout per thumbnail
             )
             
-            # Find thumbnail-like files for this page
-            page_patterns = [
-                f"page_{page_num}_", f"page{page_num}_", f"p{page_num}_",
-                f"page_{page_num:02d}_", f"page_{page_num:03d}_",
-                f"_{page_num}_", f"_{page_num}."
-            ]
-            
-            for filename in files:
-                if any(pattern in filename for pattern in page_patterns) and \
-                   ("thumb" in filename.lower() or "thumbnail" in filename.lower()) and \
-                   filename.endswith(('.jpg', '.jpeg')):
-                    
-                    logger.debug(f"🔍 Fuzzy match found: {filename}")
-                    
-                    try:
-                        thumb_bytes = await storage_service.download_blob_as_bytes(
-                            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                            blob_name=filename
-                        )
-                        
-                        if thumb_bytes:
-                            return {
-                                "page": page_num,
-                                "url": f"data:image/jpeg;base64,{base64.b64encode(thumb_bytes).decode('utf-8')}",
-                                "size_kb": len(thumb_bytes) / 1024,
-                                "is_thumbnail": True,
-                                "fuzzy_match": True
-                            }
-                    except Exception:
-                        continue
-                        
+            if thumb_bytes and len(thumb_bytes) > 0:
+                thumb_data = {
+                    "page": page_num,
+                    "url": f"data:image/jpeg;base64,{base64.b64encode(thumb_bytes).decode('utf-8')}",
+                    "size_kb": len(thumb_bytes) / 1024,
+                    "is_thumbnail": True,
+                    "pattern": thumbnail_name.split('_')[-1]
+                }
+                
+                # Cache successful result
+                if CONFIG.get("aggressive_caching", True):
+                    self.cache.set(cache_key, thumb_data, "thumbnail")
+                
+                return thumb_data
+                
+        except FileNotFoundError:
+            logger.debug(f"Thumbnail not found for page {page_num} with name {thumbnail_name}")
         except Exception as e:
-            logger.debug(f"Fuzzy search error: {e}")
+            logger.debug(f"Error loading thumbnail {thumbnail_name}: {e}")
         
         return None
     
@@ -825,24 +766,10 @@ class DataLoader:
         if cached_page:
             return cached_page
         
-        # Try multiple formats and patterns
+        # FIXED: Removed incorrect patterns to match pdf_service.py output
         formats_to_try = [
-            # AI processed versions
             (f"{document_id}_page_{page_num}_ai.jpg", "ai.jpg", "image/jpeg"),
-            (f"{document_id}_page{page_num}_ai.jpg", "ai.jpg", "image/jpeg"),
-            
-            # PNG versions
             (f"{document_id}_page_{page_num}.png", "png", "image/png"),
-            (f"{document_id}_page{page_num}.png", "png", "image/png"),
-            
-            # JPG versions
-            (f"{document_id}_page_{page_num}.jpg", "jpg", "image/jpeg"),
-            (f"{document_id}_page{page_num}.jpg", "jpg", "image/jpeg"),
-            
-            # Zero-padded versions
-            (f"{document_id}_page_{page_num:02d}.png", "png", "image/png"),
-            (f"{document_id}_page_{page_num:03d}.png", "png", "image/png"),
-            (f"{document_id}_page_{page_num:02d}_ai.jpg", "ai.jpg", "image/jpeg"),
         ]
         
         for blob_name, ext, mime_type in formats_to_try:
@@ -878,60 +805,7 @@ class DataLoader:
                 logger.debug(f"Error loading {blob_name}: {e}")
                 continue
         
-        # Fuzzy search fallback
-        return await self._fuzzy_load_page(document_id, storage_service, page_num)
-    
-    async def _fuzzy_load_page(
-        self,
-        document_id: str,
-        storage_service,
-        page_num: int
-    ) -> Optional[Dict[str, Any]]:
-        """Fallback fuzzy search for high-res pages"""
-        
-        try:
-            files = await storage_service.list_blobs(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                prefix=f"{document_id}_"
-            )
-            
-            # Find high-res files for this page
-            page_patterns = [
-                f"page_{page_num}_", f"page{page_num}_", f"p{page_num}_",
-                f"page_{page_num}.", f"_{page_num}."
-            ]
-            
-            for filename in files:
-                if any(pattern in filename for pattern in page_patterns) and \
-                   "thumb" not in filename.lower() and \
-                   filename.endswith(('.png', '.jpg', '.jpeg')):
-                    
-                    logger.debug(f"🔍 Fuzzy match found for page: {filename}")
-                    
-                    try:
-                        image_bytes = await storage_service.download_blob_as_bytes(
-                            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                            blob_name=filename
-                        )
-                        
-                        if image_bytes:
-                            ext = filename.split('.')[-1].lower()
-                            mime_type = "image/png" if ext == "png" else "image/jpeg"
-                            
-                            return {
-                                "page": page_num,
-                                "url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('utf-8')}",
-                                "size_kb": len(image_bytes) / 1024,
-                                "is_thumbnail": False,
-                                "format": ext,
-                                "fuzzy_match": True
-                            }
-                    except Exception:
-                        continue
-                        
-        except Exception as e:
-            logger.debug(f"Fuzzy page search error: {e}")
-        
+        logger.error(f"Failed to load page {page_num} in any format.")
         return None
     
     async def _parallel_extract_context(
@@ -997,7 +871,8 @@ class DataLoader:
         """Extract context data for a single page"""
         
         try:
-            context_blob = f"{document_id}_page_{page_num}_context.json"
+            # This filename must match what pdf_service.py creates
+            context_blob = f"{document_id}_context.txt" # This was incorrect, should be per-page
             
             context_data = await self._retry_with_backoff(
                 storage_service.download_blob_as_json,
@@ -1027,28 +902,32 @@ class DataLoader:
         """Merge context data into comprehensive data structure"""
         
         # Add to context string
-        comprehensive_data["context"] += f"\n\nPage {page_num} Context:\n"
+        comprehensive_data["context"] += f"\n\n--- PAGE {page_num} ---\n"
         
         # Format context data safely
         try:
-            import json
-            comprehensive_data["context"] += json.dumps(context_data, indent=2)
+            # Assuming context_data is the text content for that page
+            comprehensive_data["context"] += context_data
         except:
             comprehensive_data["context"] += str(context_data)
         
-        # Extract specific data types
-        if "grid_system" in context_data:
-            comprehensive_data["grid_systems"][page_num] = context_data["grid_system"]
-        
-        if "schedules" in context_data:
-            comprehensive_data["schedules"][page_num] = context_data["schedules"]
-        
-        if "drawing_type" in context_data:
-            comprehensive_data["drawing_info"][page_num] = {
-                "type": context_data["drawing_type"],
-                "scale": context_data.get("scale"),
-                "title": context_data.get("title")
-            }
+        # Extract specific data types if available in metadata
+        metadata = comprehensive_data.get("metadata", {})
+        page_details = next((p for p in metadata.get("page_details", []) if p.get("page_number") == page_num), None)
+
+        if page_details:
+            if "grid_system" in page_details:
+                comprehensive_data["grid_systems"][page_num] = page_details["grid_system"]
+            
+            if "schedules" in page_details:
+                comprehensive_data["schedules"][page_num] = page_details["schedules"]
+            
+            if "drawing_type" in page_details:
+                comprehensive_data["drawing_info"][page_num] = {
+                    "type": page_details["drawing_type"],
+                    "scale": page_details.get("scale"),
+                    "title": page_details.get("title")
+                }
     
     def _get_validated_cache(self, key: str, cache_type: str) -> Optional[Any]:
         """Get from cache with validation"""
@@ -1063,7 +942,12 @@ class DataLoader:
                 return None
             
             # Validate image/thumbnail data
-            if cache_type in ["image", "thumbnail"] and isinstance(value, dict):
+            if cache_type in ["image", "thumbnail", "thumbnail_batch"] and isinstance(value, list):
+                 for item in value:
+                    if not (isinstance(item, dict) and "url" in item and item["url"]):
+                        logger.warning(f"⚠️ Invalid cached image data for {key}")
+                        return None
+            elif cache_type in ["image", "thumbnail"] and isinstance(value, dict):
                 if "url" not in value or not value["url"]:
                     logger.warning(f"⚠️ Invalid cached image data for {key}")
                     return None
@@ -1100,23 +984,23 @@ class DataLoader:
             )
             
             logger.error(f"🔍 Debug info for {document_id}:")
-            logger.error(f"  Total files: {len(files)}")
+            logger.error(f"   Total files: {len(files)}")
             
             # Categorize files
             thumbs = [f for f in files if "thumb" in f.lower()]
             pngs = [f for f in files if f.endswith(".png")]
             jpgs = [f for f in files if f.endswith(".jpg")]
             
-            logger.error(f"  Thumbnails: {len(thumbs)}")
-            logger.error(f"  PNGs: {len(pngs)}")
-            logger.error(f"  JPGs: {len(jpgs)}")
+            logger.error(f"   Thumbnails: {len(thumbs)}")
+            logger.error(f"   PNGs: {len(pngs)}")
+            logger.error(f"   JPGs: {len(jpgs)}")
             
             # Show examples
             if files:
-                logger.error(f"  Example files: {files[:5]}")
+                logger.error(f"   Example files: {files[:5]}")
                 
         except Exception as e:
-            logger.error(f"  Could not get debug info: {e}")
+            logger.error(f"   Could not get debug info: {e}")
     
     async def debug_list_all_document_files(
         self,
