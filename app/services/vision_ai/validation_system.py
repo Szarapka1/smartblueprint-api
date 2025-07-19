@@ -80,7 +80,7 @@ class ValidationSystem:
         try:
             validation_results = await asyncio.wait_for(
                 asyncio.gather(*tasks, return_exceptions=True),
-                timeout=CONFIG.get("validation_timeout", 360.0)
+                timeout=CONFIG.get("validation_timeout", 60.0)
             )
         except asyncio.TimeoutError:
             logger.error("⚠️ Validation timeout - using partial results")
@@ -226,6 +226,7 @@ USE THIS TEXT TO:
             base_prompt += self._get_visual_pattern_prompt(element_type, pages_analyzed, page_counts)
             
         elif methodology == "count_reconciliation":
+            # FIXED: This now uses the more skeptical, independent counting prompt
             base_prompt += self._get_count_reconciliation_prompt(element_type, count, pages_analyzed, page_counts)
             
         elif methodology == "spatial_consistency":
@@ -271,40 +272,27 @@ PROVIDE:
         return prompt
     
     def _get_count_reconciliation_prompt(self, element_type: str, count: int, pages_analyzed: int, page_counts: Dict[int, int]) -> str:
-        """Get count reconciliation prompt - ENHANCED for multi-page"""
+        """
+        FIXED: Get count reconciliation prompt that forces independent counting.
+        """
         prompt = f"""
 
-COUNT RECONCILIATION:
-1. SEARCH for any {element_type} schedule, legend, or specification table
-2. IF FOUND, count entries and compare to visual count of {count}
-3. CHECK for any notes indicating quantity (e.g., "provide 12 outlets")
-4. RECONCILE any differences between visual count and documented count"""
-
-        if pages_analyzed > 1:
-            prompt += f"""
-5. VERIFY the sum of page counts equals the total: {sum(page_counts.values()) if page_counts else "N/A"} = {count}?
-6. CHECK if schedule shows per-floor or per-area breakdowns
-7. ENSURE no elements are counted on multiple pages"""
-
-        prompt += """
+COUNT RECONCILIATION (CRITICAL):
+1. SEARCH the document for any schedule, legend, or table for "{element_type}s".
+2. INDEPENDENTLY COUNT every single entry for "{element_type}s" listed in that schedule.
+3. REPORT the total number you counted from the schedule. This is the most important step.
+4. COMPARE your independent schedule count to the initial visual count of {count}.
+5. EXPLAIN any difference between your count and the visual count.
 
 PROVIDE:
 - Schedule Found: [YES/NO]
-- Schedule Count: [number if found]
-- Visual Count: """ + str(count)
-
-        if pages_analyzed > 1 and page_counts:
-            prompt += f"""
-- Page Count Sum: {sum(page_counts.values())}
-- Discrepancy: [{sum(page_counts.values()) - count} if different]"""
-
-        prompt += """
-- Other Quantity References: [any notes about quantities]
+- Schedule Count: [**The number you independently counted from the schedule**]
+- Visual Count: {count}
 - Match Status: [PERFECT_MATCH/CLOSE_MATCH/MISMATCH/NO_SCHEDULE]
-- Reconciliation: [explain any differences]"""
-
+- Reconciliation: [Explain any differences]
+"""
         return prompt
-    
+
     def _get_spatial_consistency_prompt(self, element_type: str, count: int, pages_analyzed: int, page_counts: Dict[int, int]) -> str:
         """Get spatial consistency prompt - ENHANCED for multi-page"""
         prompt = f"""

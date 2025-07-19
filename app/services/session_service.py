@@ -363,7 +363,7 @@ class SessionService:
            self.stats['total_annotations'] += 1
            
            # Auto-persist if many changes
-           if len(session.recent_annotations) >= session.max_items_in_memory:
+           if len(session.recent_annotations) >= session.max_items_per_session:
                await self._persist_session_data(document_id, session)
        
        return True
@@ -373,13 +373,14 @@ class SessionService:
    async def _persist_session_data(self, session_id: str, session: DocumentSession):
        """Persist session data to storage with compression."""
        try:
-           # Create persistence timestamp
-           persist_time = datetime.now(timezone.utc).isoformat()
+           # Create a filename-safe timestamp
+           now = datetime.now(timezone.utc)
+           persist_time_str = now.strftime('%Y-%m-%dT%H-%M-%S')
            
            # Prepare data for persistence
            session_data = {
                "session_id": session_id,
-               "persisted_at": persist_time,
+               "persisted_at": now.isoformat(),
                "summary": session.to_summary_dict(),
                "recent_annotations": list(session.recent_annotations),
                "recent_chats": list(session.recent_chats),
@@ -393,13 +394,13 @@ class SessionService:
            # Convert to JSON
            json_data = json.dumps(session_data, indent=2, ensure_ascii=False)
            
-           # Compress if enabled
+           # FIXED: Create a blob name with a sanitized, filename-safe timestamp
            if self.compress_persistence:
                data_bytes = gzip.compress(json_data.encode('utf-8'))
-               blob_name = f"{session_id}_session_{persist_time.replace(':', '-')}.json.gz"
+               blob_name = f"{session_id}_session_{persist_time_str}.json.gz"
            else:
                data_bytes = json_data.encode('utf-8')
-               blob_name = f"{session_id}_session_{persist_time.replace(':', '-')}.json"
+               blob_name = f"{session_id}_session_{persist_time_str}.json"
            
            # Upload to storage
            await self.storage_service.upload_file(

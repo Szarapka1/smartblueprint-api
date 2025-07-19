@@ -363,16 +363,30 @@ class DataLoader:
             if metadata:
                 comprehensive_data["metadata"] = metadata
             
-            # Extract context for each page
-            if CONFIG.get("parallel_processing", True) and len(analyzed_pages) > 2:
-                await self._parallel_extract_context(
-                    document_id, storage_service, analyzed_pages, comprehensive_data
+            # FIXED: Load the single context.txt file instead of per-page JSON
+            try:
+                context_blob_name = f"{document_id}_context.txt"
+                context_text = await self._retry_with_backoff(
+                    storage_service.download_blob_as_text,
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=context_blob_name,
+                    operation_name="load_context_text",
+                    timeout=60.0
                 )
-            else:
-                await self._sequential_extract_context(
-                    document_id, storage_service, analyzed_pages, comprehensive_data
-                )
-            
+                comprehensive_data["context"] = context_text
+                logger.info(f"✅ Loaded context text file: {len(context_text)} chars")
+            except FileNotFoundError:
+                logger.warning(f"⚠️ No context.txt file found for {document_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to load context.txt: {e}")
+
+            # Extract details from the main metadata file for the selected pages
+            if metadata and "page_details" in metadata:
+                for page_num in analyzed_pages:
+                    page_detail = next((p for p in metadata["page_details"] if p.get("page_number") == page_num), None)
+                    if page_detail:
+                        self._merge_context_data(comprehensive_data, page_detail, page_num)
+
             # Cache the comprehensive data
             if CONFIG.get("aggressive_caching", True) and comprehensive_data.get("context"):
                 self.cache.set(cache_key, comprehensive_data, "analysis")
@@ -659,7 +673,6 @@ class DataLoader:
         if cached_thumb:
             return cached_thumb
         
-        # FIXED: Removed incorrect zero-padding and other patterns.
         # This now matches the exact filename created by pdf_service.py
         thumbnail_name = f"{document_id}_page_{page_num}_thumb.jpg"
         
@@ -766,7 +779,7 @@ class DataLoader:
         if cached_page:
             return cached_page
         
-        # FIXED: Removed incorrect patterns to match pdf_service.py output
+        # These patterns match the exact filenames created by pdf_service.py
         formats_to_try = [
             (f"{document_id}_page_{page_num}_ai.jpg", "ai.jpg", "image/jpeg"),
             (f"{document_id}_page_{page_num}.png", "png", "image/png"),
@@ -808,126 +821,38 @@ class DataLoader:
         logger.error(f"Failed to load page {page_num} in any format.")
         return None
     
-    async def _parallel_extract_context(
-        self,
-        document_id: str,
-        storage_service,
-        analyzed_pages: List[int],
-        comprehensive_data: Dict[str, Any]
-    ) -> None:
-        """Extract context data in parallel"""
-        
-        semaphore = asyncio.Semaphore(10)  # Limit concurrent extractions
-        
-        async def extract_with_semaphore(page_num: int) -> Tuple[int, Optional[Dict[str, Any]]]:
-            async with semaphore:
-                context = await self._extract_page_context(
-                    document_id, storage_service, page_num
-                )
-                return page_num, context
-        
-        # Create tasks
-        tasks = [extract_with_semaphore(page_num) for page_num in analyzed_pages]
-        
-        # Execute with timeout
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=self.timeout_config["batch"]
-            )
-            
-            # Process results
-            for result in results:
-                if isinstance(result, tuple):
-                    page_num, context_data = result
-                    if context_data:
-                        self._merge_context_data(comprehensive_data, context_data, page_num)
-                        
-        except asyncio.TimeoutError:
-            logger.error("❌ Context extraction timeout")
-    
-    async def _sequential_extract_context(
-        self,
-        document_id: str,
-        storage_service,
-        analyzed_pages: List[int],
-        comprehensive_data: Dict[str, Any]
-    ) -> None:
-        """Extract context data sequentially"""
-        
-        for page_num in analyzed_pages:
-            context_data = await self._extract_page_context(
-                document_id, storage_service, page_num
-            )
-            if context_data:
-                self._merge_context_data(comprehensive_data, context_data, page_num)
-    
+    # This function is no longer needed as context is loaded from a single file
+    # and details are merged from the main metadata.
     async def _extract_page_context(
         self,
         document_id: str,
         storage_service,
         page_num: int
     ) -> Optional[Dict[str, Any]]:
-        """Extract context data for a single page"""
-        
-        try:
-            # This filename must match what pdf_service.py creates
-            context_blob = f"{document_id}_context.txt" # This was incorrect, should be per-page
-            
-            context_data = await self._retry_with_backoff(
-                storage_service.download_blob_as_json,
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=context_blob,
-                operation_name=f"context_{page_num}",
-                timeout=30.0
-            )
-            
-            if context_data:
-                logger.debug(f"✅ Loaded context for page {page_num}")
-                return context_data
-                
-        except FileNotFoundError:
-            logger.debug(f"No context file for page {page_num}")
-        except Exception as e:
-            logger.debug(f"Context extraction error for page {page_num}: {e}")
-        
+        """DEPRECATED: Context is now loaded from a single file."""
         return None
     
     def _merge_context_data(
         self,
         comprehensive_data: Dict[str, Any],
-        context_data: Dict[str, Any],
+        page_detail: Dict[str, Any],
         page_num: int
     ) -> None:
-        """Merge context data into comprehensive data structure"""
-        
-        # Add to context string
-        comprehensive_data["context"] += f"\n\n--- PAGE {page_num} ---\n"
-        
-        # Format context data safely
-        try:
-            # Assuming context_data is the text content for that page
-            comprehensive_data["context"] += context_data
-        except:
-            comprehensive_data["context"] += str(context_data)
+        """Merge page-specific details from metadata into comprehensive data structure"""
         
         # Extract specific data types if available in metadata
-        metadata = comprehensive_data.get("metadata", {})
-        page_details = next((p for p in metadata.get("page_details", []) if p.get("page_number") == page_num), None)
-
-        if page_details:
-            if "grid_system" in page_details:
-                comprehensive_data["grid_systems"][page_num] = page_details["grid_system"]
-            
-            if "schedules" in page_details:
-                comprehensive_data["schedules"][page_num] = page_details["schedules"]
-            
-            if "drawing_type" in page_details:
-                comprehensive_data["drawing_info"][page_num] = {
-                    "type": page_details["drawing_type"],
-                    "scale": page_details.get("scale"),
-                    "title": page_details.get("title")
-                }
+        if "grid_system" in page_detail:
+            comprehensive_data["grid_systems"][page_num] = page_detail["grid_system"]
+        
+        if "schedules" in page_detail:
+            comprehensive_data["schedules"][page_num] = page_detail["schedules"]
+        
+        if "drawing_type" in page_detail:
+            comprehensive_data["drawing_info"][page_num] = {
+                "type": page_detail.get("drawing_type"),
+                "scale": page_detail.get("scale"),
+                "title": page_detail.get("title")
+            }
     
     def _get_validated_cache(self, key: str, cache_type: str) -> Optional[Any]:
         """Get from cache with validation"""
