@@ -85,6 +85,17 @@ class BatchPageDataResponse(BaseModel):
     pages: List[PageDataResponse]
     total_pages: int
 
+class CompleteDocumentDataResponse(BaseModel):
+    document_id: str
+    metadata: Optional[Dict[str, Any]]
+    grid_systems: Optional[Dict[str, Any]]
+    document_index: Optional[Dict[str, Any]]
+    context_text: Optional[str]
+    tables: Optional[List[Dict[str, Any]]]
+    page_images: Dict[str, Dict[str, str]]
+    summary: Dict[str, Any]
+    timestamp: str
+
 # --- Helper Functions ---
 
 def validate_document_id(document_id: str) -> str:
@@ -200,6 +211,153 @@ async def get_document_details(request: Request, document_id: str):
     except Exception as e:
         logger.error(f"Failed to get metadata for {clean_document_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while fetching metadata.")
+
+# --- NEW COMPREHENSIVE DATA ENDPOINT ---
+
+@document_router.get("/documents/{document_id}/complete-data",
+                    response_model=CompleteDocumentDataResponse,
+                    summary="Get all document data in one request")
+async def get_complete_document_data(
+    request: Request,
+    document_id: str,
+    include_text: bool = Query(True, description="Include full context text"),
+    include_tables: bool = Query(True, description="Include extracted tables")
+):
+    """
+    Get all document data in a single comprehensive response.
+    This eliminates the need for multiple API calls from the frontend.
+    Includes both thumbnail and high-quality image URLs.
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    storage_service = await _get_service(request, 'storage_service')
+    
+    try:
+        cache_container = settings.AZURE_CACHE_CONTAINER_NAME
+        
+        # Check if document exists and is processed
+        if not await storage_service.blob_exists(cache_container, f"{clean_document_id}_metadata.json"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document '{clean_document_id}' not found or not yet processed"
+            )
+        
+        # Prepare response data
+        response_data = {
+            "document_id": clean_document_id,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        # 1. Load metadata
+        try:
+            metadata_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=f"{clean_document_id}_metadata.json"
+            )
+            response_data["metadata"] = json.loads(metadata_text)
+        except Exception as e:
+            logger.error(f"Failed to load metadata: {e}")
+            response_data["metadata"] = None
+        
+        # 2. Load grid systems
+        try:
+            grid_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=f"{clean_document_id}_grid_systems.json"
+            )
+            response_data["grid_systems"] = json.loads(grid_text)
+        except Exception:
+            response_data["grid_systems"] = {}
+        
+        # 3. Load document index
+        try:
+            index_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=f"{clean_document_id}_document_index.json"
+            )
+            response_data["document_index"] = json.loads(index_text)
+        except Exception:
+            response_data["document_index"] = None
+        
+        # 4. Load context text (optional)
+        if include_text:
+            try:
+                context_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_context.txt"
+                )
+                response_data["context_text"] = context_text
+            except Exception:
+                response_data["context_text"] = None
+        else:
+            response_data["context_text"] = None
+        
+        # 5. Load tables (optional)
+        if include_tables:
+            try:
+                tables_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_tables.json"
+                )
+                response_data["tables"] = json.loads(tables_text)
+            except Exception:
+                response_data["tables"] = []
+        else:
+            response_data["tables"] = []
+        
+        # 6. Generate page image URLs (BOTH thumbnails and high-quality)
+        page_count = response_data.get("metadata", {}).get("page_count", 0)
+        base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net/{cache_container}"
+        
+        page_images = {}
+        for page_num in range(1, page_count + 1):
+            # Thumbnail and high-quality JPEG
+            thumbnail_blob = f"{clean_document_id}_page_{page_num}_thumb.jpg"
+            jpeg_blob = f"{clean_document_id}_page_{page_num}.jpg"
+            
+            page_images[str(page_num)] = {
+                "thumbnail_url": f"{base_url}/{thumbnail_blob}",
+                "jpeg_url": f"{base_url}/{jpeg_blob}",
+                "thumbnail_blob": thumbnail_blob,
+                "jpeg_blob": jpeg_blob
+            }
+        
+        response_data["page_images"] = page_images
+        
+        # 7. Add processing summary
+        response_data["summary"] = {
+            "total_pages": page_count,
+            "has_grids": bool(response_data.get("grid_systems")),
+            "has_tables": bool(response_data.get("tables")),
+            "has_thumbnails": response_data.get("metadata", {}).get("extraction_summary", {}).get("has_thumbnails", True),
+            "drawing_types": list(response_data.get("document_index", {}).get("drawing_types", {}).keys()) if response_data.get("document_index") else [],
+            "grid_pages": response_data.get("document_index", {}).get("grid_pages", []) if response_data.get("document_index") else [],
+            "table_pages": response_data.get("document_index", {}).get("table_pages", []) if response_data.get("document_index") else [],
+            "image_settings": response_data.get("metadata", {}).get("image_settings", {}) if response_data.get("metadata") else {}
+        }
+        
+        # Convert to response model
+        response = CompleteDocumentDataResponse(**response_data)
+        
+        # Return with cache headers
+        return JSONResponse(
+            content=response.dict(),
+            headers={
+                "Cache-Control": "public, max-age=600",  # 10 minutes cache
+                "X-Document-ID": clean_document_id,
+                "X-Page-Count": str(page_count)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get complete document data: {e}")
+        logger.error(f"Full traceback: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve document data: {str(e)}"
+        )
 
 @document_router.get("/documents/{document_id}/grid-systems", 
                     summary="Get comprehensive grid system data")
