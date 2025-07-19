@@ -1,8 +1,7 @@
-# app/api/routes/blueprint_routes.py - PRODUCTION-READY OPTIMIZED VERSION
+# app/api/routes/blueprint_routes.py - OPTIMIZED WITH THUMBNAILS AND SINGLE HIGH-QUALITY JPEG
 
 """
-Blueprint Analysis Routes - Production-Ready with Enhanced Error Handling
-Optimized for large documents (up to 100MB) with unlimited page support
+Blueprint Analysis Routes - Optimized with thumbnails for fast preview and high-quality JPEGs for analysis
 """
 
 import traceback
@@ -52,6 +51,9 @@ PDF_HEADER_BYTES = [b'%PDF', b'\x25\x50\x44\x46']  # Standard and hex-encoded PD
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0
 PROCESSING_STATUS_TTL = 86400  # 24 hours
+CACHE_CONTROL_METADATA = "public, max-age=3600"  # 1 hour cache for metadata
+CACHE_CONTROL_IMAGES = "public, max-age=86400"  # 24 hour cache for images
+CACHE_CONTROL_THUMBNAILS = "public, max-age=604800"  # 7 day cache for thumbnails
 
 # ===== VALIDATION FUNCTIONS =====
 
@@ -132,6 +134,350 @@ def sanitize_filename(filename: str) -> str:
     
     return clean_name
 
+# ===== NEW COMPREHENSIVE DATA ENDPOINT WITH THUMBNAILS =====
+
+@blueprint_router.get(
+    "/documents/{document_id}/complete-data",
+    summary="Get all document data in one request",
+    description="Retrieve all processed document data including metadata, text, grids, thumbnails, and image URLs"
+)
+async def get_complete_document_data(
+    request: Request,
+    document_id: str,
+    include_text: bool = True,
+    include_tables: bool = True
+):
+    """
+    Get all document data in a single comprehensive response.
+    This eliminates the need for multiple API calls from the frontend.
+    Includes both thumbnail and high-quality image URLs.
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    storage_service = request.app.state.storage_service
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
+    
+    try:
+        cache_container = settings.AZURE_CACHE_CONTAINER_NAME
+        
+        # Check if document exists and is processed
+        if not await storage_service.blob_exists(cache_container, f"{clean_document_id}_metadata.json"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document '{clean_document_id}' not found or not yet processed"
+            )
+        
+        # Prepare response data
+        response_data = {
+            "document_id": clean_document_id,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        # 1. Load metadata
+        try:
+            metadata_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=f"{clean_document_id}_metadata.json"
+            )
+            response_data["metadata"] = json.loads(metadata_text)
+        except Exception as e:
+            logger.error(f"Failed to load metadata: {e}")
+            response_data["metadata"] = None
+        
+        # 2. Load grid systems
+        try:
+            grid_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=f"{clean_document_id}_grid_systems.json"
+            )
+            response_data["grid_systems"] = json.loads(grid_text)
+        except Exception:
+            response_data["grid_systems"] = {}
+        
+        # 3. Load document index
+        try:
+            index_text = await storage_service.download_blob_as_text(
+                container_name=cache_container,
+                blob_name=f"{clean_document_id}_document_index.json"
+            )
+            response_data["document_index"] = json.loads(index_text)
+        except Exception:
+            response_data["document_index"] = None
+        
+        # 4. Load context text (optional)
+        if include_text:
+            try:
+                context_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_context.txt"
+                )
+                response_data["context_text"] = context_text
+            except Exception:
+                response_data["context_text"] = None
+        
+        # 5. Load tables (optional)
+        if include_tables:
+            try:
+                tables_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=f"{clean_document_id}_tables.json"
+                )
+                response_data["tables"] = json.loads(tables_text)
+            except Exception:
+                response_data["tables"] = []
+        
+        # 6. Generate page image URLs (BOTH thumbnails and high-quality)
+        page_count = response_data.get("metadata", {}).get("page_count", 0)
+        base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net/{cache_container}"
+        
+        page_images = {}
+        for page_num in range(1, page_count + 1):
+            # Thumbnail and high-quality JPEG
+            thumbnail_blob = f"{clean_document_id}_page_{page_num}_thumb.jpg"
+            jpeg_blob = f"{clean_document_id}_page_{page_num}.jpg"
+            
+            page_images[str(page_num)] = {
+                "thumbnail_url": f"{base_url}/{thumbnail_blob}",
+                "jpeg_url": f"{base_url}/{jpeg_blob}",
+                "thumbnail_blob": thumbnail_blob,
+                "jpeg_blob": jpeg_blob
+            }
+        
+        response_data["page_images"] = page_images
+        
+        # 7. Add processing summary
+        response_data["summary"] = {
+            "total_pages": page_count,
+            "has_grids": bool(response_data.get("grid_systems")),
+            "has_tables": bool(response_data.get("tables")),
+            "has_thumbnails": response_data.get("metadata", {}).get("extraction_summary", {}).get("has_thumbnails", True),
+            "drawing_types": list(response_data.get("document_index", {}).get("drawing_types", {}).keys()),
+            "grid_pages": response_data.get("document_index", {}).get("grid_pages", []),
+            "table_pages": response_data.get("document_index", {}).get("table_pages", []),
+            "image_settings": response_data.get("metadata", {}).get("image_settings", {})
+        }
+        
+        # Return with cache headers
+        return JSONResponse(
+            content=response_data,
+            headers={
+                "Cache-Control": CACHE_CONTROL_METADATA,
+                "X-Document-ID": clean_document_id,
+                "X-Page-Count": str(page_count)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get complete document data: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve document data: {str(e)}"
+        )
+
+# ===== PAGE IMAGE ENDPOINTS WITH THUMBNAIL SUPPORT =====
+
+@blueprint_router.get(
+    "/documents/{document_id}/pages/{page_number}/thumbnail",
+    summary="Get page thumbnail for quick preview",
+    description="Retrieve the thumbnail JPEG for a specific page"
+)
+async def get_page_thumbnail(
+    request: Request,
+    document_id: str,
+    page_number: int
+):
+    """
+    Get the thumbnail JPEG for fast page preview.
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    if page_number < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Page number must be 1 or greater"
+        )
+    
+    storage_service = request.app.state.storage_service
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
+    
+    try:
+        blob_name = f"{clean_document_id}_page_{page_number}_thumb.jpg"
+        
+        # Check if thumbnail exists
+        if not await storage_service.blob_exists(settings.AZURE_CACHE_CONTAINER_NAME, blob_name):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Thumbnail for page {page_number} not found"
+            )
+        
+        # Download thumbnail
+        image_bytes = await storage_service.download_blob_as_bytes(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=blob_name
+        )
+        
+        # Return with aggressive caching for thumbnails
+        return Response(
+            content=image_bytes,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": CACHE_CONTROL_THUMBNAILS,
+                "Content-Disposition": f"inline; filename=\"{clean_document_id}_page_{page_number}_thumb.jpg\"",
+                "X-Page-Number": str(page_number),
+                "X-Document-ID": clean_document_id,
+                "X-Image-Type": "thumbnail"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get page thumbnail: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve page thumbnail: {str(e)}"
+        )
+
+@blueprint_router.get(
+    "/documents/{document_id}/pages/{page_number}/image",
+    summary="Get high-quality page image",
+    description="Retrieve the high-quality JPEG for a specific page"
+)
+async def get_page_image(
+    request: Request,
+    document_id: str,
+    page_number: int
+):
+    """
+    Get the single high-quality JPEG for a page with proper caching headers.
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    if page_number < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Page number must be 1 or greater"
+        )
+    
+    storage_service = request.app.state.storage_service
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
+    
+    try:
+        blob_name = f"{clean_document_id}_page_{page_number}.jpg"
+        
+        # Check if image exists
+        if not await storage_service.blob_exists(settings.AZURE_CACHE_CONTAINER_NAME, blob_name):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Page {page_number} not found for document {clean_document_id}"
+            )
+        
+        # Download image
+        image_bytes = await storage_service.download_blob_as_bytes(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=blob_name
+        )
+        
+        # Return with caching headers
+        return Response(
+            content=image_bytes,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": CACHE_CONTROL_IMAGES,
+                "Content-Disposition": f"inline; filename=\"{clean_document_id}_page_{page_number}.jpg\"",
+                "X-Page-Number": str(page_number),
+                "X-Document-ID": clean_document_id,
+                "X-Image-Type": "high_quality"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get page image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve page image: {str(e)}"
+        )
+
+@blueprint_router.get(
+    "/documents/{document_id}/thumbnails/all",
+    summary="Get all thumbnail URLs",
+    description="Get URLs for all page thumbnails in the document"
+)
+async def get_all_thumbnail_urls(
+    request: Request,
+    document_id: str
+):
+    """
+    Get URLs for all thumbnails - useful for preloading or gallery views.
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    storage_service = request.app.state.storage_service
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Storage service unavailable"
+        )
+    
+    try:
+        # Load metadata to get page count
+        metadata = await storage_service.download_blob_as_json(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=f"{clean_document_id}_metadata.json"
+        )
+        
+        page_count = metadata.get('page_count', 0)
+        base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net/{settings.AZURE_CACHE_CONTAINER_NAME}"
+        
+        thumbnails = []
+        for page_num in range(1, page_count + 1):
+            blob_name = f"{clean_document_id}_page_{page_num}_thumb.jpg"
+            thumbnails.append({
+                "page": page_num,
+                "url": f"{base_url}/{blob_name}",
+                "api_url": f"/api/v1/documents/{clean_document_id}/pages/{page_num}/thumbnail"
+            })
+        
+        return JSONResponse(
+            content={
+                "document_id": clean_document_id,
+                "total_pages": page_count,
+                "thumbnails": thumbnails,
+                "thumbnail_settings": metadata.get('image_settings', {}).get('thumbnail', {
+                    'dpi': 72,
+                    'quality': 75
+                })
+            },
+            headers={
+                "Cache-Control": CACHE_CONTROL_METADATA,
+                "X-Document-ID": clean_document_id
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get thumbnail URLs: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve thumbnail URLs: {str(e)}"
+        )
+
 # ===== ASYNC PROCESSING WITH ERROR RECOVERY =====
 
 async def process_pdf_with_retry(
@@ -191,7 +537,9 @@ async def process_pdf_with_retry(
                     'processing_time': elapsed_time,
                     'pages_processed': metadata.get('page_count', 0),
                     'total_pages': metadata.get('total_pages', 0),
-                    'grid_systems_detected': metadata.get('grid_systems_detected', 0)
+                    'grid_systems_detected': metadata.get('grid_systems_detected', 0),
+                    'has_tables': metadata.get('extraction_summary', {}).get('has_tables', False),
+                    'has_thumbnails': metadata.get('extraction_summary', {}).get('has_thumbnails', True)
                 }
             )
             
@@ -204,7 +552,8 @@ async def process_pdf_with_retry(
                             'processing_complete': True,
                             'status': 'ready',
                             'processing_time': elapsed_time,
-                            'pages_processed': metadata.get('page_count', 0)
+                            'pages_processed': metadata.get('page_count', 0),
+                            'has_thumbnails': True
                         }
                     )
                 except Exception as e:
@@ -477,7 +826,7 @@ async def upload_document(
             document_id=session_id,
             filename=clean_filename,
             status="processing",
-            message=f"Document uploaded successfully! Processing will take approximately {estimated_time} seconds.",
+            message=f"Document uploaded successfully! Processing will take approximately {estimated_time} seconds. Thumbnails will be generated for quick preview.",
             file_size_mb=round(file_size_mb, 2)
         )
         
@@ -530,12 +879,15 @@ async def check_document_status(
         async with processing_lock:
             if clean_document_id in processing_state:
                 state = processing_state[clean_document_id]
-                return {
-                    "document_id": clean_document_id,
-                    "status": state.get('status', 'processing'),
-                    "progress": state.get('progress', 0),
-                    "message": f"Processing... Attempt {state.get('attempt', 1)}"
-                }
+                return JSONResponse(
+                    content={
+                        "document_id": clean_document_id,
+                        "status": state.get('status', 'processing'),
+                        "progress": state.get('progress', 0),
+                        "message": f"Processing... Attempt {state.get('attempt', 1)}"
+                    },
+                    headers={"Cache-Control": "no-cache"}
+                )
         
         # Check persisted status
         cache_container = settings.AZURE_CACHE_CONTAINER_NAME
@@ -558,42 +910,57 @@ async def check_document_status(
                     status_data['estimated_time_remaining'] = remaining
                     status_data['progress_percentage'] = min(100, int((elapsed / estimated_total) * 100))
             
-            return {
-                "document_id": clean_document_id,
-                "status": status_data.get('status', 'unknown'),
-                "message": status_data.get('message', ''),
-                "pages_processed": status_data.get('pages_processed'),
-                "total_pages": status_data.get('total_pages'),
-                "error": status_data.get('error'),
-                "uploaded_at": status_data.get('uploaded_at'),
-                "completed_at": status_data.get('completed_at'),
-                "estimated_time_remaining": status_data.get('estimated_time_remaining'),
-                "progress_percentage": status_data.get('progress_percentage'),
-                "retry_available": status_data.get('retry_available', False)
-            }
+            return JSONResponse(
+                content={
+                    "document_id": clean_document_id,
+                    "status": status_data.get('status', 'unknown'),
+                    "message": status_data.get('message', ''),
+                    "pages_processed": status_data.get('pages_processed'),
+                    "total_pages": status_data.get('total_pages'),
+                    "has_tables": status_data.get('has_tables', False),
+                    "has_thumbnails": status_data.get('has_thumbnails', True),
+                    "error": status_data.get('error'),
+                    "uploaded_at": status_data.get('uploaded_at'),
+                    "completed_at": status_data.get('completed_at'),
+                    "estimated_time_remaining": status_data.get('estimated_time_remaining'),
+                    "progress_percentage": status_data.get('progress_percentage'),
+                    "retry_available": status_data.get('retry_available', False)
+                },
+                headers={"Cache-Control": "no-cache"}
+            )
         
         # Fallback checks
         context_blob = f"{clean_document_id}_context.txt"
         if await storage_service.blob_exists(cache_container, context_blob):
-            return {
-                "document_id": clean_document_id,
-                "status": "ready",
-                "message": "Document is ready for analysis"
-            }
+            return JSONResponse(
+                content={
+                    "document_id": clean_document_id,
+                    "status": "ready",
+                    "message": "Document is ready for analysis",
+                    "has_thumbnails": True
+                },
+                headers={"Cache-Control": CACHE_CONTROL_METADATA}
+            )
         
         main_container = settings.AZURE_CONTAINER_NAME
         if await storage_service.blob_exists(main_container, f"{clean_document_id}.pdf"):
-            return {
-                "document_id": clean_document_id,
-                "status": "uploaded",
-                "message": "Document uploaded, processing pending"
-            }
+            return JSONResponse(
+                content={
+                    "document_id": clean_document_id,
+                    "status": "uploaded",
+                    "message": "Document uploaded, processing pending"
+                },
+                headers={"Cache-Control": "no-cache"}
+            )
         
-        return {
-            "document_id": clean_document_id,
-            "status": "not_found",
-            "message": "Document not found"
-        }
+        return JSONResponse(
+            content={
+                "document_id": clean_document_id,
+                "status": "not_found",
+                "message": "Document not found"
+            },
+            status_code=status.HTTP_404_NOT_FOUND
+        )
         
     except Exception as e:
         logger.error(f"Status check failed: {e}")
@@ -1074,7 +1441,7 @@ async def get_document_info(request: Request, document_id: str):
                 message = "Document is being processed"
             elif status_value == 'ready':
                 page_count = metadata.get('page_count', 0) if metadata else 0
-                message = f"Document ready for analysis. {page_count} pages processed."
+                message = f"Document ready for analysis. {page_count} pages processed with thumbnails."
         else:
             if context_exists and metadata:
                 status_value = "ready"
@@ -1095,6 +1462,21 @@ async def get_document_info(request: Request, document_id: str):
             except:
                 pass
         
+        # Include image settings info
+        image_info = None
+        if metadata:
+            image_info = metadata.get('image_settings', {
+                'high_quality': {
+                    'dpi': 150,
+                    'quality': 90,
+                    'progressive': True
+                },
+                'thumbnail': {
+                    'dpi': 72,
+                    'quality': 75
+                }
+            })
+        
         return DocumentInfoResponse(
             document_id=clean_document_id,
             status=status_value,
@@ -1110,7 +1492,10 @@ async def get_document_info(request: Request, document_id: str):
                 "processing_time": metadata.get('processing_time') if metadata else None,
                 "grid_systems_detected": metadata.get('grid_systems_detected', 0) if metadata else None,
                 "has_text": metadata.get('extraction_summary', {}).get('has_text', False) if metadata else None,
-                "drawing_types": list(metadata.get('drawing_types', {}).keys()) if metadata else None
+                "has_tables": metadata.get('extraction_summary', {}).get('has_tables', False) if metadata else None,
+                "has_thumbnails": metadata.get('extraction_summary', {}).get('has_thumbnails', True) if metadata else None,
+                "drawing_types": list(metadata.get('drawing_types', {}).keys()) if metadata else None,
+                "image_settings": image_info
             },
             total_published_notes=published_notes,
             active_collaborators=len(active_collaborators),
@@ -1179,7 +1564,13 @@ async def check_services(request: Request):
         "configuration": {
             "max_file_size_mb": settings.MAX_FILE_SIZE_MB,
             "pdf_max_pages": settings.PDF_MAX_PAGES,
-            "unlimited_loading": settings.UNLIMITED_PAGE_LOADING
+            "unlimited_loading": settings.UNLIMITED_PAGE_LOADING,
+            "image_generation": {
+                "thumbnails_enabled": True,
+                "high_quality_enabled": True,
+                "thumbnail_dpi": settings.PDF_THUMBNAIL_DPI,
+                "high_quality_dpi": 150
+            }
         }
     }
 
