@@ -544,25 +544,23 @@ If you find discrepancies, provide:
     ) -> Optional[str]:
         """Make a vision API request with error handling"""
         try:
-            response = await asyncio.wait_for(
-                self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": content}
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.0,
-                    seed=self.deterministic_seed
-                ),
-                timeout=CONFIG["VISION_TIMEOUT"]
+            # The client will now use the timeout it was configured with
+            response = await self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content}
+                ],
+                max_tokens=max_tokens,
+                temperature=0.0,
+                seed=self.deterministic_seed
             )
             
             if response and response.choices:
                 return response.choices[0].message.content or ""
                 
         except asyncio.TimeoutError:
-            logger.error("Vision request timeout")
+            logger.error("Vision request timed out. The client's internal timeout was reached.")
         except Exception as e:
             logger.error(f"Vision request error: {e}")
         

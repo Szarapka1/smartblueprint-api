@@ -19,6 +19,7 @@ DATA LOADING APPROACH:
 from functools import lru_cache
 from typing import List, Dict, Any, Optional
 import os
+import json
 from pathlib import Path
 
 
@@ -46,7 +47,8 @@ class AppSettings:
         # === CORS SETTINGS ===
         cors_origins = os.getenv("CORS_ORIGINS", '["*"]')
         try:
-            self.CORS_ORIGINS: List[str] = eval(cors_origins) if isinstance(cors_origins, str) else cors_origins
+            # Using json.loads is safer than eval()
+            self.CORS_ORIGINS: List[str] = json.loads(cors_origins) if isinstance(cors_origins, str) else cors_origins
         except:
             self.CORS_ORIGINS: List[str] = ["*"]
         
@@ -197,7 +199,6 @@ class AppSettings:
         self.ENABLE_NOTE_PUBLISHING: bool = os.getenv("ENABLE_NOTE_PUBLISHING", "true").lower() == "true"
         
         # === VALIDATION SETTINGS - UPDATED ===
-        self.VALIDATION_TIMEOUT: float = float(os.getenv("VALIDATION_TIMEOUT", 300.0))  # Updated: 5 minutes (was 60.0)
         self.VALIDATION_MAX_RETRIES: int = int(os.getenv("VALIDATION_MAX_RETRIES", 2))
         self.ENABLE_4X_VALIDATION: bool = os.getenv("ENABLE_4X_VALIDATION", "true").lower() == "true"
         self.MAX_CONCURRENT_VALIDATIONS: int = int(os.getenv("MAX_CONCURRENT_VALIDATIONS", 6))  # Updated: 6 (was 4)
@@ -208,16 +209,6 @@ class AppSettings:
         
         # === MONITORING & WARNINGS ===
         self.WARNING_THRESHOLD: float = float(os.getenv("WARNING_THRESHOLD", 300.0))  # Added: 5 minutes
-        
-        # === BACKWARD COMPATIBILITY ATTRIBUTES ===
-        # Lowercase aliases for vision_ai module compatibility
-        self.max_retries = self.MAX_RETRIES
-        self.batch_size = self.BATCH_SIZE
-        self.parallel_processing = self.PARALLEL_PROCESSING
-        self.cache_dir = self.CACHE_DIR
-        self.cache_dir_path = self.CACHE_DIR_PATH
-        self.retry_delay = self.RETRY_DELAY
-        self.aggressive_caching = self.AGGRESSIVE_CACHING
         
         # === CREATE CACHE DIRECTORY IF NEEDED ===
         if self.ENABLE_DISK_CACHE:
@@ -363,7 +354,7 @@ class AppSettings:
     def get_validation_settings(self) -> Dict[str, Any]:
         """Get validation settings"""
         return {
-            "timeout": self.VALIDATION_TIMEOUT,
+            "timeout": self.VISION_VALIDATION_TIMEOUT, # Corrected to use the single source
             "max_retries": self.VALIDATION_MAX_RETRIES,
             "enable_4x": self.ENABLE_4X_VALIDATION,
             "max_concurrent": self.MAX_CONCURRENT_VALIDATIONS
@@ -480,7 +471,6 @@ CONFIG = {
     
     # Validation settings
     "validation_timeout": _settings.VISION_VALIDATION_TIMEOUT,
-    "VALIDATION_TIMEOUT": _settings.VALIDATION_TIMEOUT,
     "VALIDATION_MAX_RETRIES": _settings.VALIDATION_MAX_RETRIES,
     "enable_4x_validation": _settings.ENABLE_4X_VALIDATION,
     "max_concurrent_validations": _settings.MAX_CONCURRENT_VALIDATIONS,

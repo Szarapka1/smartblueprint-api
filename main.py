@@ -27,11 +27,19 @@ from app.api.routes.note_routes import note_router
 
 # --- Configure Logging ---
 logging.basicConfig(
-    level=logging.DEBUG,  # DEBUG level for test environment
+    level=logging.DEBUG,  # Set the root logger to DEBUG initially
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d]',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# Quieten down noisy library loggers to avoid seeing base64 images
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Get your application's specific logger and ensure it stays on DEBUG
 logger = logging.getLogger("SmartBlueprintAPI")
+logger.setLevel(logging.DEBUG)
+
 
 # Load settings
 settings = get_settings()
@@ -455,4 +463,3 @@ if __name__ == "__main__":
         log_level="debug",  # Verbose logging
         access_log=True  # Log all requests
     )
-
