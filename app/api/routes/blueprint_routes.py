@@ -779,6 +779,46 @@ async def upload_document(
             content_type="application/json"
         )
         
+        # FIX: Create initial metadata.json IMMEDIATELY with processing status
+        initial_metadata = {
+            'document_id': session_id,
+            'status': 'processing',  # Key field for frontend
+            'page_count': 0,  # Will be updated when processing completes
+            'total_pages': 0,  # Will be updated when processing completes
+            'document_info': {
+                'filename': clean_filename,
+                'author': author,
+                'trade': trade,
+                'uploaded_at': datetime.utcnow().isoformat() + 'Z'
+            },
+            'processing_time': 0,
+            'file_size_mb': round(file_size_mb, 2),
+            'page_details': [],
+            'grid_detection_enabled': True,
+            'table_extraction_enabled': True,
+            'extraction_summary': {
+                'has_text': False,
+                'has_images': False,
+                'has_grid_systems': False,
+                'has_tables': False,
+                'table_count': 0,
+                'has_thumbnails': False  # Will be true when processing completes
+            },
+            'grid_systems_detected': 0,
+            'processing_complete': False,  # Key field for frontend
+            'started_at': datetime.utcnow().isoformat() + 'Z'
+        }
+        
+        # Save initial metadata.json so frontend won't get 404
+        await storage_service.upload_file(
+            container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+            blob_name=f"{session_id}_metadata.json",
+            data=json.dumps(initial_metadata, indent=2).encode('utf-8'),
+            content_type="application/json"
+        )
+        
+        logger.info(f"✅ Initial metadata.json created for {session_id}")
+        
         # Initialize session if service available
         session_service = request.app.state.session_service
         if session_service:
@@ -800,7 +840,8 @@ async def upload_document(
                 filename=clean_filename,
                 status="uploaded",
                 message="Document uploaded successfully. Processing service unavailable - please check back later.",
-                file_size_mb=round(file_size_mb, 2)
+                file_size_mb=round(file_size_mb, 2),
+                metadata=initial_metadata  # Include initial metadata in response
             )
         
         # Start async processing
@@ -821,13 +862,14 @@ async def upload_document(
             lambda t: logger.info(f"Processing task completed for {session_id}")
         )
         
-        # Return success immediately
+        # Return success immediately with initial metadata
         return DocumentUploadResponse(
             document_id=session_id,
             filename=clean_filename,
             status="processing",
             message=f"Document uploaded successfully! Processing will take approximately {estimated_time} seconds. Thumbnails will be generated for quick preview.",
-            file_size_mb=round(file_size_mb, 2)
+            file_size_mb=round(file_size_mb, 2),
+            metadata=initial_metadata  # Include initial metadata in response
         )
         
     except HTTPException:

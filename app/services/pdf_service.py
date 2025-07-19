@@ -848,7 +848,20 @@ class PDFService:
             logger.debug("   Creating document index...")
             await self._create_document_index(session_id, metadata['page_details'], storage_service)
 
-            # Update and save metadata
+            # FIX: Load existing metadata.json and merge with processing results
+            logger.debug("   Loading existing metadata...")
+            existing_metadata = {}
+            try:
+                existing_metadata_text = await storage_service.download_blob_as_text(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=f"{session_id}_metadata.json"
+                )
+                existing_metadata = json.loads(existing_metadata_text)
+                logger.debug("   Found existing metadata.json, merging...")
+            except Exception as e:
+                logger.warning(f"   No existing metadata found: {e}")
+
+            # Update processing results with existing metadata
             metadata['processing_time'] = time.time() - processing_start
             metadata['grid_systems_detected'] = len(all_grid_systems)
             metadata['image_settings'] = {
@@ -863,11 +876,32 @@ class PDFService:
                 }
             }
             
-            logger.debug("   Saving metadata...")
+            # FIX: Merge with existing metadata, preserving initial fields
+            final_metadata = {
+                **existing_metadata,  # Start with existing metadata
+                **metadata,  # Override with processing results
+                'status': 'ready',  # Update status to ready
+                'processing_complete': True,  # Mark as complete
+                'completed_at': datetime.utcnow().isoformat() + 'Z',
+                'extraction_summary': {
+                    **existing_metadata.get('extraction_summary', {}),
+                    **metadata.get('extraction_summary', {}),
+                    'has_thumbnails': True  # Now we have thumbnails
+                }
+            }
+            
+            # Preserve original document info if it exists
+            if 'document_info' in existing_metadata:
+                final_metadata['document_info'] = {
+                    **existing_metadata['document_info'],
+                    **metadata.get('document_info', {})
+                }
+            
+            logger.debug("   Saving updated metadata...")
             await storage_service.upload_file(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                 blob_name=f"{session_id}_metadata.json",
-                data=json.dumps(metadata, indent=2).encode('utf-8'),
+                data=json.dumps(final_metadata, indent=2).encode('utf-8'),
                 content_type="application/json"
             )
             
