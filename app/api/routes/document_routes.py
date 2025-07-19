@@ -1,4 +1,4 @@
-# app/api/routes/document_routes.py - OPTIMIZED WITH THUMBNAILS AND SINGLE HIGH-QUALITY JPEG
+# app/api/routes/document_routes.py - READ OPERATIONS ONLY
 
 import logging
 from typing import List, Dict, Any, Optional
@@ -9,6 +9,7 @@ import json
 import re
 import asyncio
 from datetime import datetime
+from collections import defaultdict
 
 from app.core.config import get_settings
 
@@ -23,7 +24,7 @@ CACHE_CONTROL_STATIC = "public, max-age=86400"  # 24 hours
 CACHE_CONTROL_THUMBNAILS = "public, max-age=604800"  # 7 days
 CACHE_CONTROL_DYNAMIC = "no-cache, must-revalidate"
 
-# --- Pydantic Models for Analytics ---
+# --- Pydantic Models ---
 
 class DocumentStatsResponse(BaseModel):
     document_id: str
@@ -119,7 +120,7 @@ def generate_image_url(storage_service, container_name: str, blob_name: str) -> 
     base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net"
     return f"{base_url}/{container_name}/{blob_name}"
 
-# --- OPTIMIZED DATA ENDPOINTS ---
+# --- DOCUMENT LISTING ---
 
 @document_router.get("/documents", summary="List all processed documents")
 async def list_all_documents(request: Request):
@@ -128,7 +129,6 @@ async def list_all_documents(request: Request):
     try:
         document_ids = await storage_service.list_document_ids(container_name=settings.AZURE_CACHE_CONTAINER_NAME)
         
-        # Filter to only include fully processed documents
         processed_documents = []
         for doc_id in document_ids:
             if await storage_service.blob_exists(
@@ -149,6 +149,8 @@ async def list_all_documents(request: Request):
         logger.error(f"Failed to list documents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not retrieve document list.")
 
+# --- DOCUMENT METADATA ---
+
 @document_router.get("/documents/{document_id}", 
                     response_model=DocumentMetadataResponse,
                     summary="Get document metadata")
@@ -158,13 +160,11 @@ async def get_document_details(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Load metadata
         metadata_json = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
         )
         
-        # Load document index for additional info
         try:
             index_json = await storage_service.download_blob_as_json(
                 container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -173,7 +173,6 @@ async def get_document_details(request: Request, document_id: str):
         except:
             index_json = {}
         
-        # Build comprehensive response with thumbnail info
         response_data = DocumentMetadataResponse(
             document_id=clean_document_id,
             page_count=metadata_json.get('page_count', 0),
@@ -212,7 +211,7 @@ async def get_document_details(request: Request, document_id: str):
         logger.error(f"Failed to get metadata for {clean_document_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while fetching metadata.")
 
-# --- NEW COMPREHENSIVE DATA ENDPOINT ---
+# --- COMPLETE DATA ENDPOINT ---
 
 @document_router.get("/documents/{document_id}/complete-data",
                     response_model=CompleteDocumentDataResponse,
@@ -226,23 +225,19 @@ async def get_complete_document_data(
     """
     Get all document data in a single comprehensive response.
     This eliminates the need for multiple API calls from the frontend.
-    Includes both thumbnail and high-quality image URLs.
     """
     clean_document_id = validate_document_id(document_id)
-    
     storage_service = await _get_service(request, 'storage_service')
     
     try:
         cache_container = settings.AZURE_CACHE_CONTAINER_NAME
         
-        # Check if document exists and is processed
         if not await storage_service.blob_exists(cache_container, f"{clean_document_id}_metadata.json"):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Document '{clean_document_id}' not found or not yet processed"
             )
         
-        # Prepare response data
         response_data = {
             "document_id": clean_document_id,
             "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -305,13 +300,12 @@ async def get_complete_document_data(
         else:
             response_data["tables"] = []
         
-        # 6. Generate page image URLs (BOTH thumbnails and high-quality)
+        # 6. Generate page image URLs
         page_count = response_data.get("metadata", {}).get("page_count", 0)
         base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net/{cache_container}"
         
         page_images = {}
         for page_num in range(1, page_count + 1):
-            # Thumbnail and high-quality JPEG
             thumbnail_blob = f"{clean_document_id}_page_{page_num}_thumb.jpg"
             jpeg_blob = f"{clean_document_id}_page_{page_num}.jpg"
             
@@ -336,14 +330,12 @@ async def get_complete_document_data(
             "image_settings": response_data.get("metadata", {}).get("image_settings", {}) if response_data.get("metadata") else {}
         }
         
-        # Convert to response model
         response = CompleteDocumentDataResponse(**response_data)
         
-        # Return with cache headers
         return JSONResponse(
             content=response.dict(),
             headers={
-                "Cache-Control": "public, max-age=600",  # 10 minutes cache
+                "Cache-Control": "public, max-age=600",
                 "X-Document-ID": clean_document_id,
                 "X-Page-Count": str(page_count)
             }
@@ -353,11 +345,12 @@ async def get_complete_document_data(
         raise
     except Exception as e:
         logger.error(f"Failed to get complete document data: {e}")
-        logger.error(f"Full traceback: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve document data: {str(e)}"
         )
+
+# --- SPECIFIC DATA ENDPOINTS ---
 
 @document_router.get("/documents/{document_id}/grid-systems", 
                     summary="Get comprehensive grid system data")
@@ -373,7 +366,6 @@ async def get_document_grid_systems(request: Request, document_id: str):
             blob_name=blob_name
         )
         
-        # Add summary information
         summary = {
             "total_pages_with_grids": len([k for k, v in grid_data.items() if v.get('confidence', 0) > 0.3]),
             "detection_methods": list(set(v.get('detection_method', 'none') for v in grid_data.values())),
@@ -395,7 +387,6 @@ async def get_document_grid_systems(request: Request, document_id: str):
         )
         
     except FileNotFoundError:
-        # Return empty grid systems if not found (backwards compatibility)
         return JSONResponse(
             content={
                 "document_id": clean_document_id,
@@ -426,7 +417,6 @@ async def get_document_tables(request: Request, document_id: str):
             blob_name=blob_name
         )
         
-        # Add summary
         pages_with_tables = set()
         total_rows = 0
         
@@ -509,7 +499,6 @@ async def get_document_context(request: Request, document_id: str):
             blob_name=blob_name
         )
         
-        # Return as plain text with cache headers
         return Response(
             content=context_text,
             media_type="text/plain; charset=utf-8",
@@ -526,7 +515,7 @@ async def get_document_context(request: Request, document_id: str):
         logger.error(f"Failed to get context for {clean_document_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while fetching document context.")
 
-# --- OPTIMIZED PAGE DATA ENDPOINTS WITH THUMBNAILS ---
+# --- PAGE DATA ENDPOINTS ---
 
 @document_router.get("/documents/{document_id}/pages/{page_number}",
                     response_model=PageDataResponse,
@@ -541,7 +530,6 @@ async def get_page_data(request: Request, document_id: str, page_number: int):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Load metadata to check page exists
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -550,14 +538,12 @@ async def get_page_data(request: Request, document_id: str, page_number: int):
         if page_number > metadata.get('page_count', 0):
             raise HTTPException(status_code=404, detail=f"Page {page_number} not found")
         
-        # Get page details from metadata
         page_details = None
         for detail in metadata.get('page_details', []):
             if detail.get('page_number') == page_number:
                 page_details = detail
                 break
         
-        # Load grid system for this page
         grid_system = None
         try:
             grid_systems = await storage_service.download_blob_as_json(
@@ -568,7 +554,6 @@ async def get_page_data(request: Request, document_id: str, page_number: int):
         except:
             pass
         
-        # Count tables on this page
         table_count = 0
         try:
             tables = await storage_service.download_blob_as_json(
@@ -579,7 +564,6 @@ async def get_page_data(request: Request, document_id: str, page_number: int):
         except:
             pass
         
-        # Generate thumbnail and image URLs
         thumbnail_blob = f"{clean_document_id}_page_{page_number}_thumb.jpg"
         image_blob = f"{clean_document_id}_page_{page_number}.jpg"
         thumbnail_url = generate_image_url(storage_service, settings.AZURE_CACHE_CONTAINER_NAME, thumbnail_blob)
@@ -629,7 +613,6 @@ async def get_batch_page_data(
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Load metadata
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -637,9 +620,7 @@ async def get_batch_page_data(
         
         total_pages = metadata.get('page_count', 0)
         
-        # Determine which pages to return
         if page_list:
-            # Specific page list
             page_numbers = []
             for p in page_list.split(','):
                 try:
@@ -649,18 +630,15 @@ async def get_batch_page_data(
                 except:
                     pass
         else:
-            # Page range
             if not end_page:
-                end_page = min(start_page + 9, total_pages)  # Default to 10 pages
+                end_page = min(start_page + 9, total_pages)
             else:
                 end_page = min(end_page, total_pages)
             
             page_numbers = list(range(start_page, end_page + 1))
         
-        # Limit to prevent abuse
-        page_numbers = page_numbers[:50]  # Max 50 pages per request
+        page_numbers = page_numbers[:50]
         
-        # Load grid systems and tables once
         try:
             grid_systems = await storage_service.download_blob_as_json(
                 container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -677,20 +655,16 @@ async def get_batch_page_data(
         except:
             tables = []
         
-        # Build page data
         pages = []
         for page_num in page_numbers:
-            # Find page details
             page_details = None
             for detail in metadata.get('page_details', []):
                 if detail.get('page_number') == page_num:
                     page_details = detail
                     break
             
-            # Count tables
             table_count = sum(1 for t in tables if t.get('page_number') == page_num)
             
-            # Generate thumbnail and image URLs
             thumbnail_blob = f"{clean_document_id}_page_{page_num}_thumb.jpg"
             image_blob = f"{clean_document_id}_page_{page_num}.jpg"
             thumbnail_url = generate_image_url(storage_service, settings.AZURE_CACHE_CONTAINER_NAME, thumbnail_blob)
@@ -731,176 +705,7 @@ async def get_batch_page_data(
         logger.error(f"Failed to get batch page data: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve page data")
 
-# --- ANALYTICS & COLLABORATION ENDPOINTS ---
-
-@document_router.get("/documents/{document_id}/stats", response_model=DocumentStatsResponse)
-async def get_document_statistics(request: Request, document_id: str):
-    """Get comprehensive statistics for a specific document."""
-    clean_document_id = validate_document_id(document_id)
-    storage_service = await _get_service(request, 'storage_service')
-    
-    try:
-        # Fetch all required data in parallel
-        tasks = {
-            'metadata': storage_service.download_blob_as_json(
-                settings.AZURE_CACHE_CONTAINER_NAME, 
-                f"{clean_document_id}_metadata.json"
-            ),
-            'notes': storage_service.download_blob_as_json(
-                settings.AZURE_CACHE_CONTAINER_NAME, 
-                f"{clean_document_id}_annotations.json"
-            ),
-            'chats': storage_service.download_blob_as_json(
-                settings.AZURE_CACHE_CONTAINER_NAME, 
-                f"{clean_document_id}_all_chats.json"
-            ),
-            'index': storage_service.download_blob_as_json(
-                settings.AZURE_CACHE_CONTAINER_NAME,
-                f"{clean_document_id}_document_index.json"
-            )
-        }
-        
-        results = {}
-        for key, task in tasks.items():
-            try:
-                results[key] = await task
-            except FileNotFoundError:
-                if key == 'metadata':
-                    raise HTTPException(status_code=404, detail=f"Document '{clean_document_id}' not found.")
-                results[key] = [] if key in ['notes', 'chats'] else {}
-            except Exception:
-                results[key] = [] if key in ['notes', 'chats'] else {}
-
-        metadata = results['metadata']
-        annotations = results['notes']
-        chats = results['chats']
-        index = results['index']
-        
-        # Calculate statistics
-        collaborators = {ann.get("author") for ann in annotations if ann.get("author")}
-        collaborators.update({chat.get("author") for chat in chats if chat.get("author")})
-        
-        all_timestamps = [
-            item.get("timestamp") for item in annotations + chats 
-            if item.get("timestamp")
-        ]
-        
-        # Extract grid and table info
-        grid_pages = index.get('grid_pages', [])
-        table_pages = index.get('table_pages', [])
-        
-        return DocumentStatsResponse(
-            document_id=clean_document_id,
-            total_annotations=len(annotations),
-            total_chats=len(chats),
-            total_pages=metadata.get('page_count', 0),
-            collaborator_count=len(collaborators),
-            last_activity=max(all_timestamps) if all_timestamps else None,
-            status=metadata.get('status', 'ready'),
-            has_tables=metadata.get('extraction_summary', {}).get('has_tables', False),
-            has_grids=len(grid_pages) > 0,
-            has_thumbnails=metadata.get('extraction_summary', {}).get('has_thumbnails', True),
-            grid_pages=grid_pages,
-            table_pages=table_pages
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get document statistics for {clean_document_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to retrieve document statistics.")
-
-@document_router.get("/documents/{document_id}/collaborators", response_model=CollaboratorsResponse)
-async def get_document_collaborators(request: Request, document_id: str):
-    """Get a list of all collaborators and their interaction statistics."""
-    clean_document_id = validate_document_id(document_id)
-    storage_service = await _get_service(request, 'storage_service')
-    
-    try:
-        # Load annotations and chats
-        tasks = {
-            'notes': storage_service.download_blob_as_json(
-                settings.AZURE_CACHE_CONTAINER_NAME, 
-                f"{clean_document_id}_annotations.json"
-            ),
-            'chats': storage_service.download_blob_as_json(
-                settings.AZURE_CACHE_CONTAINER_NAME, 
-                f"{clean_document_id}_all_chats.json"
-            )
-        }
-        
-        results = {}
-        for key, task in tasks.items():
-            try:
-                results[key] = await task
-            except:
-                results[key] = []
-        
-        annotations = results['notes']
-        chats = results['chats']
-
-        # Build collaborator statistics
-        collaborator_data = {}
-        
-        # Process annotations
-        for ann in annotations:
-            author = ann.get("author")
-            if author:
-                if author not in collaborator_data:
-                    collaborator_data[author] = {
-                        'annotations': 0,
-                        'chats': 0,
-                        'last_activity': None
-                    }
-                collaborator_data[author]['annotations'] += 1
-                
-                timestamp = ann.get('timestamp')
-                if timestamp:
-                    if not collaborator_data[author]['last_activity'] or timestamp > collaborator_data[author]['last_activity']:
-                        collaborator_data[author]['last_activity'] = timestamp
-        
-        # Process chats
-        for chat in chats:
-            author = chat.get("author")
-            if author:
-                if author not in collaborator_data:
-                    collaborator_data[author] = {
-                        'annotations': 0,
-                        'chats': 0,
-                        'last_activity': None
-                    }
-                collaborator_data[author]['chats'] += 1
-                
-                timestamp = chat.get('timestamp')
-                if timestamp:
-                    if not collaborator_data[author]['last_activity'] or timestamp > collaborator_data[author]['last_activity']:
-                        collaborator_data[author]['last_activity'] = timestamp
-
-        # Build response
-        collaborator_stats = []
-        for author, data in collaborator_data.items():
-            collaborator_stats.append(CollaboratorStats(
-                author=author,
-                annotations_count=data['annotations'],
-                chats_count=data['chats'],
-                total_interactions=data['annotations'] + data['chats'],
-                last_activity=data['last_activity']
-            ))
-
-        # Sort by total interactions
-        collaborator_stats.sort(key=lambda x: x.total_interactions, reverse=True)
-
-        return CollaboratorsResponse(
-            document_id=clean_document_id,
-            collaborators=collaborator_stats,
-            total_collaborators=len(collaborator_stats)
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to get collaborators for {clean_document_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to retrieve collaborator data.")
-
-# --- OPTIMIZED IMAGE SERVING WITH THUMBNAILS ---
+# --- IMAGE SERVING ENDPOINTS ---
 
 @document_router.get("/documents/{document_id}/images/page-{page_number}_thumb.jpg")
 async def get_page_thumbnail_direct(
@@ -908,10 +713,7 @@ async def get_page_thumbnail_direct(
     document_id: str,
     page_number: int
 ):
-    """
-    Direct URL endpoint for page thumbnails with aggressive caching.
-    This endpoint can be used in img src tags directly.
-    """
+    """Direct URL endpoint for page thumbnails with aggressive caching."""
     clean_document_id = validate_document_id(document_id)
     
     if page_number < 1:
@@ -922,17 +724,14 @@ async def get_page_thumbnail_direct(
     try:
         blob_name = f"{clean_document_id}_page_{page_number}_thumb.jpg"
         
-        # Check if thumbnail exists
         if not await storage_service.blob_exists(settings.AZURE_CACHE_CONTAINER_NAME, blob_name):
             raise HTTPException(status_code=404, detail="Page thumbnail not found")
         
-        # Get thumbnail bytes
         image_bytes = await storage_service.download_blob_as_bytes(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=blob_name
         )
         
-        # Return with aggressive caching for thumbnails
         return Response(
             content=image_bytes,
             media_type="image/jpeg",
@@ -957,10 +756,7 @@ async def get_page_image_direct(
     document_id: str,
     page_number: int
 ):
-    """
-    Direct URL endpoint for page images with aggressive caching.
-    This endpoint can be used in img src tags directly.
-    """
+    """Direct URL endpoint for page images with aggressive caching."""
     clean_document_id = validate_document_id(document_id)
     
     if page_number < 1:
@@ -971,22 +767,19 @@ async def get_page_image_direct(
     try:
         blob_name = f"{clean_document_id}_page_{page_number}.jpg"
         
-        # Check if image exists
         if not await storage_service.blob_exists(settings.AZURE_CACHE_CONTAINER_NAME, blob_name):
             raise HTTPException(status_code=404, detail="Page image not found")
         
-        # Get image bytes
         image_bytes = await storage_service.download_blob_as_bytes(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=blob_name
         )
         
-        # Return with aggressive caching for static images
         return Response(
             content=image_bytes,
             media_type="image/jpeg",
             headers={
-                "Cache-Control": "public, max-age=604800, immutable",  # 7 days, immutable
+                "Cache-Control": "public, max-age=604800, immutable",
                 "X-Document-ID": clean_document_id,
                 "X-Page-Number": str(page_number),
                 "X-Image-Type": "high_quality",
@@ -1008,7 +801,6 @@ async def get_all_image_urls(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Load metadata to get page count
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -1017,7 +809,6 @@ async def get_all_image_urls(request: Request, document_id: str):
         page_count = metadata.get('page_count', 0)
         base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net/{settings.AZURE_CACHE_CONTAINER_NAME}"
         
-        # Generate URLs for all pages (both thumbnails and high-quality)
         image_urls = {}
         for page_num in range(1, page_count + 1):
             thumbnail_blob = f"{clean_document_id}_page_{page_num}_thumb.jpg"
@@ -1073,7 +864,6 @@ async def get_all_thumbnails(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Load metadata
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -1082,10 +872,8 @@ async def get_all_thumbnails(request: Request, document_id: str):
         page_count = metadata.get('page_count', 0)
         base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net/{settings.AZURE_CACHE_CONTAINER_NAME}"
         
-        # Generate thumbnail URLs with page metadata
         thumbnails = []
         for page_num in range(1, page_count + 1):
-            # Find page details
             page_details = None
             for detail in metadata.get('page_details', []):
                 if detail.get('page_number') == page_num:
@@ -1126,7 +914,167 @@ async def get_all_thumbnails(request: Request, document_id: str):
         logger.error(f"Failed to get thumbnails: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve thumbnails")
 
-# --- PREFETCH ENDPOINT FOR PERFORMANCE ---
+# --- ANALYTICS & COLLABORATION ---
+
+@document_router.get("/documents/{document_id}/stats", response_model=DocumentStatsResponse)
+async def get_document_statistics(request: Request, document_id: str):
+    """Get comprehensive statistics for a specific document."""
+    clean_document_id = validate_document_id(document_id)
+    storage_service = await _get_service(request, 'storage_service')
+    
+    try:
+        tasks = {
+            'metadata': storage_service.download_blob_as_json(
+                settings.AZURE_CACHE_CONTAINER_NAME, 
+                f"{clean_document_id}_metadata.json"
+            ),
+            'notes': storage_service.download_blob_as_json(
+                settings.AZURE_CACHE_CONTAINER_NAME, 
+                f"{clean_document_id}_annotations.json"
+            ),
+            'chats': storage_service.download_blob_as_json(
+                settings.AZURE_CACHE_CONTAINER_NAME, 
+                f"{clean_document_id}_all_chats.json"
+            ),
+            'index': storage_service.download_blob_as_json(
+                settings.AZURE_CACHE_CONTAINER_NAME,
+                f"{clean_document_id}_document_index.json"
+            )
+        }
+        
+        results = {}
+        for key, task in tasks.items():
+            try:
+                results[key] = await task
+            except FileNotFoundError:
+                if key == 'metadata':
+                    raise HTTPException(status_code=404, detail=f"Document '{clean_document_id}' not found.")
+                results[key] = [] if key in ['notes', 'chats'] else {}
+            except Exception:
+                results[key] = [] if key in ['notes', 'chats'] else {}
+
+        metadata = results['metadata']
+        annotations = results['notes']
+        chats = results['chats']
+        index = results['index']
+        
+        collaborators = {ann.get("author") for ann in annotations if ann.get("author")}
+        collaborators.update({chat.get("author") for chat in chats if chat.get("author")})
+        
+        all_timestamps = [
+            item.get("timestamp") for item in annotations + chats 
+            if item.get("timestamp")
+        ]
+        
+        grid_pages = index.get('grid_pages', [])
+        table_pages = index.get('table_pages', [])
+        
+        return DocumentStatsResponse(
+            document_id=clean_document_id,
+            total_annotations=len(annotations),
+            total_chats=len(chats),
+            total_pages=metadata.get('page_count', 0),
+            collaborator_count=len(collaborators),
+            last_activity=max(all_timestamps) if all_timestamps else None,
+            status=metadata.get('status', 'ready'),
+            has_tables=metadata.get('extraction_summary', {}).get('has_tables', False),
+            has_grids=len(grid_pages) > 0,
+            has_thumbnails=metadata.get('extraction_summary', {}).get('has_thumbnails', True),
+            grid_pages=grid_pages,
+            table_pages=table_pages
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document statistics for {clean_document_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve document statistics.")
+
+@document_router.get("/documents/{document_id}/collaborators", response_model=CollaboratorsResponse)
+async def get_document_collaborators(request: Request, document_id: str):
+    """Get a list of all collaborators and their interaction statistics."""
+    clean_document_id = validate_document_id(document_id)
+    storage_service = await _get_service(request, 'storage_service')
+    
+    try:
+        tasks = {
+            'notes': storage_service.download_blob_as_json(
+                settings.AZURE_CACHE_CONTAINER_NAME, 
+                f"{clean_document_id}_annotations.json"
+            ),
+            'chats': storage_service.download_blob_as_json(
+                settings.AZURE_CACHE_CONTAINER_NAME, 
+                f"{clean_document_id}_all_chats.json"
+            )
+        }
+        
+        results = {}
+        for key, task in tasks.items():
+            try:
+                results[key] = await task
+            except:
+                results[key] = []
+        
+        annotations = results['notes']
+        chats = results['chats']
+
+        collaborator_data = {}
+        
+        for ann in annotations:
+            author = ann.get("author")
+            if author:
+                if author not in collaborator_data:
+                    collaborator_data[author] = {
+                        'annotations': 0,
+                        'chats': 0,
+                        'last_activity': None
+                    }
+                collaborator_data[author]['annotations'] += 1
+                
+                timestamp = ann.get('timestamp')
+                if timestamp:
+                    if not collaborator_data[author]['last_activity'] or timestamp > collaborator_data[author]['last_activity']:
+                        collaborator_data[author]['last_activity'] = timestamp
+        
+        for chat in chats:
+            author = chat.get("author")
+            if author:
+                if author not in collaborator_data:
+                    collaborator_data[author] = {
+                        'annotations': 0,
+                        'chats': 0,
+                        'last_activity': None
+                    }
+                collaborator_data[author]['chats'] += 1
+                
+                timestamp = chat.get('timestamp')
+                if timestamp:
+                    if not collaborator_data[author]['last_activity'] or timestamp > collaborator_data[author]['last_activity']:
+                        collaborator_data[author]['last_activity'] = timestamp
+
+        collaborator_stats = []
+        for author, data in collaborator_data.items():
+            collaborator_stats.append(CollaboratorStats(
+                author=author,
+                annotations_count=data['annotations'],
+                chats_count=data['chats'],
+                total_interactions=data['annotations'] + data['chats'],
+                last_activity=data['last_activity']
+            ))
+
+        collaborator_stats.sort(key=lambda x: x.total_interactions, reverse=True)
+
+        return CollaboratorsResponse(
+            document_id=clean_document_id,
+            collaborators=collaborator_stats,
+            total_collaborators=len(collaborator_stats)
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get collaborators for {clean_document_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve collaborator data.")
+
+# --- PREFETCH ENDPOINT ---
 
 @document_router.post("/documents/{document_id}/prefetch",
                      summary="Prefetch document data for performance")
@@ -1137,46 +1085,36 @@ async def prefetch_document_data(
     include_context: bool = False,
     include_thumbnails: bool = True
 ):
-    """
-    Prefetch document data to warm up caches.
-    Useful for preloading data before user interaction.
-    """
+    """Prefetch document data to warm up caches."""
     clean_document_id = validate_document_id(document_id)
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Start parallel prefetch tasks
         tasks = []
         
-        # Always prefetch metadata
         tasks.append(storage_service.download_blob_as_json(
             settings.AZURE_CACHE_CONTAINER_NAME,
             f"{clean_document_id}_metadata.json"
         ))
         
-        # Prefetch grid systems
         tasks.append(storage_service.download_blob_as_json(
             settings.AZURE_CACHE_CONTAINER_NAME,
             f"{clean_document_id}_grid_systems.json"
         ))
         
-        # Prefetch document index
         tasks.append(storage_service.download_blob_as_json(
             settings.AZURE_CACHE_CONTAINER_NAME,
             f"{clean_document_id}_document_index.json"
         ))
         
-        # Optionally prefetch context
         if include_context:
             tasks.append(storage_service.download_blob_as_text(
                 settings.AZURE_CACHE_CONTAINER_NAME,
                 f"{clean_document_id}_context.txt"
             ))
         
-        # Prefetch specific page images if requested
         if pages:
-            for page_num in pages[:10]:  # Limit to 10 pages
-                # Prefetch thumbnails
+            for page_num in pages[:10]:
                 if include_thumbnails:
                     thumbnail_blob = f"{clean_document_id}_page_{page_num}_thumb.jpg"
                     tasks.append(storage_service.blob_exists(
@@ -1184,17 +1122,14 @@ async def prefetch_document_data(
                         thumbnail_blob
                     ))
                 
-                # Prefetch high-quality images
                 image_blob = f"{clean_document_id}_page_{page_num}.jpg"
                 tasks.append(storage_service.blob_exists(
                     settings.AZURE_CACHE_CONTAINER_NAME,
                     image_blob
                 ))
         
-        # Execute all prefetch tasks
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Count successful prefetches
         successful = sum(1 for r in results if not isinstance(r, Exception))
         
         return JSONResponse(
@@ -1216,10 +1151,10 @@ async def prefetch_document_data(
                 "status": "partial",
                 "error": str(e)
             },
-            status_code=200  # Don't fail the request
+            status_code=200
         )
 
-# --- DOCUMENT SEARCH ENDPOINT ---
+# --- DOCUMENT SEARCH ---
 
 @document_router.get("/documents/search",
                     summary="Search across documents")
@@ -1233,7 +1168,6 @@ async def search_documents(
     storage_service = await _get_service(request, 'storage_service')
     
     try:
-        # Get list of documents to search
         if document_ids:
             doc_list = [d.strip() for d in document_ids.split(',')]
         else:
@@ -1244,15 +1178,13 @@ async def search_documents(
         search_results = []
         query_lower = q.lower()
         
-        # Search each document
-        for doc_id in doc_list[:50]:  # Limit to 50 documents
+        for doc_id in doc_list[:50]:
             try:
                 result = {
                     'document_id': doc_id,
                     'matches': []
                 }
                 
-                # Search in metadata
                 if search_in in ['all', 'metadata']:
                     try:
                         metadata = await storage_service.download_blob_as_json(
@@ -1260,7 +1192,6 @@ async def search_documents(
                             f"{doc_id}_metadata.json"
                         )
                         
-                        # Search in document info
                         doc_info = metadata.get('document_info', {})
                         for key, value in doc_info.items():
                             if query_lower in str(value).lower():
@@ -1272,7 +1203,6 @@ async def search_documents(
                     except:
                         pass
                 
-                # Search in sheets
                 if search_in in ['all', 'sheets']:
                     try:
                         index = await storage_service.download_blob_as_json(
@@ -1290,7 +1220,6 @@ async def search_documents(
                     except:
                         pass
                 
-                # Add to results if matches found
                 if result['matches']:
                     search_results.append(result)
                     
@@ -1302,7 +1231,7 @@ async def search_documents(
                 "query": q,
                 "search_in": search_in,
                 "total_results": len(search_results),
-                "results": search_results[:20]  # Limit results
+                "results": search_results[:20]
             },
             headers={"Cache-Control": CACHE_CONTROL_DYNAMIC}
         )
