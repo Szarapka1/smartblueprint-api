@@ -1,569 +1,507 @@
-# app/services/storage_service.py - COMPLETE FIXED VERSION
-
-"""
-Azure Blob Storage Service with enhanced reliability and performance.
-Handles all document storage operations with proper error handling and retries.
-"""
+# app/services/storage_service.py - PRODUCTION-GRADE WITH PROPER ERROR HANDLING
 
 import logging
 import asyncio
-import aiofiles
-import json
-from typing import Optional, List, Dict, Any, Union, BinaryIO
-from datetime import datetime, timedelta
-import io
-from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
-from azure.storage.blob import ContentSettings, BlobSasPermissions, generate_blob_sas
-from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError, AzureError
-
-from app.core.config import AppSettings
+from typing import List, Optional, Dict, Any, AsyncGenerator
+from app.core.config import get_settings
+from azure.storage.blob.aio import BlobServiceClient, ContainerClient
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.storage.blob import BlobPrefix, ContentSettings
+import re
 
 logger = logging.getLogger(__name__)
 
-
 class StorageService:
-    """Azure Blob Storage service with comprehensive operations and error handling."""
+    """Production-grade Azure Blob Storage service with robust error handling"""
     
-    def __init__(self, settings: AppSettings):
-        """Initialize storage service with Azure Blob Storage client."""
-        if not settings:
-            raise ValueError("AppSettings instance is required")
-            
-        self.settings = settings
+    def __init__(self, settings=None):
+        # Use provided settings or get from config
+        self.settings = settings or get_settings()
         
-        # Initialize blob service client
-        self.blob_service_client = BlobServiceClient(
-            account_url=f"https://{settings.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
-            credential=settings.AZURE_STORAGE_ACCOUNT_KEY
-        )
+        if not self.settings.AZURE_STORAGE_CONNECTION_STRING:
+            raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
         
-        # Container names
-        self.main_container = settings.AZURE_CONTAINER_NAME
-        self.cache_container = settings.AZURE_CACHE_CONTAINER_NAME
+        self._lock = asyncio.Lock()  # Thread safety for operations
         
-        # Performance settings
-        self.max_single_put_size = 256 * 1024 * 1024  # 256MB
-        self.max_block_size = 4 * 1024 * 1024  # 4MB
-        self.max_concurrency = 10
-        
-        # Retry settings
-        self.max_retries = 3
-        self.retry_delay = 1.0
-        
-        # SAS token settings
-        self.sas_token_expiry_hours = 24
-        
-        logger.info("✅ Storage Service initialized")
-        logger.info(f"   Account: {settings.AZURE_STORAGE_ACCOUNT_NAME}")
-        logger.info(f"   Main container: {self.main_container}")
-        logger.info(f"   Cache container: {self.cache_container}")
-    
-    async def initialize_containers(self) -> None:
-        """Ensure required containers exist with proper configuration."""
-        containers = [
-            (self.main_container, "Main storage for PDF documents"),
-            (self.cache_container, "Cache storage for processed data")
-        ]
-        
-        for container_name, description in containers:
-            try:
-                container_client = self.blob_service_client.get_container_client(container_name)
-                
-                # Check if container exists
-                try:
-                    await asyncio.to_thread(container_client.get_container_properties)
-                    logger.info(f"✓ Container '{container_name}' exists")
-                except ResourceNotFoundError:
-                    # Create container
-                    await asyncio.to_thread(
-                        container_client.create_container,
-                        public_access=None,
-                        metadata={"description": description}
-                    )
-                    logger.info(f"✅ Created container '{container_name}'")
-                    
-            except Exception as e:
-                logger.error(f"Failed to initialize container '{container_name}': {e}")
-                raise
-
-    async def upload_file(
-        self,
-        container_name: str,
-        blob_name: str,
-        data: Union[bytes, BinaryIO],
-        content_type: str = "application/octet-stream",
-        metadata: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Upload a file to Azure Blob Storage with automatic retry and error handling.
-        
-        Args:
-            container_name: Target container name
-            blob_name: Blob name (path)
-            data: File data as bytes or file-like object
-            content_type: MIME type of the content
-            metadata: Optional metadata dictionary
-            
-        Returns:
-            Dictionary with upload details including URL and etag
-        """
         try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
+            # Create blob service client with optimized settings
+            self.blob_service_client = BlobServiceClient.from_connection_string(
+                self.settings.AZURE_STORAGE_CONNECTION_STRING,
+                max_single_get_size=32*1024*1024,  # 32MB chunks for large files
+                max_chunk_get_size=4*1024*1024     # 4MB chunks for streaming
             )
             
-            # Prepare content settings
-            content_settings = ContentSettings(content_type=content_type)
+            # Pre-create container clients for better performance
+            self.main_container_client = self.blob_service_client.get_container_client(
+                self.settings.AZURE_CONTAINER_NAME
+            )
+            self.cache_container_client = self.blob_service_client.get_container_client(
+                self.settings.AZURE_CACHE_CONTAINER_NAME
+            )
             
-            # Convert data to bytes if necessary
-            if hasattr(data, 'read'):
-                file_data = data.read()
-                if hasattr(data, 'close'):
-                    data.close()
-            else:
-                file_data = data
-            
-            # Upload with progress tracking for large files
-            if len(file_data) > self.max_single_put_size:
-                logger.info(f"📤 Uploading large file {blob_name} ({len(file_data) / (1024*1024):.1f}MB) in blocks...")
-                
-                # Upload in blocks for large files
-                response = await asyncio.to_thread(
-                    blob_client.upload_blob,
-                    data=file_data,
-                    content_settings=content_settings,
-                    metadata=metadata,
-                    overwrite=True,
-                    max_concurrency=self.max_concurrency
-                )
-            else:
-                # Single shot upload for smaller files
-                response = await asyncio.to_thread(
-                    blob_client.upload_blob,
-                    data=file_data,
-                    content_settings=content_settings,
-                    metadata=metadata,
-                    overwrite=True
-                )
-            
-            # Get blob URL
-            blob_url = blob_client.url
-            
-            logger.info(f"✅ Uploaded {blob_name} to {container_name} ({len(file_data)} bytes)")
-            
-            return {
-                "blob_name": blob_name,
-                "container": container_name,
-                "url": blob_url,
-                "etag": response.get('etag'),
-                "last_modified": response.get('last_modified'),
-                "size": len(file_data)
-            }
+            logger.info("✅ StorageService initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to upload {blob_name} to {container_name}: {e}")
-            raise
+            logger.critical(f"❌ Failed to initialize Azure Blob Storage client: {e}")
+            raise ValueError(f"Azure Storage initialization failed: {e}")
+
+    async def verify_connection(self):
+        """Verify connection and ensure required containers exist"""
+        async with self._lock:
+            logger.info("🔍 Verifying Azure Storage connection and containers...")
+            
+            containers = [
+                (self.settings.AZURE_CONTAINER_NAME, self.main_container_client),
+                (self.settings.AZURE_CACHE_CONTAINER_NAME, self.cache_container_client)
+            ]
+            
+            for container_name, client in containers:
+                try:
+                    logger.info(f"🔍 Checking container: {container_name}")
+                    await client.create_container()
+                    logger.info(f"✅ Container '{container_name}' created successfully")
+                except ResourceExistsError:
+                    logger.info(f"✅ Container '{container_name}' already exists")
+                except Exception as e:
+                    logger.critical(f"❌ Container verification failed for '{container_name}': {e}")
+                    raise ConnectionError(f"Azure Storage container '{container_name}' verification failed: {e}")
+            
+            logger.info("✅ All Azure Storage containers verified successfully")
+
+    def _validate_blob_name(self, blob_name: str) -> str:
+        """Validate and sanitize blob name to prevent security issues"""
+        if not blob_name or not isinstance(blob_name, str):
+            raise ValueError("Blob name must be a non-empty string")
+        
+        # Remove any path traversal attempts
+        blob_name = blob_name.replace("../", "").replace("..\\", "")
+        
+        # Ensure valid characters (optimized regex)
+        if not re.match(r'^[\w\-./]+$', blob_name):
+            raise ValueError("Blob name contains invalid characters")
+        
+        # Strip leading/trailing slashes
+        blob_name = blob_name.strip("/")
+        
+        if not blob_name:
+            raise ValueError("Blob name cannot be empty after sanitization")
+            
+        return blob_name
+
+    async def upload_file(self, container_name: str, blob_name: str, data: bytes, 
+                         content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
+        """Upload data to Azure Blob Storage with validation and error handling"""
+        blob_name = self._validate_blob_name(blob_name)
+        
+        if not isinstance(data, bytes):
+            raise ValueError("Data must be bytes")
+        
+        if len(data) == 0:
+            raise ValueError("Cannot upload empty data")
+        
+        # Validate container name
+        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
+                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
+            raise ValueError(f"Invalid container name: {container_name}")
+        
+        try:
+            # Use pre-created container clients
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
+            
+            blob_client = container_client.get_blob_client(blob=blob_name)
+            
+            # Prepare upload options
+            upload_options = {
+                'data': data,
+                'overwrite': True
+            }
+            
+            # Add metadata if provided
+            if metadata:
+                upload_options['metadata'] = metadata
+            
+            # Add content type if provided (with smart defaults for images)
+            if content_type:
+                upload_options['content_settings'] = ContentSettings(content_type=content_type)
+            elif blob_name.lower().endswith('.png'):
+                upload_options['content_settings'] = ContentSettings(content_type='image/png')
+            elif blob_name.lower().endswith(('.jpg', '.jpeg')):
+                upload_options['content_settings'] = ContentSettings(content_type='image/jpeg')
+            elif blob_name.lower().endswith('.pdf'):
+                upload_options['content_settings'] = ContentSettings(content_type='application/pdf')
+            
+            # For large files (>4MB), use optimized upload settings
+            if len(data) > 4 * 1024 * 1024:
+                upload_options['max_concurrency'] = 4  # Parallel upload chunks
+                upload_options['validate_content'] = False  # Skip MD5 validation for speed
+            
+            await blob_client.upload_blob(**upload_options)
+            
+            logger.info(f"✅ Uploaded '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
+            return blob_client.url
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to upload blob '{blob_name}': {e}")
+            raise RuntimeError(f"Blob upload failed: {e}")
 
     async def download_blob_as_bytes(self, container_name: str, blob_name: str) -> bytes:
-        """Download a blob as bytes with automatic retry."""
+        """Download blob content as bytes with validation"""
+        blob_name = self._validate_blob_name(blob_name)
+        
+        # Validate container name
+        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
+                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
+            raise ValueError(f"Invalid container name: {container_name}")
+        
         try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
-            )
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
             
-            logger.debug(f"📥 Downloading {blob_name} from {container_name}")
+            blob_client = container_client.get_blob_client(blob=blob_name)
             
-            # Download blob
-            download_stream = await asyncio.to_thread(blob_client.download_blob)
-            data = await asyncio.to_thread(download_stream.readall)
+            # Stream download for efficiency
+            download_stream = await blob_client.download_blob(max_concurrency=4)
+            data = await download_stream.readall()
             
-            logger.debug(f"✅ Downloaded {blob_name} ({len(data)} bytes)")
-            
+            logger.debug(f"✅ Downloaded '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
             return data
             
         except ResourceNotFoundError:
-            logger.error(f"Blob not found: {blob_name} in {container_name}")
+            logger.error(f"❌ Blob '{blob_name}' not found in container '{container_name}'")
             raise FileNotFoundError(f"Blob '{blob_name}' not found in container '{container_name}'")
         except Exception as e:
-            logger.error(f"Failed to download {blob_name}: {e}")
-            raise
+            logger.error(f"❌ Failed to download blob '{blob_name}': {e}")
+            raise RuntimeError(f"Blob download failed: {e}")
 
-    async def download_blob_as_text(self, container_name: str, blob_name: str, encoding: str = 'utf-8') -> str:
-        """Download a blob as text with specified encoding."""
+    async def download_blob_as_text(self, container_name: str, blob_name: str, 
+                                   encoding: str = "utf-8") -> str:
+        """Download blob content as text with encoding handling"""
+        blob_bytes = await self.download_blob_as_bytes(container_name, blob_name)
+        
         try:
-            data = await self.download_blob_as_bytes(container_name, blob_name)
-            return data.decode(encoding)
-        except UnicodeDecodeError as e:
-            logger.error(f"Failed to decode {blob_name} as {encoding}: {e}")
-            raise ValueError(f"Failed to decode blob as {encoding}")
+            return blob_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            # Try alternative encodings
+            for alt_encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    logger.warning(f"⚠️ Using {alt_encoding} encoding for {blob_name}")
+                    return blob_bytes.decode(alt_encoding)
+                except UnicodeDecodeError:
+                    continue
+            raise ValueError(f"Could not decode blob '{blob_name}' with any supported encoding")
 
-    async def download_blob_as_json(self, container_name: str, blob_name: str) -> Dict[str, Any]:
-        """Download and parse a JSON blob."""
+    async def list_blobs(self, container_name: str, prefix: str = "", 
+                        suffix: str = "") -> List[str]:
+        """List blob names with validation and error handling"""
+        # Validate container name
+        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
+                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
+            raise ValueError(f"Invalid container name: {container_name}")
+        
+        # Validate prefix and suffix (optimized regex)
+        if prefix and not re.match(r'^[\w\-./]*$', prefix):
+            raise ValueError("Prefix contains invalid characters")
+        if suffix and not re.match(r'^[\w\-./]*$', suffix):
+            raise ValueError("Suffix contains invalid characters")
+        
         try:
-            text = await self.download_blob_as_text(container_name, blob_name)
-            return json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from {blob_name}: {e}")
-            raise ValueError(f"Invalid JSON in blob '{blob_name}'")
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
+            
+            blob_names = []
+            
+            # Use prefix for server-side filtering
+            list_kwargs = {"name_starts_with": prefix} if prefix else {}
+            
+            # List blobs with prefix filter
+            async for blob in container_client.list_blobs(**list_kwargs):
+                # Apply suffix filter client-side if needed
+                if suffix and not blob.name.endswith(suffix):
+                    continue
+                blob_names.append(blob.name)
+            
+            logger.debug(f"✅ Listed {len(blob_names)} blobs from '{container_name}'")
+            return blob_names
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list blobs: {e}")
+            raise RuntimeError(f"Blob listing failed: {e}")
 
     async def blob_exists(self, container_name: str, blob_name: str) -> bool:
-        """Check if a blob exists in the specified container."""
+        """Check if a blob exists with validation"""
         try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
-            )
+            blob_name = self._validate_blob_name(blob_name)
             
-            # Try to get blob properties
-            await asyncio.to_thread(blob_client.get_blob_properties)
-            return True
+            # Validate container name
+            if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
+                                      self.settings.AZURE_CACHE_CONTAINER_NAME]:
+                return False
             
-        except ResourceNotFoundError:
+            container_client = (self.cache_container_client 
+                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                              else self.main_container_client)
+            
+            blob_client = container_client.get_blob_client(blob=blob_name)
+            return await blob_client.exists()
+            
+        except Exception:
             return False
-        except Exception as e:
-            logger.error(f"Error checking blob existence: {e}")
-            return False
-
-    async def list_blobs(
-        self,
-        container_name: str,
-        prefix: Optional[str] = None,
-        include_metadata: bool = False
-    ) -> List[Dict[str, Any]]:
-        """List blobs in a container with optional prefix filter."""
-        try:
-            container_client = self.blob_service_client.get_container_client(container_name)
-            
-            blobs = []
-            
-            # List blobs with optional prefix
-            blob_list = container_client.list_blobs(
-                name_starts_with=prefix,
-                include=['metadata'] if include_metadata else None
-            )
-            
-            async for blob in blob_list:
-                blob_info = {
-                    "name": blob.name,
-                    "size": blob.size,
-                    "last_modified": blob.last_modified.isoformat() if blob.last_modified else None,
-                    "content_type": blob.content_settings.content_type if blob.content_settings else None,
-                    "etag": blob.etag
-                }
-                
-                if include_metadata and blob.metadata:
-                    blob_info["metadata"] = blob.metadata
-                
-                blobs.append(blob_info)
-            
-            return blobs
-            
-        except Exception as e:
-            logger.error(f"Failed to list blobs in {container_name}: {e}")
-            raise
 
     async def delete_blob(self, container_name: str, blob_name: str) -> bool:
-        """Delete a blob from storage."""
-        try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
-            )
-            
-            await asyncio.to_thread(blob_client.delete_blob)
-            logger.info(f"🗑️ Deleted {blob_name} from {container_name}")
-            return True
-            
-        except ResourceNotFoundError:
-            logger.warning(f"Blob not found for deletion: {blob_name}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to delete blob {blob_name}: {e}")
-            raise
+        """Delete a blob with validation"""
+        blob_name = self._validate_blob_name(blob_name)
+        
+        # Validate container name
+        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
+                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
+            raise ValueError(f"Invalid container name: {container_name}")
+        
+        async with self._lock:  # Thread safety for delete operations
+            try:
+                container_client = (self.cache_container_client 
+                                  if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
+                                  else self.main_container_client)
+                
+                blob_client = container_client.get_blob_client(blob=blob_name)
+                await blob_client.delete_blob()
+                
+                logger.info(f"✅ Deleted '{blob_name}'")
+                return True
+                
+            except ResourceNotFoundError:
+                logger.warning(f"⚠️ Blob '{blob_name}' not found (already deleted)")
+                return False
+            except Exception as e:
+                logger.error(f"❌ Failed to delete '{blob_name}': {e}")
+                raise RuntimeError(f"Blob deletion failed: {e}")
 
-    async def delete_blobs_with_prefix(self, container_name: str, prefix: str) -> int:
-        """Delete all blobs with a specific prefix."""
-        try:
-            # List blobs with prefix
-            blobs = await self.list_blobs(container_name, prefix=prefix)
-            
-            # Delete each blob
-            deleted_count = 0
-            for blob in blobs:
-                if await self.delete_blob(container_name, blob['name']):
-                    deleted_count += 1
-            
-            logger.info(f"🗑️ Deleted {deleted_count} blobs with prefix '{prefix}'")
-            return deleted_count
-            
-        except Exception as e:
-            logger.error(f"Failed to delete blobs with prefix {prefix}: {e}")
-            raise
+    async def batch_download_blobs(self, container_name: str, blob_names: List[str], 
+                                  max_concurrent: int = 5) -> Dict[str, bytes]:
+        """Download multiple blobs in parallel with validation"""
+        # Validate all blob names first
+        validated_names = []
+        for name in blob_names:
+            try:
+                validated_names.append(self._validate_blob_name(name))
+            except ValueError as e:
+                logger.warning(f"Skipping invalid blob name '{name}': {e}")
+        
+        if not validated_names:
+            return {}
+        
+        # Limit concurrency to reasonable value
+        max_concurrent = min(max_concurrent, 10)
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def download_with_semaphore(blob_name: str) -> tuple[str, Optional[bytes]]:
+            async with semaphore:
+                try:
+                    data = await self.download_blob_as_bytes(container_name, blob_name)
+                    return (blob_name, data)
+                except FileNotFoundError:
+                    logger.warning(f"Blob not found: {blob_name}")
+                    return (blob_name, None)
+                except Exception as e:
+                    logger.error(f"Failed to download {blob_name}: {e}")
+                    return (blob_name, None)
+        
+        # Download all blobs in parallel
+        tasks = [download_with_semaphore(name) for name in validated_names]
+        results = await asyncio.gather(*tasks)
+        
+        # Process results
+        downloaded = {}
+        for blob_name, data in results:
+            if data is not None:
+                downloaded[blob_name] = data
+        
+        logger.info(f"✅ Batch downloaded {len(downloaded)}/{len(validated_names)} blobs")
+        return downloaded
 
-    async def copy_blob(
-        self,
-        source_container: str,
-        source_blob: str,
-        dest_container: str,
-        dest_blob: str
-    ) -> Dict[str, Any]:
-        """Copy a blob between containers or rename within same container."""
-        try:
-            # Get source blob URL
-            source_client = self.blob_service_client.get_blob_client(
-                container=source_container,
-                blob=source_blob
-            )
-            
-            # Generate SAS token for source blob
-            sas_token = generate_blob_sas(
-                account_name=self.settings.AZURE_STORAGE_ACCOUNT_NAME,
-                container_name=source_container,
-                blob_name=source_blob,
-                account_key=self.settings.AZURE_STORAGE_ACCOUNT_KEY,
-                permission=BlobSasPermissions(read=True),
-                expiry=datetime.utcnow() + timedelta(hours=1)
-            )
-            
-            source_url = f"{source_client.url}?{sas_token}"
-            
-            # Get destination client
-            dest_client = self.blob_service_client.get_blob_client(
-                container=dest_container,
-                blob=dest_blob
-            )
-            
-            # Start copy operation
-            copy_result = await asyncio.to_thread(
-                dest_client.start_copy_from_url,
-                source_url
-            )
-            
-            logger.info(f"📋 Copied {source_blob} to {dest_blob}")
-            
-            return {
-                "source": f"{source_container}/{source_blob}",
-                "destination": f"{dest_container}/{dest_blob}",
-                "copy_id": copy_result.get('copy_id'),
-                "copy_status": copy_result.get('copy_status')
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to copy blob: {e}")
-            raise
-
-    async def get_blob_metadata(self, container_name: str, blob_name: str) -> Dict[str, Any]:
-        """Get blob properties and metadata."""
-        try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
-            )
-            
-            properties = await asyncio.to_thread(blob_client.get_blob_properties)
-            
-            return {
-                "name": blob_name,
-                "size": properties.size,
-                "content_type": properties.content_settings.content_type if properties.content_settings else None,
-                "last_modified": properties.last_modified.isoformat() if properties.last_modified else None,
-                "etag": properties.etag,
-                "metadata": properties.metadata or {}
-            }
-            
-        except ResourceNotFoundError:
-            raise FileNotFoundError(f"Blob '{blob_name}' not found")
-        except Exception as e:
-            logger.error(f"Failed to get blob metadata: {e}")
-            raise
-
-    async def update_blob_metadata(
-        self,
-        container_name: str,
-        blob_name: str,
-        metadata: Dict[str, str]
-    ) -> None:
-        """Update blob metadata without re-uploading the content."""
-        try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
-            )
-            
-            await asyncio.to_thread(
-                blob_client.set_blob_metadata,
-                metadata=metadata
-            )
-            
-            logger.info(f"📝 Updated metadata for {blob_name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to update blob metadata: {e}")
-            raise
-
-    async def generate_blob_sas_url(
-        self,
-        container_name: str,
-        blob_name: str,
-        expiry_hours: Optional[int] = None,
-        permission: str = "r"
-    ) -> str:
-        """Generate a SAS URL for temporary blob access."""
-        try:
-            expiry_hours = expiry_hours or self.sas_token_expiry_hours
-            
-            # Set permissions
-            permissions = BlobSasPermissions(
-                read="r" in permission,
-                write="w" in permission,
-                delete="d" in permission
-            )
-            
-            # Generate SAS token
-            sas_token = generate_blob_sas(
-                account_name=self.settings.AZURE_STORAGE_ACCOUNT_NAME,
-                container_name=container_name,
-                blob_name=blob_name,
-                account_key=self.settings.AZURE_STORAGE_ACCOUNT_KEY,
-                permission=permissions,
-                expiry=datetime.utcnow() + timedelta(hours=expiry_hours)
-            )
-            
-            # Build URL
-            blob_client = self.blob_service_client.get_blob_client(
-                container=container_name,
-                blob=blob_name
-            )
-            
-            sas_url = f"{blob_client.url}?{sas_token}"
-            
-            logger.debug(f"🔗 Generated SAS URL for {blob_name} (expires in {expiry_hours}h)")
-            
-            return sas_url
-            
-        except Exception as e:
-            logger.error(f"Failed to generate SAS URL: {e}")
-            raise
+    async def batch_upload_blobs(self, container_name: str, blobs: Dict[str, bytes], 
+                                max_concurrent: int = 5) -> Dict[str, bool]:
+        """Upload multiple blobs in parallel with validation"""
+        # Validate all blob names first
+        validated_blobs = {}
+        for name, data in blobs.items():
+            try:
+                validated_name = self._validate_blob_name(name)
+                if isinstance(data, bytes) and len(data) > 0:
+                    validated_blobs[validated_name] = data
+                else:
+                    logger.warning(f"Skipping invalid data for blob '{name}'")
+            except ValueError as e:
+                logger.warning(f"Skipping invalid blob name '{name}': {e}")
+        
+        if not validated_blobs:
+            return {}
+        
+        # Limit concurrency
+        max_concurrent = min(max_concurrent, 10)
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def upload_with_semaphore(blob_name: str, data: bytes) -> tuple[str, bool]:
+            async with semaphore:
+                try:
+                    await self.upload_file(container_name, blob_name, data)
+                    return (blob_name, True)
+                except Exception as e:
+                    logger.error(f"Failed to upload {blob_name}: {e}")
+                    return (blob_name, False)
+        
+        # Upload all blobs in parallel
+        tasks = [upload_with_semaphore(name, data) for name, data in validated_blobs.items()]
+        results = await asyncio.gather(*tasks)
+        
+        # Return upload results
+        upload_results = {name: success for name, success in results}
+        
+        successful = sum(1 for success in upload_results.values() if success)
+        logger.info(f"✅ Batch uploaded {successful}/{len(validated_blobs)} blobs")
+        
+        return upload_results
 
     async def list_document_ids(self, container_name: str) -> List[str]:
-        """List unique document IDs from blob names in a container."""
+        """List all document IDs by finding _context.txt files"""
         try:
-            # List all blobs
-            blobs = await self.list_blobs(container_name)
+            # Use suffix filter to only get context files
+            context_files = await self.list_blobs(
+                container_name=container_name,
+                suffix="_context.txt"
+            )
             
-            # Extract document IDs
-            document_ids = set()
+            # Extract document IDs from filenames
+            document_ids = []
+            for filename in context_files:
+                # Remove _context.txt to get document ID
+                if filename.endswith("_context.txt"):
+                    doc_id = filename[:-12]  # Remove "_context.txt" (12 chars)
+                    document_ids.append(doc_id)
             
-            for blob in blobs:
-                # Extract document ID from blob name
-                # Assumes format: {document_id}_{suffix}.{extension}
-                blob_name = blob['name']
-                
-                # Handle different blob name patterns
-                if '_' in blob_name:
-                    doc_id = blob_name.split('_')[0]
-                else:
-                    # For blobs without underscore, use name without extension
-                    doc_id = blob_name.rsplit('.', 1)[0]
-                
-                # Validate document ID format
-                if len(doc_id) >= 3 and doc_id.replace('-', '').replace('_', '').isalnum():
-                    document_ids.add(doc_id)
-            
-            return sorted(list(document_ids))
+            logger.info(f"✅ Found {len(document_ids)} documents in '{container_name}'")
+            return document_ids
             
         except Exception as e:
-            logger.error(f"Failed to list document IDs: {e}")
-            raise
+            logger.error(f"❌ Failed to list document IDs: {e}")
+            raise RuntimeError(f"Document listing failed: {e}")
 
-    async def get_container_stats(self, container_name: str) -> Dict[str, Any]:
-        """Get statistics about a container."""
-        try:
-            blobs = await self.list_blobs(container_name, include_metadata=True)
-            
-            total_size = sum(blob['size'] for blob in blobs)
-            
-            # Group by content type
-            by_type = {}
-            for blob in blobs:
-                content_type = blob.get('content_type', 'unknown')
-                if content_type not in by_type:
-                    by_type[content_type] = {"count": 0, "size": 0}
-                by_type[content_type]["count"] += 1
-                by_type[content_type]["size"] += blob['size']
-            
-            return {
-                "container": container_name,
-                "total_blobs": len(blobs),
-                "total_size_bytes": total_size,
-                "total_size_mb": round(total_size / (1024 * 1024), 2),
-                "by_content_type": by_type,
-                "last_updated": datetime.utcnow().isoformat() + 'Z'
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get container stats: {e}")
-            raise
+    async def delete_document_files(self, document_id: str) -> Dict[str, int]:
+        """Delete all files associated with a document ID"""
+        # Validate document ID (optimized regex)
+        if not document_id or not re.match(r'^[\w\-]+$', document_id):
+            raise ValueError("Invalid document ID")
+        
+        async with self._lock:  # Thread safety for bulk delete
+            try:
+                deleted_counts = {
+                    "pdfs": 0,
+                    "pages": 0,
+                    "metadata": 0,
+                    "annotations": 0,
+                    "chats": 0,
+                    "total": 0
+                }
+                
+                # Delete from main container (original PDF)
+                try:
+                    await self.delete_blob(self.settings.AZURE_CONTAINER_NAME, f"{document_id}.pdf")
+                    deleted_counts["pdfs"] = 1
+                except:
+                    pass
+                
+                # List all files for this document in cache container
+                cache_files = await self.list_blobs(
+                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                    prefix=f"{document_id}_"
+                )
+                
+                # Batch delete operations for better performance
+                delete_tasks = []
+                
+                for filename in cache_files:
+                    # Categorize files
+                    if "_page_" in filename and filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        deleted_counts["pages"] += 1
+                    elif filename.endswith(("_metadata.json", "_context.txt", "_document_index.json")):
+                        deleted_counts["metadata"] += 1
+                    elif "_annotations.json" in filename:
+                        deleted_counts["annotations"] += 1
+                    elif "_chat" in filename or "_all_chats.json" in filename:
+                        deleted_counts["chats"] += 1
+                    
+                    # Create delete task
+                    delete_tasks.append(self.delete_blob(self.settings.AZURE_CACHE_CONTAINER_NAME, filename))
+                
+                # Execute all deletes in parallel (with controlled concurrency)
+                if delete_tasks:
+                    # Process in batches of 10
+                    for i in range(0, len(delete_tasks), 10):
+                        batch = delete_tasks[i:i+10]
+                        results = await asyncio.gather(*batch, return_exceptions=True)
+                        
+                        # Count successful deletes
+                        for result in results:
+                            if result is True:
+                                deleted_counts["total"] += 1
+                            elif isinstance(result, Exception):
+                                logger.warning(f"Delete error: {result}")
+                
+                deleted_counts["total"] += deleted_counts["pdfs"]
+                
+                logger.info(f"✅ Deleted {deleted_counts['total']} files for document '{document_id}'")
+                return deleted_counts
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to delete document files: {e}")
+                raise RuntimeError(f"Document deletion failed: {e}")
 
-    def get_service_info(self) -> Dict[str, Any]:
-        """Get storage service configuration and status."""
+    def get_connection_info(self) -> Dict[str, Any]:
+        """Get information about the storage connection"""
         return {
-            "service": "Azure Blob Storage",
-            "account": self.settings.AZURE_STORAGE_ACCOUNT_NAME,
+            "service_type": "Azure Blob Storage",
             "containers": {
-                "main": self.main_container,
-                "cache": self.cache_container
+                "main": self.settings.AZURE_CONTAINER_NAME,
+                "cache": self.settings.AZURE_CACHE_CONTAINER_NAME
             },
-            "settings": {
-                "max_single_put_size_mb": self.max_single_put_size / (1024 * 1024),
-                "max_block_size_mb": self.max_block_size / (1024 * 1024),
-                "max_concurrency": self.max_concurrency,
-                "sas_token_expiry_hours": self.sas_token_expiry_hours
+            "optimizations": {
+                "chunk_size": "4MB streaming, 32MB single",
+                "parallel_downloads": "Supported",
+                "parallel_uploads": "Supported",
+                "pre_created_clients": True,
+                "thread_safety": "Full asyncio locking",
+                "batch_operations": "Optimized with controlled concurrency"
             },
-            "status": "operational"
+            "supported_formats": {
+                "documents": ["pdf"],
+                "images": ["png", "jpg", "jpeg"],  # Optimized for these formats
+                "metadata": ["json", "txt"]
+            },
+            "has_connection_string": bool(self.settings.AZURE_STORAGE_CONNECTION_STRING),
+            "connection_string_length": len(self.settings.AZURE_STORAGE_CONNECTION_STRING) if self.settings.AZURE_STORAGE_CONNECTION_STRING else 0
         }
 
-    async def cleanup_old_blobs(self, container_name: str, days_old: int = 30) -> int:
-        """Clean up blobs older than specified days."""
-        try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days_old)
-            blobs = await self.list_blobs(container_name)
-            
-            deleted_count = 0
-            for blob in blobs:
-                if blob.get('last_modified'):
-                    last_modified = datetime.fromisoformat(blob['last_modified'].rstrip('Z'))
-                    if last_modified < cutoff_date:
-                        if await self.delete_blob(container_name, blob['name']):
-                            deleted_count += 1
-            
-            logger.info(f"🧹 Cleaned up {deleted_count} blobs older than {days_old} days")
-            return deleted_count
-            
-        except Exception as e:
-            logger.error(f"Failed to cleanup old blobs: {e}")
-            raise
+    async def __aenter__(self):
+        """Async context manager entry"""
+        return self
 
-    async def move_blob(
-        self,
-        source_container: str,
-        source_blob: str,
-        dest_container: str,
-        dest_blob: str
-    ) -> bool:
-        """Move a blob (copy then delete original)."""
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit with cleanup"""
         try:
-            # Copy blob
-            await self.copy_blob(source_container, source_blob, dest_container, dest_blob)
-            
-            # Delete original
-            await self.delete_blob(source_container, source_blob)
-            
-            logger.info(f"➡️ Moved {source_blob} to {dest_container}/{dest_blob}")
-            return True
-            
+            await self.blob_service_client.close()
+            logger.info("✅ Storage service cleaned up successfully")
         except Exception as e:
-            logger.error(f"Failed to move blob: {e}")
-            raise
+            logger.warning(f"⚠️ Storage service cleanup warning: {e}")
+
+# Singleton instance for easy access
+_storage_instance = None
+
+def get_storage_service():
+    """Get or create storage service instance"""
+    global _storage_instance
+    if _storage_instance is None:
+        _storage_instance = StorageService()
+    return _storage_instance

@@ -1,4 +1,4 @@
-# app/services/pdf_service.py - PRODUCTION-GRADE PDF PROCESSING
+# app/services/pdf_service.py - PRODUCTION-GRADE PDF PROCESSING WITH SSE EVENTS
 
 import logging
 import fitz  # PyMuPDF
@@ -9,7 +9,7 @@ import gc
 from PIL import Image
 import io
 import re
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Callable
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -58,7 +58,7 @@ class GridSystem:
 
 
 class PDFService:
-    """Production-grade PDF processing with proper error handling and memory management"""
+    """Production-grade PDF processing with proper error handling, memory management, and SSE event support"""
     
     def __init__(self, settings: AppSettings):
         if not settings:
@@ -102,16 +102,26 @@ class PDFService:
             'coordinate': re.compile(r'(?:@|AT)\s*([A-Z]+)[-/]([0-9]+)', re.IGNORECASE)
         }
         
-        logger.info("✅ PDFService initialized (Production Mode)")
+        logger.info("✅ PDFService initialized (Production Mode with SSE Support)")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ DPI: Storage={self.storage_dpi}, AI={self.ai_image_dpi}")
         logger.info(f"   📦 Batch size: {self.batch_size} pages")
         logger.info(f"   🔒 Thread safety: Enabled")
         logger.info(f"   💾 Memory management: Active")
+        logger.info(f"   📡 SSE Events: Supported")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
-                                   storage_service: StorageService):
-        """Process PDF with production-grade error handling and memory management"""
+                                   storage_service: StorageService,
+                                   event_callback: Optional[Callable] = None):
+        """
+        Process PDF with production-grade error handling, memory management, and SSE event emission
+        
+        Args:
+            session_id: Document ID
+            pdf_bytes: PDF file content
+            storage_service: Storage service instance
+            event_callback: Optional async callback for SSE events
+        """
         if not session_id or not isinstance(session_id, str):
             raise ValueError("Invalid session ID")
         
@@ -151,16 +161,17 @@ class PDFService:
                     all_text_parts = []
                     all_grid_systems = {}
                     pages_processed = 0
+                    total_batches = (pages_to_process + self.batch_size - 1) // self.batch_size
                     
-                    for batch_start in range(0, pages_to_process, self.batch_size):
+                    for batch_num, batch_start in enumerate(range(0, pages_to_process, self.batch_size), 1):
                         batch_end = min(batch_start + self.batch_size, pages_to_process)
                         batch_pages = list(range(batch_start, batch_end))
                         
-                        logger.info(f"📦 Processing batch: pages {batch_start + 1}-{batch_end}")
+                        logger.info(f"📦 Processing batch {batch_num}/{total_batches}: pages {batch_start + 1}-{batch_end}")
                         
                         # Process batch
                         batch_results = await self._process_batch_safe(
-                            doc, batch_pages, session_id, storage_service
+                            doc, batch_pages, session_id, storage_service, event_callback
                         )
                         
                         # Collect results
@@ -181,6 +192,16 @@ class PDFService:
                         metadata['pages_processed'] = pages_processed
                         await self._update_status(session_id, 'processing', metadata, storage_service)
                         
+                        # Emit batch complete event
+                        if event_callback:
+                            progress_percent = round((pages_processed / pages_to_process) * 100)
+                            await event_callback("batch_complete", {
+                                "batch_number": batch_num,
+                                "total_batches": total_batches,
+                                "pages_processed": pages_processed,
+                                "progress_percent": progress_percent
+                            })
+                        
                         # Memory management
                         if (batch_end % self.gc_frequency) == 0:
                             gc.collect()
@@ -196,7 +217,7 @@ class PDFService:
                     # Save results
                     await self._save_processing_results(
                         session_id, all_text_parts, all_grid_systems, metadata, 
-                        processing_start, storage_service
+                        processing_start, storage_service, event_callback
                     )
                     
                     # Update final status to 'ready'
@@ -277,14 +298,15 @@ class PDFService:
             metadata['extraction_summary']['total_tables_extracted'] += result['tables_extracted']
 
     async def _process_batch_safe(self, doc: fitz.Document, page_numbers: List[int], 
-                                 session_id: str, storage_service: StorageService) -> List[Dict]:
-        """Process batch with error recovery"""
+                                 session_id: str, storage_service: StorageService,
+                                 event_callback: Optional[Callable] = None) -> List[Dict]:
+        """Process batch with error recovery and event emission"""
         results = []
         
         for page_num in page_numbers:
             try:
                 result = await self._process_single_page_safe(
-                    doc, page_num, session_id, storage_service
+                    doc, page_num, session_id, storage_service, event_callback
                 )
                 results.append(result)
                 
@@ -301,8 +323,9 @@ class PDFService:
         return results
 
     async def _process_single_page_safe(self, doc: fitz.Document, page_num: int, 
-                                       session_id: str, storage_service: StorageService) -> Dict:
-        """Process single page with all safety checks"""
+                                       session_id: str, storage_service: StorageService,
+                                       event_callback: Optional[Callable] = None) -> Dict:
+        """Process single page with all safety checks and event emission"""
         try:
             page = doc[page_num]
             page_actual = page_num + 1
@@ -332,7 +355,7 @@ class PDFService:
             
             # Generate images (using JPEG as per the working version)
             await self._generate_and_upload_page_images_safe(
-                page, page_actual, session_id, storage_service
+                page, page_actual, session_id, storage_service, event_callback
             )
             
             # Prepare metadata
@@ -360,6 +383,22 @@ class PDFService:
             
             # Format text for context
             formatted_text = self._format_page_text(page_actual, page_analysis, grid_system, page_text)
+            
+            # Emit page processed event
+            if event_callback:
+                total_pages = doc.page_count
+                progress_percent = round((page_actual / total_pages) * 100)
+                estimated_time = int((total_pages - page_actual) * self.processing_delay)
+                
+                await event_callback("page_processed", {
+                    "page_number": page_actual,
+                    "total_pages": total_pages,
+                    "progress_percent": progress_percent,
+                    "estimated_time": estimated_time,
+                    "has_text": page_metadata['has_text'],
+                    "has_tables": page_metadata['has_tables'],
+                    "has_grid": page_metadata['has_grid']
+                })
             
             # Clean up page
             page.clean_contents()
@@ -552,21 +591,24 @@ class PDFService:
         return formatted_text
 
     async def _generate_and_upload_page_images_safe(self, page: fitz.Page, page_num: int, 
-                                                   session_id: str, storage_service: StorageService):
-        """Generate and upload page images with proper error handling - JPEG format"""
+                                                   session_id: str, storage_service: StorageService,
+                                                   event_callback: Optional[Callable] = None):
+        """Generate and upload page images with proper error handling and event emission"""
         try:
             # High quality JPEG for viewing
             await self._generate_jpeg_image(page, page_num, session_id, storage_service, 
-                                          dpi=self.storage_dpi, quality=90, suffix="")
+                                          dpi=self.storage_dpi, quality=90, suffix="", 
+                                          resource_type="full_image", event_callback=event_callback)
             
             # AI optimized JPEG
             await self._generate_jpeg_image(page, page_num, session_id, storage_service,
-                                          dpi=self.ai_image_dpi, quality=85, suffix="_ai")
+                                          dpi=self.ai_image_dpi, quality=85, suffix="_ai",
+                                          resource_type="ai_image", event_callback=event_callback)
             
-            # Thumbnail JPEG (first 5 pages only)
-            if page_num <= 5:
-                await self._generate_jpeg_image(page, page_num, session_id, storage_service,
-                                              dpi=self.thumbnail_dpi, quality=70, suffix="_thumb")
+            # Thumbnail JPEG for all pages
+            await self._generate_jpeg_image(page, page_num, session_id, storage_service,
+                                        dpi=self.thumbnail_dpi, quality=70, suffix="_thumb",
+                                        resource_type="thumbnail", event_callback=event_callback)
             
             # Force cleanup
             gc.collect()
@@ -577,8 +619,9 @@ class PDFService:
             pass
 
     async def _generate_jpeg_image(self, page: fitz.Page, page_num: int, session_id: str,
-                                  storage_service: StorageService, dpi: int, quality: int, suffix: str):
-        """Generate and upload JPEG image"""
+                                  storage_service: StorageService, dpi: int, quality: int, suffix: str,
+                                  resource_type: str, event_callback: Optional[Callable] = None):
+        """Generate and upload JPEG image with event emission"""
         matrix = fitz.Matrix(dpi / 72, dpi / 72)
         pix = page.get_pixmap(matrix=matrix, alpha=False)
         
@@ -602,6 +645,20 @@ class PDFService:
                 data=output.getvalue(),
                 content_type="image/jpeg"
             )
+            
+            # Emit resource ready event
+            if event_callback:
+                await event_callback("resource_ready", {
+                    "resource_type": resource_type,
+                    "resource_id": f"page_{page_num}_{resource_type}",
+                    "page_number": page_num,
+                    "metadata": {
+                        "dpi": dpi,
+                        "quality": quality,
+                        "size": len(output.getvalue())
+                    }
+                })
+            
         finally:
             # Clean up
             pix = None
@@ -749,8 +806,9 @@ class PDFService:
 
     async def _save_processing_results(self, session_id: str, all_text_parts: List[str],
                                      all_grid_systems: Dict[str, Any], metadata: Dict[str, Any],
-                                     processing_start: float, storage_service: StorageService):
-        """Save all processing results with proper error handling"""
+                                     processing_start: float, storage_service: StorageService,
+                                     event_callback: Optional[Callable] = None):
+        """Save all processing results with proper error handling and event emission"""
         try:
             # Save text content
             full_text = '\n'.join(all_text_parts)
@@ -761,6 +819,18 @@ class PDFService:
                 content_type="text/plain"
             )
             
+            # Emit context ready event
+            if event_callback:
+                await event_callback("resource_ready", {
+                    "resource_type": "context_text",
+                    "resource_id": "context",
+                    "available": True,
+                    "metadata": {
+                        "text_length": len(full_text),
+                        "has_content": bool(full_text.strip())
+                    }
+                })
+            
             # Save grid systems if detected
             if all_grid_systems:
                 await storage_service.upload_file(
@@ -769,6 +839,16 @@ class PDFService:
                     data=json.dumps(all_grid_systems).encode('utf-8'),
                     content_type="application/json"
                 )
+                
+                # Emit grid systems ready event
+                if event_callback:
+                    await event_callback("resource_ready", {
+                        "resource_type": "grid_systems",
+                        "resource_id": "grid_systems",
+                        "metadata": {
+                            "grid_count": len(all_grid_systems)
+                        }
+                    })
             
             # Create document index
             await self._create_document_index(
@@ -787,6 +867,17 @@ class PDFService:
                 data=json.dumps(metadata, ensure_ascii=False).encode('utf-8'),
                 content_type="application/json"
             )
+            
+            # Emit metadata ready event
+            if event_callback:
+                await event_callback("resource_ready", {
+                    "resource_type": "metadata",
+                    "resource_id": "metadata",
+                    "metadata": {
+                        "page_count": metadata['page_count'],
+                        "processing_time": metadata['processing_time']
+                    }
+                })
         
         except Exception as e:
             logger.error(f"Failed to save processing results: {e}")
@@ -880,8 +971,8 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "4.0.0-PRODUCTION",
-            "mode": "production_grade",
+            "version": "4.0.0-PRODUCTION-SSE",
+            "mode": "production_grade_with_sse",
             "capabilities": {
                 "max_pages": self.max_pages,
                 "batch_size": self.batch_size,
@@ -892,13 +983,20 @@ class PDFService:
                 "multi_resolution_images": True,
                 "ai_optimized": True,
                 "thread_safe": True,
-                "memory_managed": True
+                "memory_managed": True,
+                "sse_events": True  # New capability
             },
             "security": {
                 "input_validation": True,
                 "size_limits": True,
                 "thread_safety": True,
                 "error_recovery": True
+            },
+            "sse_events": {
+                "page_processed": True,
+                "resource_ready": True,
+                "batch_complete": True,
+                "processing_complete": True
             }
         }
 

@@ -1,12 +1,13 @@
-# app/core/config.py - Complete Fixed Version with All Settings
+# app/core/config.py - Complete Fixed Version with All Settings + SSE Support
 """
-Configuration for Smart Blueprint Chat API
+Configuration for Smart Blueprint Chat API with SSE Support
 
 CORE PHILOSOPHY:
 1. Load ALL thumbnails - no artificial limits
 2. Smart page selection based on actual query needs  
 3. Storage is not a constraint - accuracy is paramount
 4. The system adapts to document size, not the other way around
+5. Real-time updates via Server-Sent Events (SSE)
 
 DATA LOADING APPROACH:
 - Check metadata for page count
@@ -32,6 +33,7 @@ class AppSettings:
     - Smart page selection based on actual needs
     - Comprehensive analysis with unlimited page support
     - Storage is not a constraint - accuracy is paramount
+    - Real-time updates via Server-Sent Events
     """
     
     def __init__(self):
@@ -51,6 +53,15 @@ class AppSettings:
             self.CORS_ORIGINS: List[str] = json.loads(cors_origins) if isinstance(cors_origins, str) else cors_origins
         except:
             self.CORS_ORIGINS: List[str] = ["*"]
+        
+        # === SSE (SERVER-SENT EVENTS) SETTINGS ===
+        self.SSE_KEEPALIVE_INTERVAL: int = int(os.getenv("SSE_KEEPALIVE_INTERVAL", 30))  # Keepalive ping every 30 seconds
+        self.SSE_CLIENT_TIMEOUT: int = int(os.getenv("SSE_CLIENT_TIMEOUT", 300))  # Disconnect idle clients after 5 minutes
+        self.SSE_MAX_CONNECTIONS_PER_DOCUMENT: int = int(os.getenv("SSE_MAX_CONNECTIONS_PER_DOCUMENT", 50))  # Allow many concurrent viewers
+        self.SSE_RETRY_INTERVAL: int = int(os.getenv("SSE_RETRY_INTERVAL", 5000))  # Client retry after 5 seconds (ms)
+        self.SSE_EVENT_QUEUE_SIZE: int = int(os.getenv("SSE_EVENT_QUEUE_SIZE", 1000))  # Max events to queue per document
+        self.SSE_ENABLE_COMPRESSION: bool = os.getenv("SSE_ENABLE_COMPRESSION", "true").lower() == "true"  # Compress event data
+        self.ENABLE_SSE: bool = os.getenv("ENABLE_SSE", "true").lower() == "true"  # Master feature flag
         
         # === AZURE BLOB STORAGE ===
         self.AZURE_STORAGE_CONNECTION_STRING: str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
@@ -218,6 +229,18 @@ class AppSettings:
                 print(f"Warning: Could not create cache directory: {e}")
     
     # === HELPER METHODS ===
+    
+    def get_sse_settings(self) -> Dict[str, Any]:
+        """Get SSE configuration settings"""
+        return {
+            "enabled": self.ENABLE_SSE,
+            "keepalive_interval": self.SSE_KEEPALIVE_INTERVAL,
+            "client_timeout": self.SSE_CLIENT_TIMEOUT,
+            "max_connections_per_document": self.SSE_MAX_CONNECTIONS_PER_DOCUMENT,
+            "retry_interval": self.SSE_RETRY_INTERVAL,
+            "event_queue_size": self.SSE_EVENT_QUEUE_SIZE,
+            "enable_compression": self.SSE_ENABLE_COMPRESSION
+        }
     
     def get_note_types(self) -> List[str]:
         """Get allowed note types"""
@@ -396,6 +419,7 @@ class AppSettings:
             "4x_validation": self.ENABLE_4X_VALIDATION,
             "unlimited_loading": self.UNLIMITED_PAGE_LOADING,
             "load_all_thumbnails": self.LOAD_ALL_THUMBNAILS,
+            "sse": self.ENABLE_SSE,  # Added SSE feature check
         }
         return feature_checks.get(feature, False)
     
@@ -495,6 +519,15 @@ CONFIG = {
     "upload_timeout": _settings.UPLOAD_TIMEOUT,
     "job_timeout_seconds": _settings.JOB_TIMEOUT_SECONDS,
     "warning_threshold": _settings.WARNING_THRESHOLD,
+    
+    # SSE settings
+    "sse_enabled": _settings.ENABLE_SSE,
+    "sse_keepalive_interval": _settings.SSE_KEEPALIVE_INTERVAL,
+    "sse_client_timeout": _settings.SSE_CLIENT_TIMEOUT,
+    "sse_max_connections_per_document": _settings.SSE_MAX_CONNECTIONS_PER_DOCUMENT,
+    "sse_retry_interval": _settings.SSE_RETRY_INTERVAL,
+    "sse_event_queue_size": _settings.SSE_EVENT_QUEUE_SIZE,
+    "sse_enable_compression": _settings.SSE_ENABLE_COMPRESSION,
 }
 
 # Export settings for convenience
@@ -520,4 +553,10 @@ IMPORTANT NOTES FOR DATA LOADER IMPLEMENTATION:
    - Only load selected pages
    - Use aggressive caching
    - Apply proper timeouts
+
+4. SSE implementation should:
+   - Send events during processing for real-time updates
+   - Use keepalive events to maintain connection
+   - Handle multiple connections per document
+   - Clean up on disconnection
 """

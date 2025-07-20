@@ -1,9 +1,11 @@
-# main.py - PERMISSIVE TEST CONFIGURATION WITH PRODUCTION-GRADE CORE
+# main.py - PERMISSIVE TEST CONFIGURATION WITH PRODUCTION-GRADE CORE + SSE SUPPORT
 
 import os
 import logging
 import uvicorn
 import traceback
+import asyncio
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +41,160 @@ settings = get_settings()
 # Define VERSION constant
 API_VERSION = "1.0.0"
 
+# --- SSE Event Management Classes ---
+
+class SSEConnection:
+    """Represents a single SSE connection"""
+    def __init__(self, client_id: str, document_id: str):
+        self.client_id = client_id
+        self.document_id = document_id
+        self.queue = asyncio.Queue(maxsize=settings.SSE_EVENT_QUEUE_SIZE)
+        self.connected_at = asyncio.get_event_loop().time()
+        self.last_activity = self.connected_at
+        self.active = True
+
+class SSEEventManager:
+    """Manages SSE connections and event distribution"""
+    def __init__(self, settings):
+        self.settings = settings
+        self.connections = defaultdict(dict)  # {document_id: {client_id: SSEConnection}}
+        self.lock = asyncio.Lock()
+        self._cleanup_task = None
+        
+    async def start(self):
+        """Start the event manager"""
+        if self.settings.ENABLE_SSE:
+            self._cleanup_task = asyncio.create_task(self._cleanup_idle_connections())
+            logger.info("✅ SSE Event Manager started")
+    
+    async def stop(self):
+        """Stop the event manager"""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close all connections
+        async with self.lock:
+            for doc_connections in self.connections.values():
+                for connection in doc_connections.values():
+                    connection.active = False
+            self.connections.clear()
+        
+        logger.info("✅ SSE Event Manager stopped")
+    
+    async def add_connection(self, document_id: str, client_id: str) -> SSEConnection:
+        """Add a new SSE connection"""
+        async with self.lock:
+            # Check connection limit
+            if len(self.connections[document_id]) >= self.settings.SSE_MAX_CONNECTIONS_PER_DOCUMENT:
+                # Remove oldest connection
+                oldest_client = min(
+                    self.connections[document_id].items(),
+                    key=lambda x: x[1].connected_at
+                )[0]
+                old_conn = self.connections[document_id].pop(oldest_client)
+                old_conn.active = False
+                logger.info(f"Removed oldest SSE connection for document {document_id}")
+            
+            # Create new connection
+            connection = SSEConnection(client_id, document_id)
+            self.connections[document_id][client_id] = connection
+            
+            logger.info(f"Added SSE connection: document={document_id}, client={client_id}")
+            logger.info(f"Active connections for document: {len(self.connections[document_id])}")
+            
+            return connection
+    
+    async def remove_connection(self, document_id: str, client_id: str):
+        """Remove an SSE connection"""
+        async with self.lock:
+            if document_id in self.connections and client_id in self.connections[document_id]:
+                connection = self.connections[document_id].pop(client_id)
+                connection.active = False
+                
+                # Clean up empty document entries
+                if not self.connections[document_id]:
+                    del self.connections[document_id]
+                
+                logger.info(f"Removed SSE connection: document={document_id}, client={client_id}")
+    
+    async def send_event(self, document_id: str, event_type: str, data: dict):
+        """Send an event to all connected clients for a document"""
+        if not self.settings.ENABLE_SSE:
+            return
+        
+        event = {
+            "event_type": event_type,
+            "data": data,
+            "timestamp": asyncio.get_event_loop().time(),
+            "document_id": document_id
+        }
+        
+        async with self.lock:
+            if document_id in self.connections:
+                # Send to all connected clients
+                disconnected = []
+                for client_id, connection in self.connections[document_id].items():
+                    if connection.active:
+                        try:
+                            # Non-blocking put with timeout
+                            await asyncio.wait_for(
+                                connection.queue.put(event),
+                                timeout=1.0
+                            )
+                            connection.last_activity = asyncio.get_event_loop().time()
+                        except (asyncio.TimeoutError, asyncio.QueueFull):
+                            logger.warning(f"Failed to send event to client {client_id} - queue full")
+                        except Exception as e:
+                            logger.error(f"Error sending event to client {client_id}: {e}")
+                            disconnected.append(client_id)
+                    else:
+                        disconnected.append(client_id)
+                
+                # Clean up disconnected clients
+                for client_id in disconnected:
+                    self.connections[document_id].pop(client_id, None)
+                
+                if not self.connections[document_id]:
+                    del self.connections[document_id]
+    
+    async def _cleanup_idle_connections(self):
+        """Periodically clean up idle connections"""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Check every minute
+                
+                current_time = asyncio.get_event_loop().time()
+                timeout = self.settings.SSE_CLIENT_TIMEOUT
+                
+                async with self.lock:
+                    disconnected = []
+                    
+                    for document_id, doc_connections in self.connections.items():
+                        for client_id, connection in doc_connections.items():
+                            if current_time - connection.last_activity > timeout:
+                                connection.active = False
+                                disconnected.append((document_id, client_id))
+                    
+                    # Remove disconnected
+                    for document_id, client_id in disconnected:
+                        if document_id in self.connections:
+                            self.connections[document_id].pop(client_id, None)
+                            if not self.connections[document_id]:
+                                del self.connections[document_id]
+                        logger.info(f"Cleaned up idle SSE connection: {client_id}")
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in SSE cleanup task: {e}")
+
+# Store active processing tasks
+processing_tasks = {}
+
 # --- Application Lifecycle Management ---
 
 @asynccontextmanager
@@ -56,7 +212,8 @@ async def lifespan(app: FastAPI):
         "storage": {"status": "not_started", "error": None},
         "pdf": {"status": "not_started", "error": None},
         "ai": {"status": "not_started", "error": None},
-        "session": {"status": "not_started", "error": None}
+        "session": {"status": "not_started", "error": None},
+        "sse": {"status": "not_started", "error": None}
     }
     
     try:
@@ -133,10 +290,26 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Session Service failed: {e}")
             logger.error(traceback.format_exc())
         
-        # 5. Store initialization status
-        app.state.initialization_status = initialization_status
+        # 5. Initialize SSE Event Manager
+        initialization_status["sse"]["status"] = "initializing"
+        try:
+            sse_manager = SSEEventManager(settings)
+            await sse_manager.start()
+            app.state.sse_manager = sse_manager
+            initialization_status["sse"]["status"] = "success"
+            logger.info("✅ SSE Event Manager initialized successfully")
+        except Exception as e:
+            initialization_status["sse"]["status"] = "failed"
+            initialization_status["sse"]["error"] = str(e)
+            app.state.sse_manager = None
+            logger.error(f"❌ SSE Event Manager failed: {e}")
+            logger.error(traceback.format_exc())
         
-        # 6. Log final status
+        # 6. Store initialization status and processing tasks
+        app.state.initialization_status = initialization_status
+        app.state.processing_tasks = processing_tasks
+        
+        # 7. Log final status
         logger.info("="*60)
         logger.info("📊 Service Initialization Summary:")
         for service, status in initialization_status.items():
@@ -150,6 +323,8 @@ async def lifespan(app: FastAPI):
         logger.info(f"📚 Interactive docs available at:")
         logger.info(f"   - http://localhost:{settings.PORT}/docs")
         logger.info(f"   - http://localhost:{settings.PORT}/redoc")
+        if settings.ENABLE_SSE:
+            logger.info(f"📡 SSE (Server-Sent Events) enabled")
         logger.info("="*60)
 
         yield  # Application is now running
@@ -158,7 +333,21 @@ async def lifespan(app: FastAPI):
         logger.info("="*60)
         logger.info("🛑 Shutting down API...")
         
+        # Cancel all processing tasks
+        for task_id, task in processing_tasks.items():
+            if not task.done():
+                task.cancel()
+                logger.info(f"Cancelled processing task: {task_id}")
+        
         # Gracefully shutdown services
+        if hasattr(app.state, 'sse_manager') and app.state.sse_manager:
+            try:
+                await app.state.sse_manager.stop()
+                logger.info("✅ SSE Event Manager shutdown complete")
+            except Exception as e:
+                logger.error(f"❌ SSE Event Manager shutdown error: {e}")
+                logger.error(traceback.format_exc())
+        
         if hasattr(app.state, 'session_service') and app.state.session_service:
             try:
                 await app.state.session_service.shutdown()
@@ -205,6 +394,8 @@ app = FastAPI(
     - Detailed error messages exposed
     - Full stack traces in responses
     - No authentication required
+    
+    🚀 **NEW**: Server-Sent Events (SSE) support for real-time status updates
     
     DO NOT USE IN PRODUCTION!
     """,
@@ -302,14 +493,17 @@ async def root():
             "admin_access": settings.is_feature_enabled("admin"),
             "notes": settings.is_feature_enabled("notes"),
             "highlighting": settings.is_feature_enabled("highlighting"),
-            "trade_coordination": settings.is_feature_enabled("trade_coordination")
+            "trade_coordination": settings.is_feature_enabled("trade_coordination"),
+            "sse": settings.is_feature_enabled("sse")
         },
         "services_available": {
             "storage": hasattr(app.state, 'storage_service') and app.state.storage_service is not None,
             "pdf": hasattr(app.state, 'pdf_service') and app.state.pdf_service is not None,
             "ai": hasattr(app.state, 'ai_service') and app.state.ai_service is not None,
-            "session": hasattr(app.state, 'session_service') and app.state.session_service is not None
-        }
+            "session": hasattr(app.state, 'session_service') and app.state.session_service is not None,
+            "sse": hasattr(app.state, 'sse_manager') and app.state.sse_manager is not None
+        },
+        "sse_config": settings.get_sse_settings() if settings.ENABLE_SSE else None
     }
 
 @app.get("/api/v1/health", tags=["System"])
@@ -321,7 +515,7 @@ async def health_check():
                 "status": "unavailable",
                 "message": "Service not initialized",
                 "initialization_error": getattr(app.state, 'initialization_status', {}).get(
-                    service_name.replace('_service', ''), {}
+                    service_name.replace('_service', '').replace('_manager', ''), {}
                 ).get('error')
             }
         try:
@@ -336,6 +530,14 @@ async def health_check():
                 result["details"]["capabilities"] = service.get_professional_capabilities()
             if hasattr(service, 'is_running'):
                 result["details"]["is_running"] = service.is_running()
+            
+            # SSE specific checks
+            if service_name == 'sse_manager' and hasattr(service, 'connections'):
+                result["details"]["active_connections"] = sum(
+                    len(conns) for conns in service.connections.values()
+                )
+                result["details"]["monitored_documents"] = len(service.connections)
+            
             return result
         except Exception as e:
             return {
@@ -358,12 +560,14 @@ async def health_check():
             "storage": check_service('storage_service'),
             "ai": check_service('ai_service'),
             "pdf": check_service('pdf_service'),
-            "session": check_service('session_service')
+            "session": check_service('session_service'),
+            "sse": check_service('sse_manager')
         },
         "environment": {
             "debug": settings.DEBUG,
             "cors_origins": settings.CORS_ORIGINS,
-            "python_version": os.sys.version
+            "python_version": os.sys.version,
+            "sse_enabled": settings.ENABLE_SSE
         }
     }
 
@@ -389,7 +593,8 @@ async def get_configuration():
             "highlighting": settings.is_feature_enabled("highlighting"),
             "private_notes": settings.is_feature_enabled("private_notes"),
             "note_publishing": settings.is_feature_enabled("note_publishing"),
-            "trade_coordination": settings.is_feature_enabled("trade_coordination")
+            "trade_coordination": settings.is_feature_enabled("trade_coordination"),
+            "sse": settings.is_feature_enabled("sse")
         },
         "limits": {
             "max_file_size_mb": settings.MAX_FILE_SIZE_MB,
@@ -428,7 +633,8 @@ async def get_configuration():
             "ai_dpi": settings.PDF_AI_DPI,
             "thumbnail_dpi": settings.PDF_THUMBNAIL_DPI,
             "batch_size": settings.PROCESSING_BATCH_SIZE
-        }
+        },
+        "sse": settings.get_sse_settings() if settings.ENABLE_SSE else None
     }
 
 @app.get("/debug/error-test", tags=["Debug"])
@@ -445,6 +651,8 @@ if __name__ == "__main__":
     logger.info(f"🌐 CORS: Allowing ALL origins")
     logger.info(f"📝 Error details: FULLY EXPOSED")
     logger.info(f"🔓 Authentication: DISABLED")
+    if settings.ENABLE_SSE:
+        logger.info(f"📡 SSE: ENABLED")
     logger.info("="*60)
     
     uvicorn.run(
