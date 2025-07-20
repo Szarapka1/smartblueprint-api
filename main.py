@@ -1,369 +1,458 @@
-# app/main.py - COMPLETE FIXED VERSION
+# main.py - PERMISSIVE TEST CONFIGURATION WITH PRODUCTION-GRADE CORE
 
-"""
-Main FastAPI application entry point.
-Initializes all services and routes for the Blueprint Analysis System.
-"""
-
+import os
 import logging
-import asyncio
-from datetime import datetime
+import uvicorn
+import traceback
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-import uvicorn
 
+# Import settings first
 from app.core.config import get_settings
+
+# Import services
 from app.services.storage_service import StorageService
 from app.services.pdf_service import PDFService
+from app.services.vision_ai.ai_service_core import VisualIntelligenceFirst
 from app.services.session_service import SessionService
+
+# Import API routers
 from app.api.routes.blueprint_routes import blueprint_router
 from app.api.routes.document_routes import document_router
 from app.api.routes.annotation_routes import annotation_router
 from app.api.routes.note_routes import note_router
 
- 
-# Configure logging
+# --- Configure Logging ---
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,  # DEBUG level for test environment
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [%(filename)s:%(lineno)d]',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("SmartBlueprintAPI")
 
-# Get settings
+# Load settings
 settings = get_settings()
 
+# Define VERSION constant
+API_VERSION = "1.0.0"
+
+# --- Application Lifecycle Management ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manage application lifecycle - startup and shutdown.
-    Initialize all services and clean up resources.
+    Manages application startup and shutdown with PERMISSIVE error handling for testing.
     """
-    logger.info("🚀 Starting Blueprint Analysis System...")
+    logger.info("="*60)
+    logger.info("🚀 Initializing Smart Blueprint API (TEST MODE)...")
+    logger.info("⚠️  WARNING: Running in UNSAFE test configuration!")
+    logger.info("="*60)
+    
+    # Track initialization status
+    initialization_status = {
+        "storage": {"status": "not_started", "error": None},
+        "pdf": {"status": "not_started", "error": None},
+        "ai": {"status": "not_started", "error": None},
+        "session": {"status": "not_started", "error": None}
+    }
     
     try:
-        # Initialize Storage Service
-        logger.info("Initializing Storage Service...")
-        storage_service = StorageService(settings)
-        await storage_service.initialize_containers()
-        app.state.storage_service = storage_service
-        logger.info("✅ Storage Service ready")
+        # 1. Initialize Storage Service
+        initialization_status["storage"]["status"] = "initializing"
+        try:
+            if settings.AZURE_STORAGE_CONNECTION_STRING:
+                storage_service = StorageService(settings)
+                await storage_service.verify_connection()
+                app.state.storage_service = storage_service
+                initialization_status["storage"]["status"] = "success"
+                logger.info("✅ Storage Service initialized successfully")
+            else:
+                app.state.storage_service = None
+                initialization_status["storage"]["status"] = "disabled"
+                logger.warning("⚠️ Storage Service disabled - no connection string")
+        except Exception as e:
+            initialization_status["storage"]["status"] = "failed"
+            initialization_status["storage"]["error"] = str(e)
+            app.state.storage_service = None
+            logger.error(f"❌ Storage Service failed: {e}")
+            logger.error(traceback.format_exc())
         
-        # Initialize PDF Service
-        logger.info("Initializing PDF Service...")
-        pdf_service = PDFService(settings)
-        app.state.pdf_service = pdf_service
-        logger.info("✅ PDF Service ready")
+        # 2. Initialize PDF Service
+        initialization_status["pdf"]["status"] = "initializing"
+        try:
+            if app.state.storage_service:
+                pdf_service = PDFService(settings)
+                app.state.pdf_service = pdf_service
+                initialization_status["pdf"]["status"] = "success"
+                logger.info("✅ PDF Service initialized successfully")
+            else:
+                app.state.pdf_service = None
+                initialization_status["pdf"]["status"] = "disabled"
+                logger.warning("⚠️ PDF Service disabled - requires storage service")
+        except Exception as e:
+            initialization_status["pdf"]["status"] = "failed"
+            initialization_status["pdf"]["error"] = str(e)
+            app.state.pdf_service = None
+            logger.error(f"❌ PDF Service failed: {e}")
+            logger.error(traceback.format_exc())
         
-        # Initialize Session Service
-        logger.info("Initializing Session Service...")
-        session_service = SessionService(settings)
-        session_service.set_storage_service(storage_service)
-        await session_service.start()
-        app.state.session_service = session_service
-        logger.info("✅ Session Service ready")
+        # 3. Initialize AI Service
+        initialization_status["ai"]["status"] = "initializing"
+        try:
+            if settings.OPENAI_API_KEY:
+                ai_service = VisualIntelligenceFirst(settings)
+                app.state.ai_service = ai_service
+                initialization_status["ai"]["status"] = "success"
+                logger.info("✅ AI Service initialized successfully")
+            else:
+                app.state.ai_service = None
+                initialization_status["ai"]["status"] = "disabled"
+                logger.warning("⚠️ AI Service disabled - no API key")
+        except Exception as e:
+            initialization_status["ai"]["status"] = "failed"
+            initialization_status["ai"]["error"] = str(e)
+            app.state.ai_service = None
+            logger.error(f"❌ AI Service failed: {e}")
+            logger.error(traceback.format_exc())
         
-        # Initialize AI Service (placeholder - you'll add this when ready)
-        app.state.ai_service = None
-        logger.info("⚠️ AI Service not configured (add when ready)")
+        # 4. Initialize Session Service
+        initialization_status["session"]["status"] = "initializing"
+        try:
+            session_service = SessionService(settings, app.state.storage_service)
+            await session_service.start_background_cleanup()
+            app.state.session_service = session_service
+            initialization_status["session"]["status"] = "success"
+            logger.info("✅ Session Service initialized successfully")
+        except Exception as e:
+            initialization_status["session"]["status"] = "failed"
+            initialization_status["session"]["error"] = str(e)
+            app.state.session_service = None
+            logger.error(f"❌ Session Service failed: {e}")
+            logger.error(traceback.format_exc())
         
-        logger.info("✅ All services initialized successfully!")
-        logger.info(f"📍 API running at: http://localhost:{settings.PORT}")
-        logger.info(f"📚 API docs available at: http://localhost:{settings.PORT}/docs")
+        # 5. Store initialization status
+        app.state.initialization_status = initialization_status
         
-        yield
+        # 6. Log final status
+        logger.info("="*60)
+        logger.info("📊 Service Initialization Summary:")
+        for service, status in initialization_status.items():
+            emoji = "✅" if status["status"] == "success" else "❌" if status["status"] == "failed" else "⚠️"
+            logger.info(f"   {emoji} {service}: {status['status']}")
+            if status["error"]:
+                logger.info(f"      Error: {status['error']}")
         
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize services: {e}")
-        raise
-    
-    finally:
-        # Cleanup on shutdown
-        logger.info("🛑 Shutting down Blueprint Analysis System...")
+        logger.info("="*60)
+        logger.info("🎉 API is ready! (TEST MODE)")
+        logger.info(f"📚 Interactive docs available at:")
+        logger.info(f"   - http://localhost:{settings.PORT}/docs")
+        logger.info(f"   - http://localhost:{settings.PORT}/redoc")
+        logger.info("="*60)
+
+        yield  # Application is now running
+
+        # --- Shutdown Logic ---
+        logger.info("="*60)
+        logger.info("🛑 Shutting down API...")
         
-        # Stop session service
+        # Gracefully shutdown services
         if hasattr(app.state, 'session_service') and app.state.session_service:
-            await app.state.session_service.stop()
+            try:
+                await app.state.session_service.shutdown()
+                logger.info("✅ Session Service shutdown complete")
+            except Exception as e:
+                logger.error(f"❌ Session Service shutdown error: {e}")
+                logger.error(traceback.format_exc())
+        
+        if hasattr(app.state, 'ai_service') and app.state.ai_service:
+            try:
+                if hasattr(app.state.ai_service, '__aexit__'):
+                    await app.state.ai_service.__aexit__(None, None, None)
+                logger.info("✅ AI Service shutdown complete")
+            except Exception as e:
+                logger.error(f"❌ AI Service shutdown error: {e}")
+                logger.error(traceback.format_exc())
+        
+        if hasattr(app.state, 'storage_service') and app.state.storage_service:
+            try:
+                if hasattr(app.state.storage_service, '__aexit__'):
+                    await app.state.storage_service.__aexit__(None, None, None)
+                logger.info("✅ Storage Service shutdown complete")
+            except Exception as e:
+                logger.error(f"❌ Storage Service shutdown error: {e}")
+                logger.error(traceback.format_exc())
         
         logger.info("✅ Shutdown complete")
+        logger.info("="*60)
+    
+    except Exception as e:
+        logger.error(f"❌ Critical error during application lifecycle: {e}")
+        logger.error(traceback.format_exc())
+        yield
 
+# --- Create FastAPI Application ---
 
-# Create FastAPI app
 app = FastAPI(
-    title="Blueprint Analysis API",
-    description="AI-powered construction blueprint analysis system with collaboration features",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan
+    title="Smart Blueprint API (TEST MODE)",
+    description="""
+    An intelligent API for analyzing construction blueprints with AI-powered insights.
+    
+    ⚠️ **WARNING**: This instance is running in TEST MODE with:
+    - All CORS origins allowed
+    - Detailed error messages exposed
+    - Full stack traces in responses
+    - No authentication required
+    
+    DO NOT USE IN PRODUCTION!
+    """,
+    version=f"{API_VERSION}-TEST",
+    lifespan=lifespan,
+    docs_url="/docs",  # Always enabled in test mode
+    redoc_url="/redoc",  # Always enabled in test mode
+    debug=True  # Always debug in test mode
 )
 
-# Configure CORS
+# --- PERMISSIVE CORS Configuration ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=["*"],  # Allow ALL origins
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["X-Document-ID", "X-Page-Count", "X-Page-Number", "X-Session-ID"]
+    allow_methods=["*"],  # Allow ALL methods
+    allow_headers=["*"],  # Allow ALL headers
+    expose_headers=["*"]  # Expose ALL headers
 )
 
+logger.warning("⚠️ CORS: Allowing ALL origins, methods, and headers - TEST MODE ONLY!")
 
-# --- Error Handlers ---
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Handle validation errors with detailed messages."""
-    errors = []
-    for error in exc.errors():
-        field = " -> ".join(str(x) for x in error['loc'])
-        errors.append({
-            "field": field,
-            "message": error['msg'],
-            "type": error['type']
-        })
-    
+# --- VERBOSE Global Exception Handler ---
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    logger.error(f"Unhandled exception for {request.method} {request.url}:")
+    logger.error("".join(tb_lines))
+    try:
+        body = await request.body()
+        body_str = body.decode('utf-8') if body else "No body"
+    except:
+        body_str = "Could not read body"
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=500,
         content={
-            "detail": "Validation error",
-            "errors": errors
+            "error": "Internal Server Error",
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "exception_args": exc.args if hasattr(exc, 'args') else None,
+            "traceback": tb_lines,
+            "request_info": {
+                "method": request.method,
+                "url": str(request.url),
+                "headers": dict(request.headers),
+                "path_params": request.path_params,
+                "query_params": dict(request.query_params),
+                "body": body_str
+            },
+            "file_location": {
+                "file": tb_lines[-2].split('"')[1] if len(tb_lines) > 1 and '"' in tb_lines[-2] else "unknown",
+                "line": tb_lines[-2].split("line ")[1].split(",")[0] if len(tb_lines) > 1 and "line " in tb_lines[-2] else "unknown"
+            },
+            "initialization_status": getattr(app.state, 'initialization_status', {})
         }
     )
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Handle HTTP exceptions with consistent format."""
     return JSONResponse(
         status_code=exc.status_code,
         content={
+            "error": f"HTTP {exc.status_code}",
             "detail": exc.detail,
-            "status_code": exc.status_code
+            "path": str(request.url),
+            "method": request.method,
+            "headers": dict(request.headers) if exc.status_code >= 400 else None
         }
     )
 
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """Handle unexpected exceptions."""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "detail": "An unexpected error occurred. Please try again later.",
-            "type": type(exc).__name__
-        }
-    )
-
+# --- Include API Routers ---
+app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Analysis"])
+app.include_router(document_router, prefix="/api/v1", tags=["Document Management"])
+app.include_router(annotation_router, prefix="/api/v1", tags=["Annotations"])
+app.include_router(note_router, prefix="/api/v1", tags=["Notes"])
 
 # --- Root Endpoints ---
-
-@app.get("/", tags=["Health"])
+@app.get("/", tags=["System"])
 async def root():
-    """Root endpoint with API information."""
     return {
-        "name": "Blueprint Analysis API",
-        "version": "1.0.0",
+        "service": "Smart Blueprint API",
+        "mode": "TEST/DEVELOPMENT - UNSAFE",
+        "version": API_VERSION,
         "status": "operational",
-        "docs": "/docs",
-        "health": "/health"
+        "warning": "This API is running in TEST MODE with permissive settings!",
+        "documentation": {
+            "interactive": f"http://localhost:{settings.PORT}/docs",
+            "redoc": f"http://localhost:{settings.PORT}/redoc"
+        },
+        "initialization_status": getattr(app.state, 'initialization_status', {}),
+        "features": {
+            "storage": settings.is_feature_enabled("storage"),
+            "ai_analysis": settings.is_feature_enabled("ai"),
+            "pdf_processing": settings.is_feature_enabled("pdf_processing"),
+            "admin_access": settings.is_feature_enabled("admin"),
+            "notes": settings.is_feature_enabled("notes"),
+            "highlighting": settings.is_feature_enabled("highlighting"),
+            "trade_coordination": settings.is_feature_enabled("trade_coordination")
+        },
+        "services_available": {
+            "storage": hasattr(app.state, 'storage_service') and app.state.storage_service is not None,
+            "pdf": hasattr(app.state, 'pdf_service') and app.state.pdf_service is not None,
+            "ai": hasattr(app.state, 'ai_service') and app.state.ai_service is not None,
+            "session": hasattr(app.state, 'session_service') and app.state.session_service is not None
+        }
     }
 
-@app.get("/health", tags=["Health"])
-async def health_check(request: Request):
-    """Comprehensive health check for all services."""
+@app.get("/api/v1/health", tags=["System"])
+async def health_check():
+    def check_service(service_name: str) -> dict:
+        service = getattr(app.state, service_name, None)
+        if service is None:
+            return {
+                "status": "unavailable",
+                "message": "Service not initialized",
+                "initialization_error": getattr(app.state, 'initialization_status', {}).get(
+                    service_name.replace('_service', ''), {}
+                ).get('error')
+            }
+        try:
+            result = {"status": "healthy", "details": {}}
+            if hasattr(service, 'get_connection_info'):
+                result["details"]["connection_info"] = service.get_connection_info()
+            if hasattr(service, 'get_service_statistics'):
+                result["details"]["statistics"] = service.get_service_statistics()
+            if hasattr(service, 'get_processing_stats'):
+                result["details"]["processing_stats"] = service.get_processing_stats()
+            if hasattr(service, 'get_professional_capabilities'):
+                result["details"]["capabilities"] = service.get_professional_capabilities()
+            if hasattr(service, 'is_running'):
+                result["details"]["is_running"] = service.is_running()
+            return result
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "traceback": traceback.format_exc().splitlines()[-5:]
+            }
+
     health_status = {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "services": {}
+        "timestamp": logging.Formatter().formatTime(logging.LogRecord(
+            name="", level=0, pathname="", lineno=0,
+            msg="", args=(), exc_info=None
+        )),
+        "overall_status": "healthy",
+        "mode": "TEST/DEVELOPMENT",
+        "version": API_VERSION,
+        "initialization_status": getattr(app.state, 'initialization_status', {}),
+        "services": {
+            "storage": check_service('storage_service'),
+            "ai": check_service('ai_service'),
+            "pdf": check_service('pdf_service'),
+            "session": check_service('session_service')
+        },
+        "environment": {
+            "debug": settings.DEBUG,
+            "cors_origins": settings.CORS_ORIGINS,
+            "python_version": os.sys.version
+        }
     }
-    
-    # Check Storage Service
-    try:
-        if hasattr(request.app.state, 'storage_service') and request.app.state.storage_service:
-            health_status["services"]["storage"] = {
-                "status": "healthy",
-                "info": request.app.state.storage_service.get_service_info()
-            }
-        else:
-            health_status["services"]["storage"] = {"status": "not_initialized"}
-            health_status["status"] = "degraded"
-    except Exception as e:
-        health_status["services"]["storage"] = {"status": "error", "error": str(e)}
-        health_status["status"] = "unhealthy"
-    
-    # Check PDF Service
-    try:
-        if hasattr(request.app.state, 'pdf_service') and request.app.state.pdf_service:
-            health_status["services"]["pdf"] = {"status": "healthy"}
-        else:
-            health_status["services"]["pdf"] = {"status": "not_initialized"}
-            health_status["status"] = "degraded"
-    except Exception as e:
-        health_status["services"]["pdf"] = {"status": "error", "error": str(e)}
-        health_status["status"] = "unhealthy"
-    
-    # Check Session Service
-    try:
-        if hasattr(request.app.state, 'session_service') and request.app.state.session_service:
-            health_status["services"]["session"] = {
-                "status": "healthy",
-                "statistics": request.app.state.session_service.get_service_statistics()
-            }
-        else:
-            health_status["services"]["session"] = {"status": "not_initialized"}
-            health_status["status"] = "degraded"
-    except Exception as e:
-        health_status["services"]["session"] = {"status": "error", "error": str(e)}
-        health_status["status"] = "unhealthy"
-    
-    # Check AI Service
-    health_status["services"]["ai"] = {
-        "status": "not_configured",
-        "message": "AI service will be added when ready"
-    }
-    
-    # Set appropriate status code
-    status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
-    
-    return JSONResponse(
-        content=health_status,
-        status_code=status_code
-    )
 
-@app.get("/api/v1", tags=["API Info"])
-async def api_info():
-    """API version and capability information."""
+    service_statuses = [s.get("status", "unknown") for s in health_status["services"].values()]
+    if "error" in service_statuses:
+        health_status["overall_status"] = "degraded"
+    elif all(status == "unavailable" for status in service_statuses):
+        health_status["overall_status"] = "critical"
+
+    return health_status
+
+@app.get("/config", tags=["System"])
+async def get_configuration():
     return {
-        "version": "1.0.0",
-        "capabilities": {
-            "pdf_upload": True,
-            "pdf_processing": True,
-            "text_extraction": True,
-            "image_generation": True,
-            "thumbnail_generation": True,
-            "grid_detection": True,
-            "table_extraction": True,
-            "ai_analysis": False,  # Will be True when AI service is added
-            "collaboration": True,
-            "annotations": True,
-            "notes": True
+        "mode": "TEST/DEVELOPMENT - UNSAFE",
+        "features": {
+            "storage": settings.is_feature_enabled("storage"),
+            "ai_analysis": settings.is_feature_enabled("ai"),
+            "pdf_processing": settings.is_feature_enabled("pdf_processing"),
+            "admin_access": settings.is_feature_enabled("admin"),
+            "notes": settings.is_feature_enabled("notes"),
+            "sessions": settings.is_feature_enabled("sessions"),
+            "highlighting": settings.is_feature_enabled("highlighting"),
+            "private_notes": settings.is_feature_enabled("private_notes"),
+            "note_publishing": settings.is_feature_enabled("note_publishing"),
+            "trade_coordination": settings.is_feature_enabled("trade_coordination")
         },
         "limits": {
             "max_file_size_mb": settings.MAX_FILE_SIZE_MB,
-            "max_pages": settings.PDF_MAX_PAGES,
-            "supported_formats": ["pdf"]
+            "max_notes_per_document": settings.MAX_NOTES_PER_DOCUMENT,
+            "max_sessions": settings.MAX_SESSIONS_IN_MEMORY,
+            "pdf_max_pages": settings.PDF_MAX_PAGES,
+            "ai_max_pages": settings.AI_MAX_PAGES,
+            "max_note_length": settings.MAX_NOTE_LENGTH,
+            "max_total_note_chars": settings.MAX_TOTAL_NOTE_CHARS,
+            "max_visual_elements": settings.MAX_VISUAL_ELEMENTS,
+            "session_cleanup_interval": settings.SESSION_CLEANUP_INTERVAL_SECONDS,
+            "session_expiry_hours": settings.SESSION_CLEANUP_HOURS
         },
-        "endpoints": {
-            "upload": "/api/v1/documents/upload",
-            "status": "/api/v1/documents/{document_id}/status",
-            "download": "/api/v1/documents/{document_id}/download",
-            "metadata": "/api/v1/documents/{document_id}",
-            "images": "/api/v1/documents/{document_id}/images",
-            "chat": "/api/v1/documents/{document_id}/chat"
+        "environment": {
+            "debug_mode": True,
+            "cors_origins": ["*"],
+            "version": API_VERSION,
+            "environment": settings.ENVIRONMENT,
+            "host": settings.HOST,
+            "port": settings.PORT
+        },
+        "storage": {
+            "main_container": settings.AZURE_CONTAINER_NAME,
+            "cache_container": settings.AZURE_CACHE_CONTAINER_NAME,
+            "connection_string_length": len(settings.AZURE_STORAGE_CONNECTION_STRING) if settings.AZURE_STORAGE_CONNECTION_STRING else 0
+        },
+        "ai": {
+            "model": settings.OPENAI_MODEL,
+            "max_tokens": settings.OPENAI_MAX_TOKENS,
+            "temperature": settings.OPENAI_TEMPERATURE,
+            "api_key_length": len(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else 0
+        },
+        "pdf": {
+            "preview_resolution": settings.PDF_PREVIEW_RESOLUTION,
+            "high_resolution": settings.PDF_HIGH_RESOLUTION,
+            "ai_dpi": settings.PDF_AI_DPI,
+            "thumbnail_dpi": settings.PDF_THUMBNAIL_DPI,
+            "batch_size": settings.PROCESSING_BATCH_SIZE
         }
     }
 
+@app.get("/debug/error-test", tags=["Debug"])
+async def test_error_handling():
+    raise ValueError("This is a test error to verify verbose error handling is working correctly!")
 
-# --- Register Routers ---
-
-# Blueprint routes (upload, chat, etc.)
-app.include_router(
-    blueprint_router,
-    prefix="/api/v1",
-    tags=["Blueprints"]
-)
-
-# Document routes (metadata, images, etc.)
-app.include_router(
-    document_router,
-    prefix="/api/v1",
-    tags=["Documents"]
-)
-
-# Annotation routes
-app.include_router(
-    annotation_router,
-    prefix="/api/v1",
-    tags=["Annotations"]
-)
-
-# Note routes
-app.include_router(
-    note_router,
-    prefix="/api/v1",
-    tags=["Notes"]
-)
-
-
-# --- Request Middleware ---
-
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    """Add processing time header to all responses."""
-    import time
-    start_time = time.time()
-    
-    response = await call_next(request)
-    
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(round(process_time * 1000, 2)) + "ms"
-    
-    return response
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all incoming requests."""
-    logger.info(f"📥 {request.method} {request.url.path}")
-    
-    response = await call_next(request)
-    
-    # Log response status
-    status_emoji = "✅" if response.status_code < 400 else "❌"
-    logger.info(f"{status_emoji} {request.method} {request.url.path} - {response.status_code}")
-    
-    return response
-
-
-# --- Utility Endpoints ---
-
-@app.post("/api/v1/test-upload", tags=["Testing"])
-async def test_upload_endpoint(request: Request):
-    """Test endpoint to verify file upload capability."""
-    return {
-        "status": "ready",
-        "storage_service": hasattr(request.app.state, 'storage_service') and request.app.state.storage_service is not None,
-        "pdf_service": hasattr(request.app.state, 'pdf_service') and request.app.state.pdf_service is not None,
-        "session_service": hasattr(request.app.state, 'session_service') and request.app.state.session_service is not None,
-        "message": "Ready to accept file uploads"
-    }
-
-
-# --- Main Entry Point ---
-
+# --- Application Entry Point ---
 if __name__ == "__main__":
-    import sys
-    from datetime import datetime
+    logger.info("="*60)
+    logger.info("🚀 Starting Smart Blueprint API in TEST MODE")
+    logger.info("⚠️  WARNING: This configuration is UNSAFE for production!")
+    logger.info("="*60)
+    logger.info(f"🔧 Debug mode: ON")
+    logger.info(f"🌐 CORS: Allowing ALL origins")
+    logger.info(f"📝 Error details: FULLY EXPOSED")
+    logger.info(f"🔓 Authentication: DISABLED")
+    logger.info("="*60)
     
-    # Print startup banner
-    print("\n" + "="*60)
-    print("🏗️  Blueprint Analysis System")
-    print("="*60)
-    print(f"📅 Starting at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"🐍 Python version: {sys.version.split()[0]}")
-    print(f"🌐 Environment: {settings.ENVIRONMENT}")
-    print(f"🔧 Debug mode: {settings.DEBUG}")
-    print("="*60 + "\n")
-    
-    # Run the application
     uvicorn.run(
-        "app.main:app",
+        "main:app",
         host="0.0.0.0",
         port=settings.PORT,
-        reload=settings.DEBUG,
-        log_level="info" if settings.DEBUG else "warning",
-        access_log=settings.DEBUG
+        reload=True,  # Auto-reload on code changes
+        log_level="debug",  # Verbose logging
+        access_log=True  # Log all requests
     )
+
