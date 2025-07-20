@@ -293,7 +293,7 @@ async def check_document_status_enhanced(
 async def get_page_resources(
     request: Request,
     document_id: str,
-    page_num: int = Query(..., ge=1, description="Page number (1-indexed)")
+    page_num: int  # ✅ Path parameter
 ):
     """Check what resources are available for a specific page."""
     clean_document_id = validate_document_id(document_id)
@@ -351,7 +351,7 @@ async def get_page_resources(
 async def get_page_image(
     request: Request,
     document_id: str,
-    page_num: int = Query(..., ge=1),
+    page_num: int,  # ✅ Path parameter - no Query()
     type: str = Query("full", regex="^(full|ai|thumb)$", description="Image type")
 ):
     """Get a specific page image."""
