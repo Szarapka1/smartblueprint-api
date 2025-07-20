@@ -24,7 +24,7 @@ from app.api.routes.blueprint_routes import blueprint_router
 from app.api.routes.document_routes import document_router
 from app.api.routes.annotation_routes import annotation_router
 from app.api.routes.note_routes import note_router
-from app.api.routes.collaboration_routes import collaboration_router
+
 
 # Configure logging
 logging.basicConfig(
@@ -296,13 +296,6 @@ app.include_router(
     note_router,
     prefix="/api/v1",
     tags=["Notes"]
-)
-
-# Collaboration routes
-app.include_router(
-    collaboration_router,
-    prefix="/api/v1",
-    tags=["Collaboration"]
 )
 
 
