@@ -457,6 +457,10 @@ class Annotation(AnnotationBase):
     related_trades: List[str] = Field(default_factory=list)
     coordination_required: bool = Field(False)
 
+class AnnotationCreate(AnnotationBase):
+    """Create a new annotation"""
+    pass
+
 class AnnotationResponse(BaseModel):
     """Response when creating/updating annotations"""
     annotation_id: str
@@ -654,7 +658,7 @@ __all__ = [
     "AnnotationResponse", "HighlightResponse",
     
     # Annotation Models
-    "Annotation", "AnnotationBase",
+    "Annotation", "AnnotationBase", "AnnotationCreate",
     
     # Trade Models
     "TradeConflict",
