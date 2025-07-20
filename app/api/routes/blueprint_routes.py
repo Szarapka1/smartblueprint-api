@@ -1,4 +1,4 @@
-# app/api/routes/blueprint_routes.py - WRITE OPERATIONS ONLY
+# app/api/routes/blueprint_routes.py - COMPLETE FIXED VERSION
 
 """
 Blueprint Analysis Routes - Upload, Processing, and Write Operations
@@ -865,7 +865,10 @@ async def chat_with_document(
         
         cache_container = settings.AZURE_CACHE_CONTAINER_NAME
         
+        # Check document status
         status_blob = f"{clean_document_id}_status.json"
+        document_ready = False
+        
         if await storage_service.blob_exists(cache_container, status_blob):
             status_text = await storage_service.download_blob_as_text(
                 container_name=cache_container,
@@ -898,9 +901,13 @@ async def chat_with_document(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=f"Document processing failed: {status_data.get('error', 'Unknown error')}"
                     )
+            
+            elif status_data.get('status') in ['ready', 'completed']:
+                document_ready = True
         
+        # Verify document is ready by checking for context file
         context_blob = f"{clean_document_id}_context.txt"
-        if not await storage_service.blob_exists(cache_container, context_blob):
+        if not document_ready and not await storage_service.blob_exists(cache_container, context_blob):
             main_container = settings.AZURE_CONTAINER_NAME
             if await storage_service.blob_exists(main_container, f"{clean_document_id}.pdf"):
                 raise HTTPException(
@@ -914,6 +921,7 @@ async def chat_with_document(
                     detail=f"Document '{clean_document_id}' not found"
                 )
         
+        # Process AI request
         try:
             ai_result = await asyncio.wait_for(
                 ai_service.get_ai_response(
@@ -939,6 +947,7 @@ async def chat_with_document(
                 detail="AI analysis timed out. Please try with a simpler question or specific page reference."
             )
         
+        # Save chat history
         await save_chat_to_history(
             document_id=clean_document_id,
             author=author,
@@ -953,6 +962,7 @@ async def chat_with_document(
             }
         )
         
+        # Update session
         session_service = request.app.state.session_service
         if session_service:
             try:
@@ -969,6 +979,7 @@ async def chat_with_document(
             except Exception as e:
                 logger.warning(f"Session activity update failed: {e}")
         
+        # Build response
         response = ChatResponse(
             session_id=clean_document_id,
             ai_response=ai_result.get("ai_response", "I was unable to analyze the blueprint. Please try rephrasing your question."),

@@ -1,4 +1,4 @@
-# app/api/routes/document_routes.py - READ OPERATIONS ONLY
+# app/api/routes/document_routes.py - COMPLETE FIXED VERSION
 
 import logging
 from typing import List, Dict, Any, Optional
@@ -120,6 +120,30 @@ def generate_image_url(storage_service, container_name: str, blob_name: str) -> 
     base_url = f"https://{storage_service.blob_service_client.account_name}.blob.core.windows.net"
     return f"{base_url}/{container_name}/{blob_name}"
 
+async def _check_document_ready(storage_service, document_id: str) -> bool:
+    """Check if document is fully processed and ready."""
+    try:
+        # Check for context file (indicates processing complete)
+        context_exists = await storage_service.blob_exists(
+            settings.AZURE_CACHE_CONTAINER_NAME,
+            f"{document_id}_context.txt"
+        )
+        
+        if not context_exists:
+            # Check status file
+            status_blob = f"{document_id}_status.json"
+            if await storage_service.blob_exists(settings.AZURE_CACHE_CONTAINER_NAME, status_blob):
+                status_text = await storage_service.download_blob_as_text(
+                    container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                    blob_name=status_blob
+                )
+                status_data = json.loads(status_text)
+                return status_data.get('status') in ['ready', 'completed']
+        
+        return context_exists
+    except:
+        return False
+
 # --- DOCUMENT LISTING ---
 
 @document_router.get("/documents", summary="List all processed documents")
@@ -131,10 +155,8 @@ async def list_all_documents(request: Request):
         
         processed_documents = []
         for doc_id in document_ids:
-            if await storage_service.blob_exists(
-                settings.AZURE_CACHE_CONTAINER_NAME, 
-                f"{doc_id}_metadata.json"
-            ):
+            # Check if document is ready
+            if await _check_document_ready(storage_service, doc_id):
                 processed_documents.append(doc_id)
         
         return JSONResponse(
@@ -160,11 +182,19 @@ async def get_document_details(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing or not found"
+            )
+        
         metadata_json = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
         )
         
+        # Try to get document index for additional info
         try:
             index_json = await storage_service.download_blob_as_json(
                 container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -172,6 +202,12 @@ async def get_document_details(request: Request, document_id: str):
             )
         except:
             index_json = {}
+        
+        # Get image settings from metadata or use defaults
+        image_settings = metadata_json.get('image_settings', {
+            'high_quality': {'dpi': 150, 'quality': 90, 'progressive': True},
+            'thumbnail': {'dpi': 72, 'quality': 75}
+        })
         
         response_data = DocumentMetadataResponse(
             document_id=clean_document_id,
@@ -183,15 +219,8 @@ async def get_document_details(request: Request, document_id: str):
             has_tables=metadata_json.get('extraction_summary', {}).get('has_tables', False),
             has_thumbnails=metadata_json.get('extraction_summary', {}).get('has_thumbnails', True),
             table_count=metadata_json.get('extraction_summary', {}).get('table_count', 0),
-            jpeg_settings=metadata_json.get('image_settings', {}).get('high_quality', {
-                'dpi': 150,
-                'quality': 90,
-                'progressive': True
-            }),
-            thumbnail_settings=metadata_json.get('image_settings', {}).get('thumbnail', {
-                'dpi': 72,
-                'quality': 75
-            }),
+            jpeg_settings=image_settings.get('high_quality', {}),
+            thumbnail_settings=image_settings.get('thumbnail', {}),
             drawing_types=index_json.get('drawing_types', {}),
             sheet_numbers=index_json.get('sheet_numbers', {}),
             scales_found=index_json.get('scales_found', {})
@@ -205,6 +234,8 @@ async def get_document_details(request: Request, document_id: str):
             }
         )
         
+    except HTTPException:
+        raise
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Metadata for document '{clean_document_id}' not found.")
     except Exception as e:
@@ -232,7 +263,22 @@ async def get_complete_document_data(
     try:
         cache_container = settings.AZURE_CACHE_CONTAINER_NAME
         
-        if not await storage_service.blob_exists(cache_container, f"{clean_document_id}_metadata.json"):
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            # Check if it's still processing
+            status_blob = f"{clean_document_id}_status.json"
+            if await storage_service.blob_exists(cache_container, status_blob):
+                status_text = await storage_service.download_blob_as_text(
+                    container_name=cache_container,
+                    blob_name=status_blob
+                )
+                status_data = json.loads(status_text)
+                if status_data.get('status') == 'processing':
+                    raise HTTPException(
+                        status_code=status.HTTP_425_TOO_EARLY,
+                        detail=f"Document is still processing"
+                    )
+            
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Document '{clean_document_id}' not found or not yet processed"
@@ -360,6 +406,13 @@ async def get_document_grid_systems(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         blob_name = f"{clean_document_id}_grid_systems.json"
         grid_data = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -386,6 +439,8 @@ async def get_document_grid_systems(request: Request, document_id: str):
             }
         )
         
+    except HTTPException:
+        raise
     except FileNotFoundError:
         return JSONResponse(
             content={
@@ -411,6 +466,13 @@ async def get_document_tables(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         blob_name = f"{clean_document_id}_tables.json"
         tables_data = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -440,6 +502,8 @@ async def get_document_tables(request: Request, document_id: str):
             }
         )
         
+    except HTTPException:
+        raise
     except FileNotFoundError:
         return JSONResponse(
             content={
@@ -465,6 +529,13 @@ async def get_document_index(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         blob_name = f"{clean_document_id}_document_index.json"
         index_data = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -479,6 +550,8 @@ async def get_document_index(request: Request, document_id: str):
             }
         )
         
+    except HTTPException:
+        raise
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Document index for '{clean_document_id}' not found.")
     except Exception as e:
@@ -493,6 +566,13 @@ async def get_document_context(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         blob_name = f"{clean_document_id}_context.txt"
         context_text = await storage_service.download_blob_as_text(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -509,6 +589,8 @@ async def get_document_context(request: Request, document_id: str):
             }
         )
         
+    except HTTPException:
+        raise
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Context for document '{clean_document_id}' not found.")
     except Exception as e:
@@ -530,6 +612,13 @@ async def get_page_data(request: Request, document_id: str, page_number: int):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -613,6 +702,13 @@ async def get_batch_page_data(
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -801,6 +897,13 @@ async def get_all_image_urls(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -827,22 +930,18 @@ async def get_all_image_urls(request: Request, document_id: str):
                 }
             }
         
+        # Get image settings from metadata
+        image_settings = metadata.get('image_settings', {
+            'high_quality': {'dpi': 150, 'quality': 90, 'progressive': True},
+            'thumbnail': {'dpi': 72, 'quality': 75}
+        })
+        
         return JSONResponse(
             content={
                 "document_id": clean_document_id,
                 "total_pages": page_count,
                 "image_urls": image_urls,
-                "image_settings": metadata.get('image_settings', {
-                    'high_quality': {
-                        'dpi': 150,
-                        'quality': 90,
-                        'progressive': True
-                    },
-                    'thumbnail': {
-                        'dpi': 72,
-                        'quality': 75
-                    }
-                })
+                "image_settings": image_settings
             },
             headers={
                 "Cache-Control": CACHE_CONTROL_METADATA,
@@ -850,8 +949,8 @@ async def get_all_image_urls(request: Request, document_id: str):
             }
         )
         
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Document not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get image URLs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve image URLs")
@@ -864,6 +963,13 @@ async def get_all_thumbnails(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         metadata = await storage_service.download_blob_as_json(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{clean_document_id}_metadata.json"
@@ -908,8 +1014,8 @@ async def get_all_thumbnails(request: Request, document_id: str):
             }
         )
         
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Document not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get thumbnails: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve thumbnails")
@@ -923,6 +1029,13 @@ async def get_document_statistics(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         tasks = {
             'metadata': storage_service.download_blob_as_json(
                 settings.AZURE_CACHE_CONTAINER_NAME, 
@@ -997,6 +1110,13 @@ async def get_document_collaborators(request: Request, document_id: str):
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         tasks = {
             'notes': storage_service.download_blob_as_json(
                 settings.AZURE_CACHE_CONTAINER_NAME, 
@@ -1070,6 +1190,8 @@ async def get_document_collaborators(request: Request, document_id: str):
             total_collaborators=len(collaborator_stats)
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get collaborators for {clean_document_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve collaborator data.")
@@ -1090,6 +1212,13 @@ async def prefetch_document_data(
     storage_service = await _get_service(request, 'storage_service')
     
     try:
+        # Check if document is ready
+        if not await _check_document_ready(storage_service, clean_document_id):
+            raise HTTPException(
+                status_code=status.HTTP_425_TOO_EARLY,
+                detail="Document is still processing"
+            )
+        
         tasks = []
         
         tasks.append(storage_service.download_blob_as_json(
@@ -1143,6 +1272,8 @@ async def prefetch_document_data(
             headers={"Cache-Control": CACHE_CONTROL_DYNAMIC}
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prefetch failed: {e}", exc_info=True)
         return JSONResponse(
@@ -1179,6 +1310,10 @@ async def search_documents(
         query_lower = q.lower()
         
         for doc_id in doc_list[:50]:
+            # Only search ready documents
+            if not await _check_document_ready(storage_service, doc_id):
+                continue
+            
             try:
                 result = {
                     'document_id': doc_id,

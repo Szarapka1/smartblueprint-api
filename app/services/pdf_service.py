@@ -1,4 +1,4 @@
-# app/services/pdf_service.py - ULTRA-RELIABLE VERSION WITH THUMBNAILS AND HIGH-QUALITY JPEG
+# app/services/pdf_service.py - FIXED VERSION WITH RELIABLE UPLOAD FLOW
 
 import logging
 import fitz  # PyMuPDF
@@ -28,16 +28,16 @@ class GridSystem:
     page_number: int
     x_labels: List[str] = field(default_factory=list)
     y_labels: List[str] = field(default_factory=list)
-    x_coordinates: Dict[str, int] = field(default_factory=dict)  # Pixel coordinates
-    y_coordinates: Dict[str, int] = field(default_factory=dict)  # Pixel coordinates
-    x_lines: List[int] = field(default_factory=list)  # Raw line positions
-    y_lines: List[int] = field(default_factory=list)  # Raw line positions
+    x_coordinates: Dict[str, int] = field(default_factory=dict)
+    y_coordinates: Dict[str, int] = field(default_factory=dict)
+    x_lines: List[int] = field(default_factory=list)
+    y_lines: List[int] = field(default_factory=list)
     scale: Optional[str] = None
     confidence: float = 0.0
     detection_method: str = "none"
-    image_width: int = 0  # Width of the rendered JPEG
-    image_height: int = 0  # Height of the rendered JPEG
-    grid_bounds: Dict[str, int] = field(default_factory=dict)  # min_x, max_x, min_y, max_y
+    image_width: int = 0
+    image_height: int = 0
+    grid_bounds: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -68,35 +68,34 @@ class PDFService:
         self._lock = asyncio.Lock()
 
         # Image settings - THUMBNAILS + HIGH QUALITY JPEG
-        self.high_quality_dpi = 150  # For detailed viewing and AI analysis
-        self.thumbnail_dpi = settings.PDF_THUMBNAIL_DPI  # 72 DPI for thumbnails
-        self.jpeg_quality = 90  # High quality for main images
-        self.thumbnail_quality = 75  # Lower quality for thumbnails
-        self.jpeg_progressive = True  # Progressive encoding for better loading
+        self.high_quality_dpi = 150
+        self.thumbnail_dpi = settings.PDF_THUMBNAIL_DPI
+        self.jpeg_quality = 90
+        self.thumbnail_quality = 75
+        self.jpeg_progressive = True
 
         # Processing settings - CONSERVATIVE FOR RELIABILITY
         self.max_pages = settings.PDF_MAX_PAGES
-        self.batch_size = min(5, settings.PROCESSING_BATCH_SIZE)  # Max 5 pages at once
-        self.processing_timeout_per_page = 120  # 2 minutes per page
-        self.image_generation_timeout = 180  # 3 minutes for image generation
+        self.batch_size = min(5, settings.PROCESSING_BATCH_SIZE)
+        self.processing_timeout_per_page = 120
+        self.image_generation_timeout = 180
 
         # Text and table extraction settings
         self.max_text_per_page = 150000
         self.enable_grid_detection = True
         self.enable_table_extraction = True
-        self.grid_line_tolerance = 5  # pixels
+        self.grid_line_tolerance = 5
 
-        # Memory management - AGGRESSIVE
-        self.gc_frequency = 2  # Run GC every 2 pages
-        self.processing_delay = 0.5  # Delay between batches
-        self.memory_warning_threshold_mb = 500  # Warn if process uses > 500MB
+        # Memory management
+        self.gc_frequency = 2
+        self.processing_delay = 0.5
+        self.memory_warning_threshold_mb = 500
 
-        logger.info("✅ PDFService initialized (ULTRA-RELIABLE VERSION)")
+        logger.info("✅ PDFService initialized (FIXED VERSION)")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   📦 Batch size: {self.batch_size} pages")
         logger.info(f"   🖼️ High-quality: {self.high_quality_dpi} DPI, Quality={self.jpeg_quality}")
         logger.info(f"   🖼️ Thumbnails: {self.thumbnail_dpi} DPI, Quality={self.thumbnail_quality}")
-        logger.info(f"   ⏱️ Timeout: {self.processing_timeout_per_page}s per page")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes,
                                    storage_service: StorageService):
@@ -115,26 +114,19 @@ class PDFService:
                 if pdf_size_mb > self.settings.MAX_FILE_SIZE_MB:
                     raise ValueError(f"PDF too large: {pdf_size_mb:.1f}MB (max: {self.settings.MAX_FILE_SIZE_MB}MB)")
 
-                # Calculate total timeout based on file size
-                estimated_pages = min(int(pdf_size_mb * 2), self.max_pages)  # Rough estimate
-                total_timeout = estimated_pages * self.processing_timeout_per_page
-                
-                logger.info(f"⏱️ Using timeout: {total_timeout}s for estimated {estimated_pages} pages")
-
-                # Process with timeout
-                try:
-                    await asyncio.wait_for(
-                        self._process_pdf_internal(session_id, pdf_bytes, storage_service),
-                        timeout=total_timeout
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(f"❌ Processing timeout after {total_timeout}s")
-                    raise RuntimeError(f"PDF processing timeout after {total_timeout}s")
+                # Process with proper error handling
+                await self._process_pdf_internal(session_id, pdf_bytes, storage_service)
 
             except Exception as e:
                 logger.error(f"❌ Processing failed: {e}")
                 logger.error(traceback.format_exc())
-                await self._save_error_state(session_id, str(e), storage_service)
+                
+                # Update status to failed
+                await self._update_processing_status(
+                    storage_service, session_id, 'failed', 
+                    {'error': str(e), 'traceback': traceback.format_exc()}
+                )
+                
                 raise RuntimeError(f"PDF processing failed: {str(e)}")
 
     async def _process_pdf_internal(self, session_id: str, pdf_bytes: bytes,
@@ -142,8 +134,8 @@ class PDFService:
         """Internal PDF processing with detailed progress tracking"""
         processing_start = time.time()
         
+        # Open PDF
         try:
-            # Open PDF with timeout protection
             logger.info("📖 Opening PDF document...")
             doc = await asyncio.get_event_loop().run_in_executor(
                 None, 
@@ -157,14 +149,20 @@ class PDFService:
             pages_to_process = min(total_pages, self.max_pages)
             logger.info(f"📄 Document has {total_pages} pages, processing {pages_to_process}")
 
-            # Initialize metadata
+            # Initialize tracking
             metadata = self._initialize_metadata(session_id, doc, pages_to_process, total_pages, len(pdf_bytes) / (1024 * 1024))
             all_text_parts = []
             all_tables = []
             all_grid_systems = {}
             pages_processed = 0
 
-            # Process in small batches
+            # Update status to processing
+            await self._update_processing_status(
+                storage_service, session_id, 'processing',
+                {'total_pages': total_pages, 'processing_pages': pages_to_process}
+            )
+
+            # Process in batches
             for batch_start in range(0, pages_to_process, self.batch_size):
                 batch_end = min(batch_start + self.batch_size, pages_to_process)
                 batch_pages = list(range(batch_start, batch_end))
@@ -174,7 +172,7 @@ class PDFService:
                 
                 logger.info(f"📦 Processing batch {batch_num}/{total_batches}: pages {batch_start + 1}-{batch_end}")
 
-                # Process batch with error recovery
+                # Process batch
                 batch_results = await self._process_batch_safe(doc, batch_pages, session_id, storage_service)
 
                 # Aggregate results
@@ -196,73 +194,90 @@ class PDFService:
                     else:
                         logger.error(f"❌ Failed to process page {result.get('page_num', '?')}: {result.get('error')}")
                 
+                # Update progress
+                progress = (pages_processed / pages_to_process) * 100
+                await self._update_processing_status(
+                    storage_service, session_id, 'processing',
+                    {'progress': progress, 'pages_processed': pages_processed}
+                )
+                
                 # Memory management
                 if batch_num % self.gc_frequency == 0:
-                    logger.debug("🧹 Running garbage collection...")
                     gc.collect()
-                    await asyncio.sleep(0.1)  # Give system time to breathe
-                
-                # Progress update
-                progress = (pages_processed / pages_to_process) * 100
-                elapsed = time.time() - processing_start
-                rate = pages_processed / elapsed if elapsed > 0 else 0
-                eta = (pages_to_process - pages_processed) / rate if rate > 0 else 0
-                
-                logger.info(f"📊 Progress: {progress:.1f}% ({pages_processed}/{pages_to_process} pages)")
-                logger.info(f"   Speed: {rate:.1f} pages/sec, ETA: {eta:.0f}s")
+                    await asyncio.sleep(0.1)
                 
                 # Delay between batches
                 if batch_end < pages_to_process:
-                    logger.debug(f"⏸️ Pausing {self.processing_delay}s before next batch...")
                     await asyncio.sleep(self.processing_delay)
 
-            # Save all results
+            # Save results
             logger.info("💾 Saving processing results...")
             await self._save_processing_results(
                 session_id, all_text_parts, all_tables, all_grid_systems, 
                 metadata, processing_start, storage_service
             )
 
+            # Update final status
+            await self._update_processing_status(
+                storage_service, session_id, 'completed',
+                {
+                    'pages_processed': pages_processed,
+                    'processing_time': time.time() - processing_start,
+                    'has_thumbnails': True,
+                    'has_text': bool(all_text_parts),
+                    'has_tables': bool(all_tables),
+                    'has_grids': bool(all_grid_systems)
+                }
+            )
+
             logger.info(f"✅ Processing complete for {session_id} in {metadata['processing_time']:.2f}s")
-            logger.info(f"   Pages: {pages_processed}, Tables: {len(all_tables)}, Grids: {len(all_grid_systems)}")
             
         finally:
-            # Clean up
-            logger.debug("🧹 Cleaning up PDF document...")
             doc.close()
             gc.collect()
 
+    async def _update_processing_status(self, storage_service: StorageService, 
+                                      session_id: str, status: str, 
+                                      additional_data: Dict[str, Any] = None):
+        """Update processing status in storage"""
+        try:
+            status_data = {
+                'document_id': session_id,
+                'status': status,
+                'updated_at': datetime.utcnow().isoformat() + 'Z',
+                **(additional_data or {})
+            }
+            
+            await storage_service.upload_file(
+                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{session_id}_processing_status.json",
+                data=json.dumps(status_data, indent=2).encode('utf-8'),
+                content_type="application/json"
+            )
+        except Exception as e:
+            logger.error(f"Failed to update processing status: {e}")
+
     async def _generate_page_images(self, page: fitz.Page, page_num: int,
                                    session_id: str, storage_service: StorageService) -> Tuple[int, int]:
-        """Generate BOTH thumbnail and high-quality JPEG for a page with timeout protection"""
+        """Generate BOTH thumbnail and high-quality JPEG for a page"""
         try:
-            # Use timeout for image generation
-            return await asyncio.wait_for(
-                self._generate_images_internal(page, page_num, session_id, storage_service),
-                timeout=self.image_generation_timeout
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"Image generation timeout for page {page_num}")
-            raise RuntimeError(f"Image generation timeout for page {page_num}")
+            return await self._generate_images_internal(page, page_num, session_id, storage_service)
         except Exception as e:
             logger.error(f"Failed to generate images for page {page_num}: {e}")
             raise
 
     async def _generate_images_internal(self, page: fitz.Page, page_num: int,
                                        session_id: str, storage_service: StorageService) -> Tuple[int, int]:
-        """Internal image generation with memory management"""
+        """Internal image generation with proper error handling"""
         logger.info(f"🖼️ Generating images for page {page_num}...")
         
-        # 1. Generate thumbnail first (faster, lower memory)
-        logger.debug(f"   Creating thumbnail...")
+        # 1. Generate thumbnail
         await self._generate_thumbnail(page, page_num, session_id, storage_service)
         
-        # Small delay and GC between operations
+        # Small delay between operations
         await asyncio.sleep(0.1)
-        gc.collect()
         
         # 2. Generate high-quality JPEG
-        logger.debug(f"   Creating high-quality JPEG...")
         image_width, image_height = await self._generate_high_quality_jpeg(
             page, page_num, session_id, storage_service
         )
@@ -274,37 +289,27 @@ class PDFService:
 
     async def _generate_thumbnail(self, page: fitz.Page, page_num: int,
                                  session_id: str, storage_service: StorageService):
-        """Generate thumbnail image for quick preview with error handling"""
+        """Generate thumbnail with proper error handling"""
         try:
-            # Create thumbnail matrix
+            # Create thumbnail pixmap
             thumb_matrix = fitz.Matrix(self.thumbnail_dpi / 72, self.thumbnail_dpi / 72)
             
-            # Render page at thumbnail resolution
-            logger.debug(f"   Rendering thumbnail at {self.thumbnail_dpi} DPI...")
             pix = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: page.get_pixmap(matrix=thumb_matrix, alpha=False)
             )
             
-            # Convert to PIL Image
+            # Convert to JPEG
             img_data = pix.tobytes("jpeg")
             img = Image.open(io.BytesIO(img_data))
             
-            # Optimize thumbnail
+            # Optimize
             output = io.BytesIO()
-            img.save(
-                output, 
-                format='JPEG', 
-                quality=self.thumbnail_quality,
-                optimize=True
-            )
+            img.save(output, format='JPEG', quality=self.thumbnail_quality, optimize=True)
             output.seek(0)
             
-            # Upload to storage with retry
+            # Upload
             blob_name = f"{session_id}_page_{page_num}_thumb.jpg"
-            thumb_size = len(output.getvalue())
-            
-            logger.debug(f"   Uploading thumbnail ({thumb_size / 1024:.1f}KB)...")
             
             await storage_service.upload_file(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
@@ -316,47 +321,39 @@ class PDFService:
                     "type": "thumbnail",
                     "dpi": str(self.thumbnail_dpi),
                     "width": str(img.width),
-                    "height": str(img.height),
-                    "quality": str(self.thumbnail_quality)
+                    "height": str(img.height)
                 }
             )
             
-            logger.debug(f"✅ Thumbnail uploaded: {img.width}x{img.height} pixels")
+            logger.debug(f"✅ Thumbnail uploaded: {blob_name}")
             
-            # Clean up immediately
+            # Clean up
             pix = None
             img.close()
-            del img
-            del output
             
         except Exception as e:
             logger.error(f"Failed to generate thumbnail for page {page_num}: {e}")
-            logger.error(traceback.format_exc())
             raise
 
     async def _generate_high_quality_jpeg(self, page: fitz.Page, page_num: int,
                                          session_id: str, storage_service: StorageService) -> Tuple[int, int]:
-        """Generate high-quality JPEG for detailed viewing and AI analysis"""
+        """Generate high-quality JPEG with proper error handling"""
         try:
-            # Create high-quality matrix
+            # Create high-quality pixmap
             matrix = fitz.Matrix(self.high_quality_dpi / 72, self.high_quality_dpi / 72)
             
-            # Render page at high resolution
-            logger.debug(f"   Rendering high-quality at {self.high_quality_dpi} DPI...")
             pix = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: page.get_pixmap(matrix=matrix, alpha=False)
             )
             
-            # Get dimensions before conversion
             width, height = pix.width, pix.height
-            logger.debug(f"   Rendered size: {width}x{height} pixels")
             
-            # Convert to PIL Image for better compression
+            # Convert to JPEG
             img_data = pix.tobytes("jpeg")
             img = Image.open(io.BytesIO(img_data))
             
-            # Save as progressive JPEG with high quality
+            # Save with high quality
             output = io.BytesIO()
             img.save(
                 output, 
@@ -367,11 +364,8 @@ class PDFService:
             )
             output.seek(0)
             
-            # Upload to storage
+            # Upload
             blob_name = f"{session_id}_page_{page_num}.jpg"
-            jpeg_size = len(output.getvalue())
-            
-            logger.debug(f"   Uploading high-quality JPEG ({jpeg_size / (1024*1024):.1f}MB)...")
             
             await storage_service.upload_file(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
@@ -382,35 +376,27 @@ class PDFService:
                     "page_number": str(page_num),
                     "type": "high_quality",
                     "dpi": str(self.high_quality_dpi),
-                    "quality": str(self.jpeg_quality),
                     "width": str(width),
-                    "height": str(height),
-                    "progressive": str(self.jpeg_progressive)
+                    "height": str(height)
                 }
             )
             
-            logger.info(f"✅ High-quality JPEG uploaded: {width}x{height} pixels ({jpeg_size / (1024*1024):.1f}MB)")
+            logger.info(f"✅ High-quality JPEG uploaded: {blob_name}")
             
-            # Clean up immediately
+            # Clean up
             pix = None
             img.close()
-            del img
-            del output
             gc.collect()
             
             return width, height
             
         except Exception as e:
             logger.error(f"Failed to generate high-quality JPEG for page {page_num}: {e}")
-            logger.error(traceback.format_exc())
             raise
 
     def _detect_comprehensive_grid(self, page: fitz.Page, page_text: str, page_num: int, 
                                   image_width: int, image_height: int) -> GridSystem:
-        """
-        Detect grid with pixel-accurate coordinates relative to the JPEG image.
-        Combines visual line detection and text analysis for maximum accuracy.
-        """
+        """Simplified grid detection focused on reliability"""
         logger.debug(f"🔍 Detecting grid system for page {page_num}...")
         
         grid = GridSystem(
@@ -420,270 +406,76 @@ class PDFService:
         )
 
         try:
-            # Get page-to-image transformation matrix
+            # Get page dimensions
             page_rect = page.rect
             scale_x = image_width / page_rect.width
             scale_y = image_height / page_rect.height
 
-            # 1. Visual Grid Detection (High Priority)
+            # Try visual detection (simplified)
             try:
-                visual_grid = self._detect_visual_grid_lines(page, scale_x, scale_y)
-                if visual_grid and visual_grid['confidence'] > 0.6:
-                    grid.x_lines = visual_grid['x_lines']
-                    grid.y_lines = visual_grid['y_lines']
-                    grid.confidence = visual_grid['confidence']
+                paths = page.get_drawings()
+                x_lines = []
+                y_lines = []
+                
+                for path in paths:
+                    for item in path["items"]:
+                        if item[0] == "l":  # Line
+                            p1, p2 = item[1], item[2]
+                            
+                            # Horizontal lines
+                            if abs(p1.y - p2.y) < self.grid_line_tolerance:
+                                if abs(p1.x - p2.x) > page_rect.width * 0.3:
+                                    y_lines.append(int(p1.y * scale_y))
+                            
+                            # Vertical lines
+                            elif abs(p1.x - p2.x) < self.grid_line_tolerance:
+                                if abs(p1.y - p2.y) > page_rect.height * 0.3:
+                                    x_lines.append(int(p1.x * scale_x))
+                
+                # Remove duplicates
+                if x_lines:
+                    grid.x_lines = sorted(list(set(x_lines)))
+                if y_lines:
+                    grid.y_lines = sorted(list(set(y_lines)))
+                
+                if len(grid.x_lines) >= 2 and len(grid.y_lines) >= 2:
+                    grid.confidence = 0.8
                     grid.detection_method = "visual"
-                    logger.debug(f"   Visual grid: {len(grid.x_lines)}x{len(grid.y_lines)} lines")
-            except Exception as e:
-                logger.warning(f"Visual grid detection failed: {e}")
-
-            # 2. Text-based Grid Label Detection
-            try:
-                text_grid = self._extract_grid_labels_from_text(page, page_text, scale_x, scale_y)
-                if text_grid:
-                    grid.x_labels = text_grid['x_labels']
-                    grid.y_labels = text_grid['y_labels']
-                    grid.x_coordinates = text_grid['x_coordinates']
-                    grid.y_coordinates = text_grid['y_coordinates']
                     
-                    if grid.detection_method == "none":
-                        grid.detection_method = "text"
-                        grid.confidence = 0.5
-                    else:
-                        grid.detection_method = "combined"
-                        grid.confidence = min(0.95, grid.confidence + 0.2)
-                    
-                    logger.debug(f"   Text grid: {len(grid.x_labels)} x-labels, {len(grid.y_labels)} y-labels")
             except Exception as e:
-                logger.warning(f"Text grid extraction failed: {e}")
+                logger.debug(f"Visual grid detection error: {e}")
 
-            # 3. If we have lines but no labels, generate synthetic labels
-            if grid.x_lines and not grid.x_labels:
-                grid.x_labels = [chr(65 + i) for i in range(len(grid.x_lines))]  # A, B, C...
-                grid.x_coordinates = {label: int(line) for label, line in zip(grid.x_labels, sorted(grid.x_lines))}
+            # Extract scale if available
+            scale_match = re.search(r'SCALE[\s:]+([0-9/]+"\s*=\s*[0-9\'-]+|[0-9]+:[0-9]+)', page_text, re.IGNORECASE)
+            if scale_match:
+                grid.scale = scale_match.group(1)
 
-            if grid.y_lines and not grid.y_labels:
-                grid.y_labels = [str(i + 1) for i in range(len(grid.y_lines))]  # 1, 2, 3...
-                grid.y_coordinates = {label: int(line) for label, line in zip(grid.y_labels, sorted(grid.y_lines))}
-
-            # 4. Extract scale from title block
-            grid.scale = self._extract_scale_from_page(page_text, page)
-
-            # 5. Calculate grid bounds
-            if grid.x_coordinates:
-                x_values = list(grid.x_coordinates.values())
-                grid.grid_bounds['min_x'] = min(x_values)
-                grid.grid_bounds['max_x'] = max(x_values)
-            
-            if grid.y_coordinates:
-                y_values = list(grid.y_coordinates.values())
-                grid.grid_bounds['min_y'] = min(y_values)
-                grid.grid_bounds['max_y'] = max(y_values)
-
-            logger.debug(f"✅ Grid detection complete: {grid.detection_method} method, confidence: {grid.confidence:.2f}")
-            
         except Exception as e:
             logger.error(f"Grid detection error: {e}")
-            logger.error(traceback.format_exc())
 
         return grid
 
-    def _detect_visual_grid_lines(self, page: fitz.Page, scale_x: float, scale_y: float) -> Dict[str, Any]:
-        """Detect grid lines visually from the page"""
-        try:
-            paths = page.get_drawings()
-            x_lines = []
-            y_lines = []
-            page_width = page.rect.width
-            page_height = page.rect.height
-
-            for path in paths:
-                for item in path["items"]:
-                    if item[0] == "l":  # Line
-                        p1, p2 = item[1], item[2]
-                        
-                        # Horizontal lines
-                        if abs(p1.y - p2.y) < self.grid_line_tolerance:
-                            line_length = abs(p1.x - p2.x)
-                            if line_length > page_width * 0.3:  # Significant line
-                                y_lines.append(int(p1.y * scale_y))
-                        
-                        # Vertical lines
-                        elif abs(p1.x - p2.x) < self.grid_line_tolerance:
-                            line_length = abs(p1.y - p2.y)
-                            if line_length > page_height * 0.3:  # Significant line
-                                x_lines.append(int(p1.x * scale_x))
-
-            # Cluster lines to remove duplicates
-            x_lines = self._cluster_lines(x_lines)
-            y_lines = self._cluster_lines(y_lines)
-
-            confidence = 0.0
-            if len(x_lines) >= 2 and len(y_lines) >= 2:
-                confidence = min(0.9, (len(x_lines) * len(y_lines)) / 100.0)
-
-            return {
-                'x_lines': sorted(x_lines),
-                'y_lines': sorted(y_lines),
-                'confidence': confidence
-            }
-        except Exception as e:
-            logger.error(f"Visual grid detection error: {e}")
-            return {'x_lines': [], 'y_lines': [], 'confidence': 0.0}
-
-    def _extract_grid_labels_from_text(self, page: fitz.Page, page_text: str, 
-                                      scale_x: float, scale_y: float) -> Dict[str, Any]:
-        """Extract grid labels and their pixel coordinates from text"""
-        try:
-            x_labels = []
-            y_labels = []
-            x_coordinates = {}
-            y_coordinates = {}
-
-            # Get text with position information
-            text_instances = page.get_text("dict")
-            
-            # Pattern for grid references
-            grid_patterns = [
-                re.compile(r'^([A-Z]+)$'),  # Single letters
-                re.compile(r'^([0-9]+)$'),  # Single numbers
-                re.compile(r'([A-Z]+)[-/]([0-9]+)'),  # Combined references
-            ]
-
-            for block in text_instances.get("blocks", []):
-                if block.get("type") == 0:  # Text block
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            text = span.get("text", "").strip()
-                            bbox = span.get("bbox", [])
-                            
-                            if len(bbox) == 4 and text:
-                                # Center of text
-                                center_x = int((bbox[0] + bbox[2]) / 2 * scale_x)
-                                center_y = int((bbox[1] + bbox[3]) / 2 * scale_y)
-                                
-                                # Check if it's a grid label
-                                for pattern in grid_patterns:
-                                    match = pattern.match(text)
-                                    if match:
-                                        if text.isalpha() and len(text) <= 2:  # X-axis label
-                                            if text not in x_labels:
-                                                x_labels.append(text)
-                                                x_coordinates[text] = center_x
-                                        elif text.isdigit() and int(text) <= 100:  # Y-axis label
-                                            if text not in y_labels:
-                                                y_labels.append(text)
-                                                y_coordinates[text] = center_y
-
-            return {
-                'x_labels': sorted(x_labels),
-                'y_labels': sorted(y_labels, key=lambda x: int(x) if x.isdigit() else 0),
-                'x_coordinates': x_coordinates,
-                'y_coordinates': y_coordinates
-            }
-        except Exception as e:
-            logger.error(f"Text grid extraction error: {e}")
-            return {'x_labels': [], 'y_labels': [], 'x_coordinates': {}, 'y_coordinates': {}}
-
-    def _extract_scale_from_page(self, page_text: str, page: fitz.Page) -> Optional[str]:
-        """Extract scale from title block or page text"""
-        try:
-            # Common scale patterns
-            scale_patterns = [
-                re.compile(r'SCALE[\s:]+([0-9/]+"\s*=\s*[0-9\'-]+)', re.IGNORECASE),
-                re.compile(r'SCALE[\s:]+([0-9]+:[0-9]+)', re.IGNORECASE),
-                re.compile(r'([0-9/]+)"\s*=\s*([0-9]+\'-[0-9]+"?)', re.IGNORECASE),
-                re.compile(r'SCALE[\s:]+FULL\s*SIZE', re.IGNORECASE),
-                re.compile(r'SCALE[\s:]+N\.?T\.?S\.?', re.IGNORECASE),  # Not to scale
-            ]
-
-            # Search in page text
-            for pattern in scale_patterns:
-                match = pattern.search(page_text)
-                if match:
-                    if "FULL" in match.group(0).upper():
-                        return "FULL SIZE"
-                    elif "N.T.S" in match.group(0).upper() or "NTS" in match.group(0).upper():
-                        return "N.T.S."
-                    else:
-                        return match.group(1) if match.lastindex else match.group(0)
-
-            # Look specifically in title block area (typically bottom right)
-            try:
-                page_rect = page.rect
-                title_block_rect = fitz.Rect(
-                    page_rect.width * 0.6,  # Right 40% of page
-                    page_rect.height * 0.7,  # Bottom 30% of page
-                    page_rect.width,
-                    page_rect.height
-                )
-                
-                title_text = page.get_textbox(title_block_rect)
-                for pattern in scale_patterns:
-                    match = pattern.search(title_text)
-                    if match:
-                        return match.group(1) if match.lastindex else match.group(0)
-            except:
-                pass
-
-            return None
-        except Exception as e:
-            logger.error(f"Scale extraction error: {e}")
-            return None
-
-    def _cluster_lines(self, lines: List[int], tolerance: int = 10) -> List[int]:
-        """Cluster nearby lines to remove duplicates"""
-        if not lines:
-            return []
-        
-        lines.sort()
-        clusters = []
-        current_cluster = [lines[0]]
-        
-        for i in range(1, len(lines)):
-            if lines[i] - current_cluster[-1] <= tolerance:
-                current_cluster.append(lines[i])
-            else:
-                # Add average of cluster
-                clusters.append(int(sum(current_cluster) / len(current_cluster)))
-                current_cluster = [lines[i]]
-        
-        # Don't forget the last cluster
-        if current_cluster:
-            clusters.append(int(sum(current_cluster) / len(current_cluster)))
-        
-        return clusters
-
     def _extract_tables_from_page(self, page: fitz.Page, page_num: int) -> List[Dict[str, Any]]:
-        """Extract tables with their content"""
+        """Simplified table extraction"""
         tables = []
         
         try:
-            logger.debug(f"📊 Extracting tables from page {page_num}...")
-            
-            # Get page tables
             page_tables = page.find_tables()
             
             for idx, table in enumerate(page_tables):
                 table_data = {
                     'page_number': page_num,
                     'table_index': idx,
-                    'bbox': list(table.bbox) if hasattr(table, 'bbox') else None,
                     'rows': []
                 }
                 
-                # Extract table content
+                # Extract content
                 for row in table.extract():
-                    # Clean row data
                     cleaned_row = [cell.strip() if cell else "" for cell in row]
                     table_data['rows'].append(cleaned_row)
                 
-                # Only add tables with content
-                if table_data['rows'] and any(any(cell for cell in row) for row in table_data['rows']):
+                if table_data['rows']:
                     tables.append(table_data)
-                    
-            if tables:
-                logger.debug(f"   Found {len(tables)} tables")
                     
         except Exception as e:
             logger.warning(f"Table extraction failed for page {page_num}: {e}")
@@ -692,7 +484,7 @@ class PDFService:
 
     async def _process_single_page_safe(self, doc: fitz.Document, page_num: int,
                                        session_id: str, storage_service: StorageService) -> Dict:
-        """Process a single page with comprehensive extraction and error recovery"""
+        """Process a single page with comprehensive error handling"""
         page_start = time.time()
         
         try:
@@ -701,21 +493,18 @@ class PDFService:
             
             logger.info(f"📄 Processing page {page_actual}...")
 
-            # Extract text with size limit
-            logger.debug("   Extracting text...")
+            # Extract text
             page_text = page.get_text("text")[:self.max_text_per_page]
             page_analysis = self._analyze_page_content(page_text, page_actual)
 
-            # Generate BOTH thumbnail and high-quality JPEG
-            logger.debug("   Generating images...")
+            # Generate images
             image_width, image_height = await self._generate_page_images(
                 page, page_actual, session_id, storage_service
             )
 
-            # Detect comprehensive grid system with pixel coordinates
+            # Detect grid
             grid_system = None
             if self.enable_grid_detection:
-                logger.debug("   Detecting grid system...")
                 grid_system = self._detect_comprehensive_grid(
                     page, page_text, page_actual, image_width, image_height
                 )
@@ -723,10 +512,9 @@ class PDFService:
             # Extract tables
             tables = []
             if self.enable_table_extraction:
-                logger.debug("   Extracting tables...")
                 tables = self._extract_tables_from_page(page, page_actual)
 
-            # Build page metadata
+            # Build metadata
             page_metadata = {
                 'page_number': page_actual,
                 'text_length': len(page_text),
@@ -742,10 +530,10 @@ class PDFService:
                 }
             }
 
-            # Format text with metadata
+            # Format text
             formatted_text = self._format_page_text(page_actual, page_analysis, grid_system, page_text)
             
-            # Clean up page resources
+            # Clean up
             page.clean_contents()
             
             elapsed = time.time() - page_start
@@ -760,11 +548,9 @@ class PDFService:
             }
             
         except Exception as e:
-            elapsed = time.time() - page_start
-            logger.error(f"❌ Error processing page {page_num + 1} after {elapsed:.1f}s: {e}")
+            logger.error(f"❌ Error processing page {page_num + 1}: {e}")
             logger.error(traceback.format_exc())
             
-            # Return partial result
             return {
                 'success': False,
                 'page_num': page_num + 1,
@@ -775,13 +561,11 @@ class PDFService:
 
     async def _process_batch_safe(self, doc: fitz.Document, page_numbers: List[int],
                                  session_id: str, storage_service: StorageService) -> List[Dict]:
-        """Process batch with error recovery and timeout management"""
-        # Process pages sequentially to avoid memory issues
+        """Process batch with proper error recovery"""
         results = []
         
         for page_num in page_numbers:
             try:
-                # Process with timeout
                 result = await asyncio.wait_for(
                     self._process_single_page_safe(doc, page_num, session_id, storage_service),
                     timeout=self.processing_timeout_per_page
@@ -797,8 +581,7 @@ class PDFService:
                     'text': '',
                     'metadata': {'page_number': page_num + 1}
                 })
-                
-            # Small delay between pages
+            
             await asyncio.sleep(0.1)
         
         return results
@@ -807,13 +590,9 @@ class PDFService:
                                      all_tables: List[Dict], all_grid_systems: Dict[str, Any], 
                                      metadata: Dict[str, Any], processing_start: float, 
                                      storage_service: StorageService):
-        """Save all processing results including tables with progress tracking"""
+        """Save all processing results with proper error handling"""
         try:
-            logger.info("💾 Saving processing results...")
-            save_start = time.time()
-            
-            # Save full text
-            logger.debug("   Saving context text...")
+            # Save text
             full_text = '\n'.join(all_text_parts)
             await storage_service.upload_file(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
@@ -822,9 +601,8 @@ class PDFService:
                 content_type="text/plain"
             )
 
-            # Save comprehensive grid systems
+            # Save grid systems
             if all_grid_systems:
-                logger.debug("   Saving grid systems...")
                 await storage_service.upload_file(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{session_id}_grid_systems.json",
@@ -832,85 +610,37 @@ class PDFService:
                     content_type="application/json"
                 )
 
-            # Save tables if any
+            # Save tables
             if all_tables:
-                logger.debug(f"   Saving {len(all_tables)} tables...")
                 await storage_service.upload_file(
                     container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                     blob_name=f"{session_id}_tables.json",
                     data=json.dumps(all_tables, indent=2).encode('utf-8'),
                     content_type="application/json"
                 )
-                metadata['extraction_summary']['has_tables'] = True
-                metadata['extraction_summary']['table_count'] = len(all_tables)
 
             # Create document index
-            logger.debug("   Creating document index...")
             await self._create_document_index(session_id, metadata['page_details'], storage_service)
 
-            # FIX: Load existing metadata.json and merge with processing results
-            logger.debug("   Loading existing metadata...")
-            existing_metadata = {}
-            try:
-                existing_metadata_text = await storage_service.download_blob_as_text(
-                    container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                    blob_name=f"{session_id}_metadata.json"
-                )
-                existing_metadata = json.loads(existing_metadata_text)
-                logger.debug("   Found existing metadata.json, merging...")
-            except Exception as e:
-                logger.warning(f"   No existing metadata found: {e}")
-
-            # Update processing results with existing metadata
+            # Update metadata
             metadata['processing_time'] = time.time() - processing_start
             metadata['grid_systems_detected'] = len(all_grid_systems)
-            metadata['image_settings'] = {
-                'high_quality': {
-                    'dpi': self.high_quality_dpi,
-                    'quality': self.jpeg_quality,
-                    'progressive': self.jpeg_progressive
-                },
-                'thumbnail': {
-                    'dpi': self.thumbnail_dpi,
-                    'quality': self.thumbnail_quality
-                }
-            }
+            metadata['status'] = 'ready'
+            metadata['processing_complete'] = True
+            metadata['completed_at'] = datetime.utcnow().isoformat() + 'Z'
+            metadata['extraction_summary']['has_thumbnails'] = True
             
-            # FIX: Merge with existing metadata, preserving initial fields
-            final_metadata = {
-                **existing_metadata,  # Start with existing metadata
-                **metadata,  # Override with processing results
-                'status': 'ready',  # Update status to ready
-                'processing_complete': True,  # Mark as complete
-                'completed_at': datetime.utcnow().isoformat() + 'Z',
-                'extraction_summary': {
-                    **existing_metadata.get('extraction_summary', {}),
-                    **metadata.get('extraction_summary', {}),
-                    'has_thumbnails': True  # Now we have thumbnails
-                }
-            }
-            
-            # Preserve original document info if it exists
-            if 'document_info' in existing_metadata:
-                final_metadata['document_info'] = {
-                    **existing_metadata['document_info'],
-                    **metadata.get('document_info', {})
-                }
-            
-            logger.debug("   Saving updated metadata...")
             await storage_service.upload_file(
                 container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
                 blob_name=f"{session_id}_metadata.json",
-                data=json.dumps(final_metadata, indent=2).encode('utf-8'),
+                data=json.dumps(metadata, indent=2).encode('utf-8'),
                 content_type="application/json"
             )
             
-            save_elapsed = time.time() - save_start
-            logger.info(f"✅ Results saved in {save_elapsed:.1f}s")
+            logger.info("✅ All results saved successfully")
             
         except Exception as e:
             logger.error(f"Failed to save processing results: {e}")
-            logger.error(traceback.format_exc())
             raise
 
     def _initialize_metadata(self, session_id: str, doc: fitz.Document,
@@ -921,36 +651,40 @@ class PDFService:
         try:
             doc_info = dict(doc.metadata) if hasattr(doc, 'metadata') else {}
         except:
-            logger.warning("Could not extract document metadata")
+            pass
             
         return {
             'document_id': session_id,
+            'status': 'processing',
             'page_count': pages_to_process,
             'total_pages': total_pages,
             'document_info': doc_info,
             'processing_time': 0,
             'file_size_mb': round(pdf_size_mb, 2),
             'page_details': [],
-            'grid_detection_enabled': self.enable_grid_detection,
-            'table_extraction_enabled': self.enable_table_extraction,
             'extraction_summary': {
                 'has_text': False,
                 'has_images': True,
                 'has_grid_systems': False,
                 'has_tables': False,
                 'table_count': 0,
-                'has_thumbnails': True  # Always true now
+                'has_thumbnails': True
             },
-            'processing_settings': {
-                'batch_size': self.batch_size,
-                'timeout_per_page': self.processing_timeout_per_page,
-                'high_quality_dpi': self.high_quality_dpi,
-                'thumbnail_dpi': self.thumbnail_dpi
+            'image_settings': {
+                'high_quality': {
+                    'dpi': self.high_quality_dpi,
+                    'quality': self.jpeg_quality,
+                    'progressive': self.jpeg_progressive
+                },
+                'thumbnail': {
+                    'dpi': self.thumbnail_dpi,
+                    'quality': self.thumbnail_quality
+                }
             }
         }
 
     def _update_extraction_summary(self, metadata: Dict[str, Any], result: Dict[str, Any]):
-        """Update extraction summary based on page results"""
+        """Update extraction summary"""
         if result.get('text', '').strip():
             metadata['extraction_summary']['has_text'] = True
         
@@ -966,26 +700,23 @@ class PDFService:
         if page_analysis.get('drawing_type'): 
             header.append(f"Type: {page_analysis['drawing_type']}")
         if grid_system and grid_system.confidence > 0.3: 
-            header.append(f"Grid: {len(grid_system.x_labels)}x{len(grid_system.y_labels)}")
+            header.append(f"Grid: Detected")
         if grid_system and grid_system.scale: 
             header.append(f"Scale: {grid_system.scale}")
         return "\n".join(header) + f"\n\n{page_text}"
 
     def _analyze_page_content(self, text: str, page_num: int) -> Dict[str, Any]:
-        """Analyze page content with enhanced pattern matching"""
+        """Analyze page content"""
         info = {}
         text_upper = text.upper()
         
         # Drawing type detection
         drawing_patterns = {
-            'floor_plan': ['FLOOR PLAN', 'LEVEL', 'STORY'],
+            'floor_plan': ['FLOOR PLAN', 'LEVEL'],
             'electrical': ['ELECTRICAL', 'POWER', 'LIGHTING'],
-            'plumbing': ['PLUMBING', 'WATER', 'DRAINAGE', 'SEWER'],
-            'hvac': ['HVAC', 'MECHANICAL', 'VENTILATION', 'AIR CONDITIONING'],
-            'structural': ['STRUCTURAL', 'FOUNDATION', 'FRAMING', 'BEAM', 'COLUMN'],
-            'architectural': ['ARCHITECTURAL', 'ELEVATION', 'SECTION', 'DETAIL'],
-            'site': ['SITE PLAN', 'LANDSCAPE', 'GRADING'],
-            'fire': ['FIRE PROTECTION', 'SPRINKLER', 'FIRE ALARM']
+            'plumbing': ['PLUMBING', 'WATER', 'DRAINAGE'],
+            'hvac': ['HVAC', 'MECHANICAL', 'VENTILATION'],
+            'structural': ['STRUCTURAL', 'FOUNDATION', 'FRAMING']
         }
         
         for dtype, patterns in drawing_patterns.items():
@@ -993,32 +724,22 @@ class PDFService:
                 info['drawing_type'] = dtype
                 break
         
-        # Scale extraction (handled more comprehensively in grid detection)
-        scale_match = re.search(r'SCALE[\s:]+([0-9/]+"\s*=\s*[0-9\'-]+)', text_upper)
+        # Scale detection
+        scale_match = re.search(r'SCALE[\s:]+([0-9/]+"\s*=\s*[0-9\'-]+|[0-9]+:[0-9]+)', text_upper)
         if scale_match: 
             info['scale'] = scale_match.group(1)
 
-        # Sheet number extraction
-        sheet_patterns = [
-            re.compile(r'(?:SHEET|DWG)[\s#:]*([A-Z]*[-\s]?[0-9]+\.?[0-9]*)', re.IGNORECASE),
-            re.compile(r'([A-Z]-[0-9]+(?:\.[0-9]+)?)', re.IGNORECASE),  # A-101 format
-            re.compile(r'([A-Z]{1,2}[0-9]+(?:\.[0-9]+)?)', re.IGNORECASE)  # A101 format
-        ]
-        
-        for pattern in sheet_patterns:
-            match = pattern.search(text_upper)
-            if match:
-                info['sheet_number'] = match.group(1).strip()
-                break
+        # Sheet number
+        sheet_match = re.search(r'(?:SHEET|DWG)[\s#:]*([A-Z]*[-\s]?[0-9]+\.?[0-9]*)', text_upper)
+        if sheet_match:
+            info['sheet_number'] = sheet_match.group(1).strip()
         
         return info
 
     async def _create_document_index(self, session_id: str, page_details: List[Dict],
                                    storage_service: StorageService):
-        """Create a searchable index of the document's contents"""
+        """Create document index"""
         try:
-            logger.debug("📑 Creating document index...")
-            
             index = {
                 'document_id': session_id,
                 'total_pages': len(page_details),
@@ -1026,13 +747,12 @@ class PDFService:
                 'drawing_types': defaultdict(list),
                 'sheet_numbers': {},
                 'grid_pages': [],
-                'table_pages': [],
-                'scales_found': {}
+                'table_pages': []
             }
             
             for detail in page_details:
                 page_num = detail['page_number']
-                index['page_index'][page_num] = {k: v for k, v in detail.items() if k != 'page_number'}
+                index['page_index'][page_num] = detail
                 
                 if detail.get('drawing_type'):
                     index['drawing_types'][detail['drawing_type']].append(page_num)
@@ -1045,9 +765,6 @@ class PDFService:
                 
                 if detail.get('has_tables'):
                     index['table_pages'].append(page_num)
-                
-                if detail.get('scale'):
-                    index['scales_found'][page_num] = detail['scale']
             
             index['drawing_types'] = dict(index['drawing_types'])
             
@@ -1058,36 +775,5 @@ class PDFService:
                 content_type="application/json"
             )
             
-            logger.debug("✅ Document index created")
-            
         except Exception as e:
             logger.error(f"Failed to create document index: {e}")
-            logger.error(traceback.format_exc())
-
-    async def _save_error_state(self, session_id: str, error: str,
-                               storage_service: StorageService):
-        """Save error information for debugging"""
-        error_info = {
-            'document_id': session_id,
-            'timestamp': datetime.now().isoformat(),
-            'error': error,
-            'processing_config': {
-                'high_quality_dpi': self.high_quality_dpi,
-                'thumbnail_dpi': self.thumbnail_dpi,
-                'jpeg_quality': self.jpeg_quality,
-                'thumbnail_quality': self.thumbnail_quality,
-                'max_pages': self.max_pages,
-                'batch_size': self.batch_size,
-                'timeout_per_page': self.processing_timeout_per_page
-            }
-        }
-        try:
-            await storage_service.upload_file(
-                container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-                blob_name=f"{session_id}_error.json",
-                data=json.dumps(error_info, indent=2).encode('utf-8'),
-                content_type="application/json"
-            )
-            logger.info("💾 Error state saved for debugging")
-        except Exception as e:
-            logger.error(f"Failed to save error state: {e}")
