@@ -1,4 +1,4 @@
-# app/models/schemas.py - FIXED AND OPTIMIZED VERSION WITH SSE SUPPORT
+# app/models/schemas.py - FIXED AND OPTIMIZED VERSION
 
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any, Union
@@ -7,14 +7,6 @@ from enum import Enum
 import uuid
 
 # --- Enums for type safety ---
-
-class SSEEventType(str, Enum):
-    """Server-Sent Event types"""
-    status_update = "status_update"
-    resource_ready = "resource_ready"
-    processing_complete = "processing_complete"
-    error = "error"
-    keepalive = "keepalive"
 
 class AnnotationType(str, Enum):
     note = "note"
@@ -74,42 +66,44 @@ class QuestionType(Enum):
 
 # --- SSE Event Models ---
 
+class SSEEventType(str, Enum):
+    status_update = "status_update"
+    resource_ready = "resource_ready"
+    processing_complete = "processing_complete"
+    error = "error"
+    keepalive = "keepalive"
+
 class SSEEvent(BaseModel):
-    """Base SSE event model"""
     event_type: SSEEventType
     data: Dict[str, Any]
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: str
     document_id: str
 
 class StatusUpdateEvent(BaseModel):
-    """Status update event data"""
-    stage: str = Field(..., description="Processing stage")
-    message: str = Field(..., description="Human-readable status message")
-    progress_percent: int = Field(0, ge=0, le=100, description="Progress percentage")
-    pages_processed: int = Field(0, ge=0, description="Number of pages processed")
-    estimated_time: Optional[int] = Field(None, description="Estimated time remaining in seconds")
+    stage: str
+    message: str
+    progress_percent: int
+    pages_processed: int
+    estimated_time: Optional[int] = None
 
 class ResourceReadyEvent(BaseModel):
-    """Resource ready event data"""
-    resource_type: str = Field(..., description="Type of resource: thumbnail, full_image, ai_image, context_text, metadata, grid_systems")
-    resource_id: Optional[str] = Field(None, description="Resource identifier")
-    page_number: Optional[int] = Field(None, ge=1, description="Page number for page-specific resources")
-    url: Optional[str] = Field(None, description="URL to access the resource")
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional resource metadata")
+    resource_type: str
+    resource_id: str
+    page_number: Optional[int] = None
+    url: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class ProcessingCompleteEvent(BaseModel):
-    """Processing complete event data"""
-    status: str = Field(..., description="Final status: ready or error")
-    total_pages: int = Field(..., ge=0, description="Total pages processed")
-    processing_time: float = Field(..., ge=0, description="Total processing time in seconds")
-    resources_summary: Dict[str, Any] = Field(default_factory=dict, description="Summary of available resources")
+    status: str
+    total_pages: int
+    processing_time: float
+    resources_summary: Dict[str, Any]
 
 class ProcessingErrorEvent(BaseModel):
-    """Processing error event data"""
-    error_type: str = Field(..., description="Type of error")
-    message: str = Field(..., description="Error message")
-    is_fatal: bool = Field(True, description="Whether error is fatal")
-    retry_possible: bool = Field(False, description="Whether retry is possible")
+    error_type: str
+    message: str
+    is_fatal: bool
+    retry_possible: bool
 
 # --- Core Models ---
 
@@ -458,8 +452,21 @@ class Annotation(AnnotationBase):
     coordination_required: bool = Field(False)
 
 class AnnotationCreate(AnnotationBase):
-    """Create a new annotation"""
+    """Create a new annotation - inherits all fields from AnnotationBase"""
     pass
+
+class AnnotationUpdate(BaseModel):
+    """Update an existing annotation"""
+    text: Optional[str] = Field(None, description="Updated annotation text")
+    element_type: Optional[str] = None
+    grid_reference: Optional[str] = None
+    x: Optional[int] = None
+    y: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    is_private: Optional[bool] = None
+    expires_at: Optional[str] = None
+    assigned_trade: Optional[str] = None
 
 class AnnotationResponse(BaseModel):
     """Response when creating/updating annotations"""
@@ -484,7 +491,6 @@ class DocumentUploadResponse(BaseModel):
     pages_processed: Optional[int] = None
     grid_systems_detected: Optional[int] = None
     drawing_types_found: Optional[List[str]] = None
-    estimated_time: Optional[int] = None
 
 class DocumentInfoResponse(BaseModel):
     """Document information response"""
@@ -502,58 +508,6 @@ class DocumentListResponse(BaseModel):
     """List of documents response"""
     documents: List[DocumentInfoResponse]
     total_count: int
-
-# Enhanced status response for progressive loading with SSE info
-class DocumentStatusResponse(BaseModel):
-    """Enhanced status response for progressive loading"""
-    document_id: str
-    status: str
-    message: Optional[str] = ""
-    total_pages: Optional[int] = None
-    pages_processed: int = 0
-    available_resources: Dict[str, Any]
-    error: Optional[str] = None
-    uploaded_at: Optional[str] = None
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    estimated_time_remaining: Optional[int] = None
-    processing_progress_percent: int = 0
-    sse_connection_url: Optional[str] = Field(None, description="SSE connection URL if SSE is enabled")
-
-# --- Additional document route models ---
-
-class DocumentStatsResponse(BaseModel):
-    """Document statistics response"""
-    document_id: str
-    total_annotations: int
-    total_pages: int
-    total_characters: int
-    estimated_tokens: int
-    unique_collaborators: List[str]
-    collaborator_count: int
-    annotation_types: Dict[str, int]
-    last_activity: Optional[str]
-    status: str
-
-class DocumentActivityResponse(BaseModel):
-    """Document activity response"""
-    document_id: str
-    recent_annotations: List[Dict[str, Any]]
-    recent_chats: List[Dict[str, Any]]
-    active_authors: List[str]
-
-class CollaboratorStats(BaseModel):
-    """Collaborator statistics"""
-    author: str
-    annotations_count: int
-    chats_count: int
-    total_interactions: int
-
-class CollaboratorsResponse(BaseModel):
-    """Collaborators response"""
-    document_id: str
-    collaborators: List[CollaboratorStats]
-    total_collaborators: int
 
 # --- User Preferences ---
 
@@ -630,11 +584,12 @@ class ConfigurationStatus(BaseModel):
 # --- Export all models ---
 __all__ = [
     # Enums
-    "SSEEventType", "AnnotationType", "NoteType", "Priority", "Status", "HighlightType", 
+    "AnnotationType", "NoteType", "Priority", "Status", "HighlightType", 
     "ConflictType", "NotificationCategory", "QuestionType",
     
     # SSE Event Models
-    "SSEEvent", "StatusUpdateEvent", "ResourceReadyEvent", "ProcessingCompleteEvent", "ProcessingErrorEvent",
+    "SSEEventType", "SSEEvent", "StatusUpdateEvent", "ResourceReadyEvent",
+    "ProcessingCompleteEvent", "ProcessingErrorEvent",
     
     # Core Models
     "GridReference", "DrawingGrid", "VisualElement", "VisualHighlight",
@@ -653,12 +608,10 @@ __all__ = [
     # Response Models
     "ChatResponse", "NoteSuggestion", "BatchNoteSuggestion", "Note", 
     "NoteList", "DocumentUploadResponse", "DocumentInfoResponse", 
-    "DocumentListResponse", "DocumentStatusResponse", "DocumentStatsResponse",
-    "DocumentActivityResponse", "CollaboratorsResponse", "CollaboratorStats",
-    "AnnotationResponse", "HighlightResponse",
+    "DocumentListResponse", "AnnotationResponse", "HighlightResponse",
     
     # Annotation Models
-    "Annotation", "AnnotationBase", "AnnotationCreate",
+    "Annotation", "AnnotationBase", "AnnotationCreate", "AnnotationUpdate",
     
     # Trade Models
     "TradeConflict",
