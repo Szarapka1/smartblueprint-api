@@ -15,7 +15,6 @@ import io
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 from azure.storage.blob import ContentSettings, BlobSasPermissions, generate_blob_sas
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError, AzureError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.core.config import AppSettings
 
@@ -87,12 +86,6 @@ class StorageService:
                 logger.error(f"Failed to initialize container '{container_name}': {e}")
                 raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(AzureError),
-        reraise=True
-    )
     async def upload_file(
         self,
         container_name: str,
