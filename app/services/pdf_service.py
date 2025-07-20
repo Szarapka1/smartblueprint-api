@@ -1,7 +1,7 @@
 # app/services/pdf_service.py - COMPLETE REWRITTEN & FIXED VERSION
 
 """
-Core PDF Processing Service for the Blueprint Analysis System.
+Core PDF Processing Service for the Blueprint Analysis, System.
 
 This service handles the entire lifecycle of a PDF document after upload:
 - Opens and validates the PDF.
