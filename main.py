@@ -25,7 +25,7 @@ from app.api.routes.document_routes import document_router
 from app.api.routes.annotation_routes import annotation_router
 from app.api.routes.note_routes import note_router
 
-
+ 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
