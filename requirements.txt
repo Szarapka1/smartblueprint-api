@@ -25,7 +25,7 @@ jiter==0.10.0
 multidict==6.5.0
 numpy==1.26.4
 openai==1.88.0
-opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 packaging==25.0
 propcache==0.3.2
 pycparser==2.22

@@ -15,7 +15,14 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 import time
 import numpy as np
-import cv2
+
+# Safe OpenCV import
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
+    logging.warning("⚠️ OpenCV not available - visual grid detection disabled")
 
 from app.core.config import AppSettings
 from app.services.storage_service import StorageService
@@ -35,10 +42,13 @@ class GridSystem:
     y_lines: List[int] = field(default_factory=list)
     cell_width: int = 100
     cell_height: int = 100
-    origin_x: int = 100
-    origin_y: int = 100
+    origin_x: int = 0  # Always start from page origin
+    origin_y: int = 0  # Always start from page origin
     confidence: float = 0.0
     scale: Optional[str] = None
+    page_width: int = 0  # Actual PDF page width
+    page_height: int = 0  # Actual PDF page height
+    grid_type: str = "generated"  # "embedded", "text_based", or "generated"
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -55,7 +65,10 @@ class GridSystem:
             'origin_x': self.origin_x,
             'origin_y': self.origin_y,
             'confidence': self.confidence,
-            'scale': self.scale
+            'scale': self.scale,
+            'page_width': self.page_width,
+            'page_height': self.page_height,
+            'grid_type': self.grid_type
         }
 
 
@@ -120,6 +133,10 @@ class PDFService:
         self.line_gap_tolerance = 50  # Maximum gap in pixels to consider lines as continuous
         self.grid_line_thickness_range = (0.5, 3)  # Expected line thickness in pixels
         
+        # Universal grid settings for documents without grids
+        self.default_grid_columns = 10  # Default 10x10 grid for documents without grids
+        self.default_grid_rows = 10
+        
         logger.info("✅ PDFService initialized (Production Mode with Enhanced Grid Detection)")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ DPI: Storage={self.storage_dpi}, AI={self.ai_image_dpi}")
@@ -127,7 +144,8 @@ class PDFService:
         logger.info(f"   🔒 Thread safety: Enabled")
         logger.info(f"   💾 Memory management: Active")
         logger.info(f"   📡 SSE Events: Supported")
-        logger.info(f"   🎯 Visual Grid Detection: Enabled")
+        logger.info(f"   🎯 Visual Grid Detection: {'Enabled' if OPENCV_AVAILABLE else 'Disabled (OpenCV not available)'}")
+        logger.info(f"   📐 Universal Grid System: Enabled")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService,
@@ -398,7 +416,8 @@ class PDFService:
                 'scale': page_analysis.get('scale'),
                 'key_elements': page_analysis.get('key_elements', []),
                 'has_grid': grid_system is not None,
-                'grid_confidence': grid_system.confidence if grid_system else 0.0
+                'grid_confidence': grid_system.confidence if grid_system else 0.0,
+                'grid_type': grid_system.grid_type if grid_system else None
             }
             
             # Format text for context
@@ -418,7 +437,8 @@ class PDFService:
                     "has_text": page_metadata['has_text'],
                     "has_tables": page_metadata['has_tables'],
                     "has_grid": page_metadata['has_grid'],
-                    "grid_confidence": page_metadata['grid_confidence']
+                    "grid_confidence": page_metadata['grid_confidence'],
+                    "grid_type": page_metadata['grid_type']
                 })
             
             # Clean up page
@@ -442,41 +462,129 @@ class PDFService:
 
     async def _detect_grid_patterns_enhanced(self, page: fitz.Page, page_text: str, page_num: int) -> Optional[GridSystem]:
         """
-        Enhanced grid detection that analyzes actual visual grid lines
+        Universal grid detection that creates an intelligent reference system for ANY document.
+        This grid serves as an invisible coordinate system for AI validation.
         """
         try:
-            # First try visual detection
-            visual_grid = await self._detect_visual_grid(page, page_num)
+            # Get actual page dimensions - critical for all documents
+            page_width = page.rect.width
+            page_height = page.rect.height
             
-            if visual_grid and visual_grid.confidence > 0.7:
-                logger.info(f"✅ High confidence visual grid detected on page {page_num}")
-                return visual_grid
+            logger.info(f"📐 Analyzing page {page_num}: {page_width}x{page_height}px")
             
-            # Fall back to text-based detection if visual detection fails or has low confidence
+            # First, try to detect if document has its own grid system
+            has_embedded_grid = False
+            visual_grid = None
+            
+            # Try visual detection if OpenCV is available
+            if OPENCV_AVAILABLE:
+                visual_grid = await self._detect_visual_grid(page, page_num)
+                if visual_grid and visual_grid.confidence > 0.7:
+                    has_embedded_grid = True
+                    visual_grid.grid_type = "embedded"
+                    logger.info(f"✅ High confidence embedded grid detected on page {page_num}")
+                    return visual_grid
+            else:
+                logger.info(f"ℹ️ Visual grid detection not available, using text-based detection for page {page_num}")
+            
+            # Try text-based detection
             text_grid = self._detect_grid_patterns(page, page_text, page_num)
             
-            # Merge results if both detected something
-            if visual_grid and text_grid:
-                # Prefer visual grid coordinates but use text labels if better
-                if len(text_grid.x_labels) > len(visual_grid.x_labels):
-                    visual_grid.x_labels = text_grid.x_labels
-                if len(text_grid.y_labels) > len(visual_grid.y_labels):
-                    visual_grid.y_labels = text_grid.y_labels
+            if text_grid and (len(text_grid.x_labels) > 0 or len(text_grid.y_labels) > 0):
+                # Document has text-based grid references
+                text_grid.grid_type = "text_based"
                 
-                visual_grid.scale = text_grid.scale or visual_grid.scale
-                return visual_grid
+                # If we have both visual and text grids, merge them
+                if visual_grid:
+                    # Prefer visual grid coordinates but use text labels if better
+                    if len(text_grid.x_labels) > len(visual_grid.x_labels):
+                        visual_grid.x_labels = text_grid.x_labels
+                    if len(text_grid.y_labels) > len(visual_grid.y_labels):
+                        visual_grid.y_labels = text_grid.y_labels
+                    
+                    visual_grid.scale = text_grid.scale or visual_grid.scale
+                    visual_grid.grid_type = "embedded"  # Visual takes precedence
+                    return visual_grid
+                
+                return text_grid
             
-            return visual_grid or text_grid
+            # No grid detected - create universal reference grid
+            # This ensures EVERY document has a coordinate system
+            logger.info(f"📏 Creating universal reference grid for page {page_num}")
+            
+            universal_grid = self._create_universal_grid(page_width, page_height, page_num)
+            return universal_grid
             
         except Exception as e:
             logger.error(f"Enhanced grid detection failed: {e}")
-            # Fall back to original method
-            return self._detect_grid_patterns(page, page_text, page_num)
+            # Fallback to universal grid
+            return self._create_universal_grid(page.rect.width, page.rect.height, page_num)
+
+    def _create_universal_grid(self, page_width: float, page_height: float, page_num: int) -> GridSystem:
+        """
+        Create a universal reference grid for documents without embedded grids.
+        This provides a consistent coordinate system for AI reference.
+        """
+        grid = GridSystem(
+            page_number=page_num,
+            page_width=int(page_width),
+            page_height=int(page_height),
+            grid_type="generated",
+            confidence=1.0  # High confidence since we're creating it
+        )
+        
+        # Determine optimal grid size based on page dimensions
+        # For letter/A4 size, 10x10 is good. Scale for other sizes.
+        aspect_ratio = page_width / page_height
+        
+        if aspect_ratio > 1.3:  # Landscape
+            num_cols = max(12, min(20, int(page_width / 50)))
+            num_rows = max(8, min(15, int(page_height / 50)))
+        else:  # Portrait or square
+            num_cols = max(8, min(15, int(page_width / 70)))
+            num_rows = max(10, min(20, int(page_height / 50)))
+        
+        # Create evenly spaced grid
+        col_spacing = page_width / (num_cols + 1)
+        row_spacing = page_height / (num_rows + 1)
+        
+        # Generate column labels (A, B, C, ..., Z, AA, AB, ...)
+        for i in range(num_cols):
+            if i < 26:
+                label = chr(65 + i)  # A-Z
+            else:
+                # AA, AB, AC, etc.
+                label = chr(65 + (i // 26) - 1) + chr(65 + (i % 26))
+            
+            x_pos = (i + 1) * col_spacing
+            grid.x_labels.append(label)
+            grid.x_coordinates[label] = int(x_pos)
+            grid.x_lines.append(int(x_pos))
+        
+        # Generate row labels (1, 2, 3, ...)
+        for i in range(num_rows):
+            label = str(i + 1)
+            y_pos = (i + 1) * row_spacing
+            grid.y_labels.append(label)
+            grid.y_coordinates[label] = int(y_pos)
+            grid.y_lines.append(int(y_pos))
+        
+        grid.cell_width = int(col_spacing)
+        grid.cell_height = int(row_spacing)
+        grid.origin_x = 0
+        grid.origin_y = 0
+        
+        logger.info(f"📐 Created universal {num_cols}x{num_rows} grid for page {page_num}")
+        
+        return grid
 
     async def _detect_visual_grid(self, page: fitz.Page, page_num: int) -> Optional[GridSystem]:
         """
         Detect actual grid lines from the visual content of the page
         """
+        if not OPENCV_AVAILABLE:
+            return None
+            
         try:
             # Extract page as image for analysis
             mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better line detection
@@ -496,7 +604,7 @@ class PDFService:
             pix = None
             
             if not horizontal_lines and not vertical_lines:
-                logger.info(f"No grid lines detected on page {page_num}")
+                logger.info(f"No visual grid lines detected on page {page_num}")
                 return None
             
             # Extract text for label mapping
@@ -662,13 +770,22 @@ class PDFService:
         # Extract grid labels from text
         x_labels, y_labels = self._extract_grid_labels_from_text(page_text)
         
-        # Create grid system
-        grid = GridSystem(page_number=page_num)
+        # Create grid system with page dimensions
+        grid = GridSystem(
+            page_number=page_num,
+            page_width=int(page_width),
+            page_height=int(page_height),
+            grid_type="embedded"
+        )
+        
+        # Always start from page origin
+        grid.origin_x = 0
+        grid.origin_y = 0
         
         # Map vertical lines to X coordinates/labels
         if vertical_lines:
             # Try to match labels to lines
-            if len(x_labels) == len(vertical_lines):
+            if x_labels and len(x_labels) == len(vertical_lines):
                 # Direct mapping
                 for i, (label, line) in enumerate(zip(sorted(x_labels), vertical_lines)):
                     grid.x_labels.append(label)
@@ -687,13 +804,11 @@ class PDFService:
                 spacings = [vertical_lines[i+1].position - vertical_lines[i].position 
                            for i in range(len(vertical_lines)-1)]
                 grid.cell_width = int(sum(spacings) / len(spacings))
-            
-            grid.origin_x = int(vertical_lines[0].position) if vertical_lines else 0
         
         # Map horizontal lines to Y coordinates/labels  
         if horizontal_lines:
             # Try to match labels to lines
-            if len(y_labels) == len(horizontal_lines):
+            if y_labels and len(y_labels) == len(horizontal_lines):
                 # Direct mapping
                 for i, (label, line) in enumerate(zip(sorted(y_labels, key=lambda x: int(x) if x.isdigit() else 0), horizontal_lines)):
                     grid.y_labels.append(label)
@@ -712,8 +827,6 @@ class PDFService:
                 spacings = [horizontal_lines[i+1].position - horizontal_lines[i].position 
                            for i in range(len(horizontal_lines)-1)]
                 grid.cell_height = int(sum(spacings) / len(spacings))
-            
-            grid.origin_y = int(horizontal_lines[0].position) if horizontal_lines else 0
         
         # Calculate confidence based on line detection quality
         avg_confidence = 0
@@ -727,7 +840,7 @@ class PDFService:
         # Detect scale if present
         grid.scale = self._extract_scale_from_text(page_text)
         
-        logger.info(f"Created grid system: {len(grid.x_labels)}x{len(grid.y_labels)} with confidence {grid.confidence:.2f}")
+        logger.info(f"Created embedded grid: {len(grid.x_labels)}x{len(grid.y_labels)} with confidence {grid.confidence:.2f}")
         
         return grid
 
@@ -804,28 +917,40 @@ class PDFService:
             if not x_refs and not y_refs:
                 return None
             
-            # Create grid system with validation
+            # Get actual page dimensions
+            page_width = page.rect.width
+            page_height = page.rect.height
+            
+            # Create grid system with proper dimensions
             grid = GridSystem(
                 page_number=page_num,
                 x_labels=sorted(list(x_refs))[:20],  # Limit to 20 columns
                 y_labels=sorted(list(y_refs), key=lambda x: int(x) if x.isdigit() else 0)[:30],  # Limit to 30 rows
-                confidence=0.5 if x_refs and y_refs else 0.3
+                confidence=0.5 if x_refs and y_refs else 0.3,
+                page_width=int(page_width),
+                page_height=int(page_height),
+                grid_type="text_based"
             )
             
-            # Estimate positions (fallback when visual detection not available)
-            page_width = page.rect.width
-            page_height = page.rect.height
+            # Always start from page origin
+            grid.origin_x = 0
+            grid.origin_y = 0
             
+            # Distribute grid coordinates evenly across the page
             if grid.x_labels:
                 spacing = page_width / (len(grid.x_labels) + 1)
                 for i, label in enumerate(grid.x_labels):
-                    grid.x_coordinates[label] = int((i + 1) * spacing)
+                    x_pos = (i + 1) * spacing
+                    grid.x_coordinates[label] = int(x_pos)
+                    grid.x_lines.append(int(x_pos))
                 grid.cell_width = int(spacing)
             
             if grid.y_labels:
                 spacing = page_height / (len(grid.y_labels) + 1)
                 for i, label in enumerate(grid.y_labels):
-                    grid.y_coordinates[label] = int((i + 1) * spacing)
+                    y_pos = (i + 1) * spacing
+                    grid.y_coordinates[label] = int(y_pos)
+                    grid.y_lines.append(int(y_pos))
                 grid.cell_height = int(spacing)
             
             logger.info(f"🎯 Text-based grid detected on page {page_num}: {len(grid.x_labels)}x{len(grid.y_labels)}")
@@ -998,7 +1123,7 @@ class PDFService:
             formatted_text += f"Type: {page_analysis['drawing_type']}\n"
         
         if grid_system:
-            formatted_text += f"Grid: {len(grid_system.x_labels)}x{len(grid_system.y_labels)}\n"
+            formatted_text += f"Grid: {len(grid_system.x_labels)}x{len(grid_system.y_labels)} ({grid_system.grid_type})\n"
             if grid_system.confidence > 0:
                 formatted_text += f"Grid Confidence: {grid_system.confidence:.2f}\n"
         
@@ -1251,6 +1376,7 @@ class PDFService:
                 'sheet_numbers': {},
                 'grid_pages': [],
                 'grid_confidence': {},
+                'grid_types': {},
                 'table_summary': {
                     'total_tables_found': 0,
                     'total_tables_extracted': 0,
@@ -1267,6 +1393,7 @@ class PDFService:
                     'sheet_number': page_detail.get('sheet_number'),
                     'has_grid': page_detail.get('has_grid', False),
                     'grid_confidence': page_detail.get('grid_confidence', 0.0),
+                    'grid_type': page_detail.get('grid_type'),
                     'has_tables': page_detail.get('has_tables', False),
                     'table_count': page_detail.get('table_count', 0)
                 }
@@ -1280,6 +1407,7 @@ class PDFService:
                 if page_detail.get('has_grid'):
                     index['grid_pages'].append(page_num)
                     index['grid_confidence'][page_num] = page_detail.get('grid_confidence', 0.0)
+                    index['grid_types'][page_num] = page_detail.get('grid_type', 'unknown')
                 
                 # Track table information
                 if page_detail.get('has_tables'):
@@ -1330,8 +1458,8 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "5.0.0-PRODUCTION-ENHANCED-GRID",
-            "mode": "production_grade_with_visual_grid_detection",
+            "version": "6.0.0-UNIVERSAL-GRID-SYSTEM",
+            "mode": "production_grade_with_universal_grid_detection",
             "capabilities": {
                 "max_pages": self.max_pages,
                 "batch_size": self.batch_size,
@@ -1339,8 +1467,9 @@ class PDFService:
                 "table_extraction": True,
                 "unlimited_tables": True,
                 "grid_detection": True,
-                "visual_grid_detection": True,  # NEW
-                "grid_confidence_scoring": True,  # NEW
+                "visual_grid_detection": OPENCV_AVAILABLE,
+                "universal_grid_system": True,
+                "grid_confidence_scoring": True,
                 "multi_resolution_images": True,
                 "ai_optimized": True,
                 "thread_safe": True,
@@ -1349,10 +1478,13 @@ class PDFService:
             },
             "grid_detection": {
                 "text_based": True,
-                "visual_based": True,
-                "line_detection": "Hough Transform",
+                "visual_based": OPENCV_AVAILABLE,
+                "universal_grid": True,
+                "grid_types": ["embedded", "text_based", "generated"],
+                "line_detection": "Hough Transform" if OPENCV_AVAILABLE else "Not Available",
                 "confidence_scoring": True,
-                "fallback_support": True
+                "fallback_support": True,
+                "adaptive_sizing": True
             },
             "security": {
                 "input_validation": True,
