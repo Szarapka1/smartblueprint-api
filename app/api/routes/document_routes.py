@@ -389,6 +389,84 @@ async def get_page_image(
         logger.error(f"Failed to get page image: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get page image: {str(e)}")
 
+# ===== GRID SYSTEM ENDPOINT =====
+
+@document_router.get(
+    "/documents/{document_id}/pages/{page_num}/grid",
+    summary="Get grid system for a specific page",
+    description="Returns grid system data if available (native blueprint grid or generated grid)"
+)
+async def get_page_grid_system(
+    request: Request,
+    document_id: str,
+    page_num: int
+):
+    """
+    Get grid system data for a specific page.
+    Returns native blueprint grid if available, otherwise returns null.
+    Used by the PDF viewer to load pre-detected grid systems.
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    storage_service = getattr(request.app.state, 'storage_service', None)
+    if not storage_service:
+        raise HTTPException(status_code=503, detail="Storage service unavailable")
+    
+    try:
+        cache_container = settings.AZURE_CACHE_CONTAINER_NAME
+        
+        # Check for grid systems file
+        grid_blob = f"{clean_document_id}_grid_systems.json"
+        
+        if await storage_service.blob_exists(cache_container, grid_blob):
+            grid_data = await storage_service.download_blob_as_json(
+                container_name=cache_container,
+                blob_name=grid_blob
+            )
+            
+            # Get grid for specific page
+            page_grid = grid_data.get(str(page_num))
+            
+            if page_grid:
+                # Ensure all required fields are present
+                grid_response = {
+                    "page_number": page_num,
+                    "grid_type": page_grid.get("grid_type", "native"),
+                    "confidence": page_grid.get("confidence", 0.0),
+                    "x_labels": page_grid.get("x_labels", []),
+                    "y_labels": page_grid.get("y_labels", []),
+                    "x_coordinates": page_grid.get("x_coordinates", {}),
+                    "y_coordinates": page_grid.get("y_coordinates", {}),
+                    "x_lines": page_grid.get("x_lines", []),
+                    "y_lines": page_grid.get("y_lines", []),
+                    "cell_width": page_grid.get("cell_width"),
+                    "cell_height": page_grid.get("cell_height"),
+                    "origin_x": page_grid.get("origin_x", 0),
+                    "origin_y": page_grid.get("origin_y", 0),
+                    "page_width": page_grid.get("page_width", 0),
+                    "page_height": page_grid.get("page_height", 0),
+                    "scale": page_grid.get("scale"),
+                    "metadata": {
+                        "detection_method": page_grid.get("grid_type", "unknown"),
+                        "has_visual_grid": len(page_grid.get("x_lines", [])) > 0,
+                        "has_text_labels": len(page_grid.get("x_labels", [])) > 0
+                    }
+                }
+                
+                return grid_response
+        
+        # No grid data available - return null
+        # The frontend will use its universal analysis grid
+        return None
+        
+    except FileNotFoundError:
+        # No grid systems file exists
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get grid system: {e}")
+        # Return null instead of error to allow frontend to continue
+        return None
+
 # ===== DOCUMENT DOWNLOAD =====
 
 @document_router.get(
