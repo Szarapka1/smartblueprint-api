@@ -1,4 +1,4 @@
-# app/models/schemas.py - FIXED AND OPTIMIZED VERSION
+# app/models/schemas.py - COMPLETE VERSION WITH ALL REQUIRED MODELS
 
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any, Union
@@ -491,6 +491,7 @@ class DocumentUploadResponse(BaseModel):
     pages_processed: Optional[int] = None
     grid_systems_detected: Optional[int] = None
     drawing_types_found: Optional[List[str]] = None
+    estimated_time: Optional[int] = None  # Added for SSE
 
 class DocumentInfoResponse(BaseModel):
     """Document information response"""
@@ -508,6 +509,39 @@ class DocumentListResponse(BaseModel):
     """List of documents response"""
     documents: List[DocumentInfoResponse]
     total_count: int
+
+class DocumentStatsResponse(BaseModel):
+    """Document statistics response"""
+    document_id: str
+    total_annotations: int
+    total_pages: int
+    total_characters: int
+    estimated_tokens: int
+    unique_collaborators: List[str]
+    collaborator_count: int
+    annotation_types: Dict[str, int]
+    last_activity: Optional[str] = None
+    status: str
+
+class DocumentActivityResponse(BaseModel):
+    """Recent document activity response"""
+    document_id: str
+    recent_annotations: List[Dict[str, Any]]
+    recent_chats: List[Dict[str, Any]]
+    active_authors: List[str]
+
+class CollaboratorStats(BaseModel):
+    """Statistics for a single collaborator"""
+    author: str
+    annotations_count: int
+    chats_count: int
+    total_interactions: int
+
+class CollaboratorsResponse(BaseModel):
+    """Document collaborators response"""
+    document_id: str
+    collaborators: List[CollaboratorStats]
+    total_collaborators: int
 
 # --- User Preferences ---
 
@@ -608,7 +642,9 @@ __all__ = [
     # Response Models
     "ChatResponse", "NoteSuggestion", "BatchNoteSuggestion", "Note", 
     "NoteList", "DocumentUploadResponse", "DocumentInfoResponse", 
-    "DocumentListResponse", "AnnotationResponse", "HighlightResponse",
+    "DocumentListResponse", "DocumentStatsResponse", "DocumentActivityResponse",
+    "CollaboratorsResponse", "CollaboratorStats", "AnnotationResponse", 
+    "HighlightResponse",
     
     # Annotation Models
     "Annotation", "AnnotationBase", "AnnotationCreate", "AnnotationUpdate",
