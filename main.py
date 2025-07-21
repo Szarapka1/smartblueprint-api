@@ -475,10 +475,10 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 # --- Include API Routers ---
-app.include_router(blueprint_router, prefix="/api/v1", tags=["Blueprint Analysis"])
-app.include_router(document_router, prefix="/api/v1", tags=["Document Management"])
-app.include_router(annotation_router, prefix="/api/v1", tags=["Annotations"])
-app.include_router(note_router, prefix="/api/v1", tags=["Notes"])
+app.include_router(blueprint_router, tags=["Blueprint Analysis"])
+app.include_router(document_router, tags=["Document Management"])
+app.include_router(annotation_router, tags=["Annotations"])
+app.include_router(note_router, tags=["Notes"])
 
 # --- Root Endpoints ---
 @app.get("/", tags=["System"])
