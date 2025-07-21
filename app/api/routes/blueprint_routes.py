@@ -1,8 +1,8 @@
-# app/api/routes/blueprint_routes.py - WRITE OPERATIONS WITH SSE SUPPORT
+# app/api/routes/blueprint_routes.py - WRITE OPERATIONS WITH PRODUCTION SSE SUPPORT
 
 """
 Blueprint Write Operations - Handles document upload, processing, chat, and annotations
-Now includes Server-Sent Events (SSE) for real-time status updates
+Production-ready Server-Sent Events (SSE) implementation with robust error handling
 """
 
 import traceback
@@ -18,6 +18,8 @@ from typing import Optional, Dict, List, Any, Union, AsyncGenerator
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, status, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from collections import defaultdict
+from contextlib import asynccontextmanager
+import weakref
 
 # Core imports
 from app.core.config import get_settings
@@ -44,13 +46,234 @@ blueprint_router = APIRouter(
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+# ===== PRODUCTION SSE EVENT MANAGEMENT =====
+
+class SSEConnectionManager:
+    """Production-ready SSE connection and event manager"""
+    
+    def __init__(self):
+        # Connection tracking
+        self._connections = defaultdict(dict)  # {document_id: {connection_id: queue}}
+        self._connection_metadata = {}  # {connection_id: metadata}
+        self._locks = defaultdict(asyncio.Lock)
+        
+        # Event history for late joiners (limited buffer)
+        self._event_history = defaultdict(list)  # {document_id: [recent_events]}
+        self._history_limit = 50
+        
+        # Metrics
+        self._total_connections = 0
+        self._total_events_sent = 0
+        self._connection_errors = 0
+        
+        # Cleanup tracking
+        self._cleanup_tasks = weakref.WeakValueDictionary()
+        
+    async def add_connection(
+        self, 
+        document_id: str, 
+        connection_id: str,
+        send_history: bool = True
+    ) -> asyncio.Queue:
+        """Add a new SSE connection with production safeguards"""
+        async with self._locks[document_id]:
+            # Create queue with appropriate size for testing
+            queue = asyncio.Queue(maxsize=settings.SSE_EVENT_QUEUE_SIZE * 2)  # Double size for testing
+            
+            # Store connection
+            self._connections[document_id][connection_id] = queue
+            self._connection_metadata[connection_id] = {
+                'document_id': document_id,
+                'connected_at': datetime.utcnow(),
+                'last_activity': datetime.utcnow(),
+                'events_sent': 0,
+                'errors': 0
+            }
+            
+            # Update metrics
+            self._total_connections += 1
+            
+            # Send event history if requested (for late joiners)
+            if send_history and document_id in self._event_history:
+                for event in self._event_history[document_id][-10:]:  # Last 10 events
+                    try:
+                        await queue.put(event)
+                    except asyncio.QueueFull:
+                        logger.warning(f"Queue full when sending history to {connection_id}")
+                        break
+            
+            logger.info(f"✅ SSE connection added: doc={document_id}, conn={connection_id}")
+            logger.info(f"   Active connections for document: {len(self._connections[document_id])}")
+            
+            return queue
+    
+    async def remove_connection(self, document_id: str, connection_id: str):
+        """Remove SSE connection with cleanup"""
+        async with self._locks[document_id]:
+            if connection_id in self._connections[document_id]:
+                # Get queue for cleanup
+                queue = self._connections[document_id].pop(connection_id)
+                
+                # Clear any remaining items in queue
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                
+                # Remove metadata
+                if connection_id in self._connection_metadata:
+                    del self._connection_metadata[connection_id]
+                
+                # Clean up empty document entries
+                if not self._connections[document_id]:
+                    del self._connections[document_id]
+                    # Optionally clear history for completed documents
+                    if document_id in self._event_history:
+                        del self._event_history[document_id]
+                
+                logger.info(f"🔌 SSE connection removed: doc={document_id}, conn={connection_id}")
+    
+    async def emit_event(
+        self, 
+        document_id: str, 
+        event_type: str,
+        event_data: Dict[str, Any],
+        store_history: bool = True
+    ):
+        """Emit event to all connections with production error handling"""
+        if not settings.ENABLE_SSE:
+            return
+        
+        # Create event
+        event = SSEEvent(
+            event_type=event_type,
+            data=event_data,
+            timestamp=datetime.utcnow().isoformat() + 'Z',
+            document_id=document_id
+        )
+        
+        # Serialize event
+        event_json = json.dumps({
+            'event_type': event.event_type,
+            'data': event.data,
+            'timestamp': event.timestamp,
+            'document_id': event.document_id
+        })
+        
+        # Store in history if requested
+        if store_history:
+            async with self._locks[document_id]:
+                if document_id not in self._event_history:
+                    self._event_history[document_id] = []
+                
+                self._event_history[document_id].append(event_json)
+                
+                # Limit history size
+                if len(self._event_history[document_id]) > self._history_limit:
+                    self._event_history[document_id] = self._event_history[document_id][-self._history_limit:]
+        
+        # Send to all connections
+        async with self._locks[document_id]:
+            if document_id not in self._connections:
+                return
+            
+            # Track failed connections
+            failed_connections = []
+            
+            for connection_id, queue in self._connections[document_id].items():
+                try:
+                    # Try to put event in queue with timeout
+                    await asyncio.wait_for(
+                        queue.put(event_json),
+                        timeout=1.0
+                    )
+                    
+                    # Update metadata
+                    if connection_id in self._connection_metadata:
+                        self._connection_metadata[connection_id]['events_sent'] += 1
+                        self._connection_metadata[connection_id]['last_activity'] = datetime.utcnow()
+                    
+                    self._total_events_sent += 1
+                    
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout sending event to {connection_id}")
+                    failed_connections.append(connection_id)
+                    if connection_id in self._connection_metadata:
+                        self._connection_metadata[connection_id]['errors'] += 1
+                    
+                except asyncio.QueueFull:
+                    # Queue is full, try to remove oldest event
+                    logger.warning(f"Queue full for {connection_id}, dropping oldest event")
+                    try:
+                        # Remove oldest event
+                        old_event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                        # Add new event
+                        await asyncio.wait_for(queue.put(event_json), timeout=0.1)
+                        
+                        if connection_id in self._connection_metadata:
+                            self._connection_metadata[connection_id]['events_sent'] += 1
+                            
+                    except:
+                        failed_connections.append(connection_id)
+                        if connection_id in self._connection_metadata:
+                            self._connection_metadata[connection_id]['errors'] += 1
+                
+                except Exception as e:
+                    logger.error(f"Error sending event to {connection_id}: {e}")
+                    failed_connections.append(connection_id)
+                    self._connection_errors += 1
+            
+            # Clean up failed connections
+            for conn_id in failed_connections:
+                if self._connection_metadata.get(conn_id, {}).get('errors', 0) > 5:
+                    logger.warning(f"Removing connection {conn_id} due to repeated errors")
+                    await self.remove_connection(document_id, conn_id)
+    
+    def get_connection_info(self, document_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get connection statistics"""
+        if document_id:
+            return {
+                'document_id': document_id,
+                'active_connections': len(self._connections.get(document_id, {})),
+                'connection_ids': list(self._connections.get(document_id, {}).keys()),
+                'event_history_size': len(self._event_history.get(document_id, []))
+            }
+        else:
+            return {
+                'total_documents': len(self._connections),
+                'total_active_connections': sum(len(conns) for conns in self._connections.values()),
+                'total_connections_created': self._total_connections,
+                'total_events_sent': self._total_events_sent,
+                'connection_errors': self._connection_errors,
+                'documents': {
+                    doc_id: {
+                        'connections': len(conns),
+                        'history_size': len(self._event_history.get(doc_id, []))
+                    }
+                    for doc_id, conns in self._connections.items()
+                }
+            }
+    
+    async def cleanup_stale_connections(self, max_idle_seconds: int = 300):
+        """Clean up stale connections"""
+        now = datetime.utcnow()
+        stale_connections = []
+        
+        for conn_id, metadata in self._connection_metadata.items():
+            last_activity = metadata.get('last_activity', now)
+            if (now - last_activity).total_seconds() > max_idle_seconds:
+                stale_connections.append((metadata['document_id'], conn_id))
+        
+        for doc_id, conn_id in stale_connections:
+            logger.info(f"Cleaning up stale connection: {conn_id}")
+            await self.remove_connection(doc_id, conn_id)
+
+# Global SSE manager instance
+sse_manager = SSEConnectionManager()
+
 # Store active processing tasks
 processing_tasks = {}
-
-# SSE Event Management
-document_event_queues = defaultdict(list)  # document_id -> list of event queues
-document_event_locks = defaultdict(asyncio.Lock)  # document_id -> lock for queue management
-active_sse_connections = defaultdict(set)  # document_id -> set of connection IDs
 
 # ===== UTILITY FUNCTIONS =====
 
@@ -95,76 +318,6 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
-# ===== SSE EVENT MANAGEMENT =====
-
-async def emit_sse_event(document_id: str, event: SSEEvent):
-    """Emit an SSE event to all connected clients for a document"""
-    if not settings.ENABLE_SSE:
-        return
-    
-    async with document_event_locks[document_id]:
-        # Add event to all active queues for this document
-        event_data = {
-            'event_type': event.event_type,
-            'data': event.data,
-            'timestamp': event.timestamp,
-            'document_id': event.document_id
-        }
-        
-        # Serialize event data
-        event_json = json.dumps(event_data)
-        
-        # Add to each queue
-        for queue in document_event_queues[document_id]:
-            try:
-                # Check queue size limit
-                if len(queue) < settings.SSE_EVENT_QUEUE_SIZE:
-                    await queue.put(event_json)
-                else:
-                    logger.warning(f"Event queue full for document {document_id}, dropping oldest event")
-                    # Remove oldest event if queue is full
-                    try:
-                        queue.get_nowait()
-                        await queue.put(event_json)
-                    except asyncio.QueueEmpty:
-                        await queue.put(event_json)
-            except Exception as e:
-                logger.error(f"Failed to emit event to queue: {e}")
-
-async def create_status_update_event(
-    document_id: str,
-    stage: str,
-    message: str,
-    progress_percent: int,
-    pages_processed: int,
-    estimated_time: Optional[int] = None
-) -> StatusUpdateEvent:
-    """Create a status update event"""
-    return StatusUpdateEvent(
-        stage=stage,
-        message=message,
-        progress_percent=progress_percent,
-        pages_processed=pages_processed,
-        estimated_time=estimated_time
-    )
-
-async def create_resource_ready_event(
-    document_id: str,
-    resource_type: str,
-    resource_id: str,
-    page_number: Optional[int] = None,
-    url: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None
-) -> ResourceReadyEvent:
-    """Create a resource ready event"""
-    return ResourceReadyEvent(
-        resource_type=resource_type,
-        resource_id=resource_id,
-        page_number=page_number,
-        url=url,
-        metadata=metadata or {}
-    )
-
 # ===== SSE STREAMING ENDPOINT =====
 
 @blueprint_router.get(
@@ -179,7 +332,7 @@ async def stream_document_status(
 ):
     """
     Stream real-time document processing status using Server-Sent Events.
-    Clients receive updates as processing happens.
+    Production-ready implementation with proper error handling.
     """
     if not settings.ENABLE_SSE:
         raise HTTPException(
@@ -195,21 +348,22 @@ async def stream_document_status(
     
     async def event_generator() -> AsyncGenerator[str, None]:
         """Generate SSE events for the client"""
-        queue = asyncio.Queue(maxsize=settings.SSE_EVENT_QUEUE_SIZE)
-        
-        # Register this connection
-        async with document_event_locks[clean_document_id]:
-            document_event_queues[clean_document_id].append(queue)
-            active_sse_connections[clean_document_id].add(connection_id)
-        
-        logger.info(f"✅ SSE connection established: {connection_id}")
-        logger.info(f"   Active connections for document: {len(active_sse_connections[clean_document_id])}")
+        queue = None
         
         try:
+            # Add connection to manager
+            queue = await sse_manager.add_connection(
+                clean_document_id, 
+                connection_id,
+                send_history=True
+            )
+            
+            logger.info(f"✅ SSE connection established: {connection_id}")
+            
             # Send initial connection event
             yield f"event: connected\ndata: {{\"document_id\": \"{clean_document_id}\", \"connection_id\": \"{connection_id}\"}}\n\n"
             
-            # Check current document status
+            # Send current document status
             storage_service = getattr(request.app.state, 'storage_service', None)
             if storage_service:
                 try:
@@ -228,7 +382,8 @@ async def stream_document_status(
                             "progress_percent": round(
                                 (status_data.get('pages_processed', 0) / max(status_data.get('total_pages', 1), 1)) * 100
                             ),
-                            "pages_processed": status_data.get('pages_processed', 0)
+                            "pages_processed": status_data.get('pages_processed', 0),
+                            "total_pages": status_data.get('total_pages', 0)
                         }
                         yield f"event: status_update\ndata: {json.dumps(current_status)}\n\n"
                 except Exception as e:
@@ -236,49 +391,55 @@ async def stream_document_status(
             
             # Main event loop
             last_keepalive = time.time()
+            connection_start = time.time()
+            max_connection_time = 3600  # 1 hour max for testing
             
             while True:
                 try:
-                    # Wait for events with timeout for keepalive
-                    event_data = await asyncio.wait_for(
-                        queue.get(),
-                        timeout=settings.SSE_KEEPALIVE_INTERVAL
-                    )
-                    
-                    # Parse and send event
-                    event = json.loads(event_data)
-                    event_type = event['event_type']
-                    data = event['data']
-                    
-                    # Format SSE event
-                    if settings.SSE_ENABLE_COMPRESSION and len(json.dumps(data)) > 1000:
-                        # For large events, send a simplified version
-                        if event_type == SSEEventType.resource_ready and 'metadata' in data:
-                            data['metadata'] = {'compressed': True, 'original_size': len(str(data['metadata']))}
-                    
-                    yield f"event: {event_type}\ndata: {json.dumps(data)}\nid: {event.get('timestamp', '')}\n\n"
-                    
-                    # Check if processing is complete
-                    if event_type == SSEEventType.processing_complete:
-                        logger.info(f"📍 Processing complete, will close SSE connection soon: {connection_id}")
-                        # Send a few more events if any, then close
-                        await asyncio.sleep(2)
+                    # Check connection time limit for testing
+                    if time.time() - connection_start > max_connection_time:
+                        logger.info(f"⏰ Max connection time reached for {connection_id}")
+                        yield f"event: connection_timeout\ndata: {{\"message\": \"Maximum connection time reached\"}}\n\n"
                         break
                     
-                except asyncio.TimeoutError:
-                    # Send keepalive
-                    current_time = time.time()
-                    if current_time - last_keepalive >= settings.SSE_KEEPALIVE_INTERVAL:
-                        yield f"event: keepalive\ndata: {{\"timestamp\": \"{datetime.utcnow().isoformat()}Z\"}}\n\n"
-                        last_keepalive = current_time
-                
+                    # Wait for events with timeout for keepalive
+                    try:
+                        event_data = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=settings.SSE_KEEPALIVE_INTERVAL
+                        )
+                        
+                        # Parse and send event
+                        event = json.loads(event_data)
+                        event_type = event['event_type']
+                        data = event['data']
+                        
+                        # Format SSE event
+                        yield f"event: {event_type}\ndata: {json.dumps(data)}\nid: {event.get('timestamp', '')}\n\n"
+                        
+                        # Check if processing is complete
+                        if event_type == SSEEventType.processing_complete:
+                            logger.info(f"📍 Processing complete for {connection_id}")
+                            # Give client time to process final event
+                            await asyncio.sleep(5)
+                            break
+                        
+                    except asyncio.TimeoutError:
+                        # Send keepalive
+                        current_time = time.time()
+                        if current_time - last_keepalive >= settings.SSE_KEEPALIVE_INTERVAL:
+                            yield f"event: keepalive\ndata: {{\"timestamp\": \"{datetime.utcnow().isoformat()}Z\"}}\n\n"
+                            last_keepalive = current_time
+                    
                 except asyncio.CancelledError:
                     logger.info(f"🔌 SSE connection cancelled: {connection_id}")
+                    yield f"event: cancelled\ndata: {{\"message\": \"Connection cancelled by server\"}}\n\n"
                     break
                 
                 except Exception as e:
                     logger.error(f"Error in SSE event loop: {e}")
-                    yield f"event: error\ndata: {{\"error\": \"Internal error in event stream\"}}\n\n"
+                    logger.error(traceback.format_exc())
+                    yield f"event: error\ndata: {{\"error\": \"Internal error in event stream\", \"details\": \"{str(e)}\"}}\n\n"
                     break
                 
                 # Check if client is still connected
@@ -286,37 +447,34 @@ async def stream_document_status(
                     logger.info(f"🔌 Client disconnected: {connection_id}")
                     break
                 
-                # Check connection timeout
-                if time.time() - last_keepalive > settings.SSE_CLIENT_TIMEOUT:
-                    logger.info(f"⏱️ SSE connection timeout: {connection_id}")
-                    break
+                # Periodic connection health check
+                if int(time.time()) % 30 == 0:  # Every 30 seconds
+                    yield f"event: health\ndata: {{\"status\": \"healthy\", \"timestamp\": \"{datetime.utcnow().isoformat()}Z\"}}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Fatal error in SSE generator: {e}")
+            logger.error(traceback.format_exc())
+            yield f"event: fatal_error\ndata: {{\"error\": \"Fatal error occurred\", \"details\": \"{str(e)}\"}}\n\n"
         
         finally:
-            # Cleanup connection
-            async with document_event_locks[clean_document_id]:
-                if queue in document_event_queues[clean_document_id]:
-                    document_event_queues[clean_document_id].remove(queue)
-                active_sse_connections[clean_document_id].discard(connection_id)
-                
-                # Clean up empty structures
-                if not document_event_queues[clean_document_id]:
-                    del document_event_queues[clean_document_id]
-                if not active_sse_connections[clean_document_id]:
-                    del active_sse_connections[clean_document_id]
-            
-            logger.info(f"✅ SSE connection closed: {connection_id}")
-            logger.info(f"   Remaining connections for document: {len(active_sse_connections.get(clean_document_id, []))}")
+            # Always clean up connection
+            logger.info(f"🧹 Cleaning up SSE connection: {connection_id}")
+            await sse_manager.remove_connection(clean_document_id, connection_id)
+            yield f"event: close\ndata: {{\"message\": \"Connection closed\"}}\n\n"
     
-    # Return SSE response
+    # Return SSE response with production headers
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
-            "Content-Type": "text/event-stream",
+            "Content-Type": "text/event-stream; charset=utf-8",
             "X-Accel-Buffering": "no",  # Disable proxy buffering
             "Access-Control-Allow-Origin": "*",  # CORS support
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "X-Content-Type-Options": "nosniff",
         }
     )
 
@@ -332,8 +490,10 @@ async def process_pdf_async(
     session_service
 ):
     """
-    Process PDF asynchronously with SSE event emission
+    Process PDF asynchronously with production SSE event emission
     """
+    processing_start_time = time.time()
+    
     try:
         logger.info(f"🔄 Starting async processing for document: {session_id}")
         
@@ -347,7 +507,8 @@ async def process_pdf_async(
             'pages_processed': 0,
             'total_pages': 0,
             'current_batch': 0,
-            'total_batches': 0
+            'total_batches': 0,
+            'sse_enabled': settings.ENABLE_SSE
         }
         
         await storage_service.upload_file(
@@ -357,44 +518,44 @@ async def process_pdf_async(
         )
         
         # Emit initial status event
-        if settings.ENABLE_SSE:
-            await emit_sse_event(
-                session_id,
-                SSEEvent(
-                    event_type=SSEEventType.status_update,
-                    data=StatusUpdateEvent(
-                        stage="processing_started",
-                        message="Document processing has started",
-                        progress_percent=0,
-                        pages_processed=0
-                    ).dict(),
-                    timestamp=datetime.utcnow().isoformat() + 'Z',
-                    document_id=session_id
-                )
-            )
+        await sse_manager.emit_event(
+            session_id,
+            SSEEventType.status_update,
+            StatusUpdateEvent(
+                stage="processing_started",
+                message="Document processing has started",
+                progress_percent=0,
+                pages_processed=0
+            ).dict()
+        )
         
-        # Define event callback for PDF service
+        # Define robust event callback for PDF service
         async def processing_event_callback(event_type: str, event_data: Dict[str, Any]):
             """Callback to emit SSE events during processing"""
-            if not settings.ENABLE_SSE:
-                return
-            
             try:
                 if event_type == "page_processed":
-                    await emit_sse_event(
+                    # Update status
+                    processing_status['pages_processed'] = event_data.get('page_number', 0)
+                    processing_status['total_pages'] = event_data.get('total_pages', 0)
+                    
+                    # Save status
+                    await storage_service.upload_file(
+                        container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=f"{session_id}_status.json",
+                        data=json.dumps(processing_status).encode('utf-8')
+                    )
+                    
+                    # Emit event
+                    await sse_manager.emit_event(
                         session_id,
-                        SSEEvent(
-                            event_type=SSEEventType.status_update,
-                            data=StatusUpdateEvent(
-                                stage="processing_pages",
-                                message=f"Processing page {event_data['page_number']} of {event_data['total_pages']}",
-                                progress_percent=event_data.get('progress_percent', 0),
-                                pages_processed=event_data['page_number'],
-                                estimated_time=event_data.get('estimated_time')
-                            ).dict(),
-                            timestamp=datetime.utcnow().isoformat() + 'Z',
-                            document_id=session_id
-                        )
+                        SSEEventType.status_update,
+                        StatusUpdateEvent(
+                            stage="processing_pages",
+                            message=f"Processing page {event_data['page_number']} of {event_data['total_pages']}",
+                            progress_percent=event_data.get('progress_percent', 0),
+                            pages_processed=event_data['page_number'],
+                            estimated_time=event_data.get('estimated_time')
+                        ).dict()
                     )
                 
                 elif event_type == "resource_ready":
@@ -411,41 +572,48 @@ async def process_pdf_async(
                         url = f"/api/v1/documents/{session_id}/pages/{page_number}/image?type=ai"
                     elif resource_type == "context_text":
                         url = f"/api/v1/documents/{session_id}/context"
+                    elif resource_type == "grid_system":
+                        url = f"/api/v1/documents/{session_id}/pages/{page_number}/grid"
                     
-                    await emit_sse_event(
+                    await sse_manager.emit_event(
                         session_id,
-                        SSEEvent(
-                            event_type=SSEEventType.resource_ready,
-                            data=ResourceReadyEvent(
-                                resource_type=resource_type,
-                                resource_id=event_data.get('resource_id', resource_type),
-                                page_number=page_number,
-                                url=url,
-                                metadata=event_data.get('metadata', {})
-                            ).dict(),
-                            timestamp=datetime.utcnow().isoformat() + 'Z',
-                            document_id=session_id
-                        )
+                        SSEEventType.resource_ready,
+                        ResourceReadyEvent(
+                            resource_type=resource_type,
+                            resource_id=event_data.get('resource_id', f"{resource_type}_{page_number}"),
+                            page_number=page_number,
+                            url=url,
+                            metadata=event_data.get('metadata', {})
+                        ).dict()
                     )
                 
                 elif event_type == "batch_complete":
-                    await emit_sse_event(
+                    await sse_manager.emit_event(
                         session_id,
-                        SSEEvent(
-                            event_type=SSEEventType.status_update,
-                            data=StatusUpdateEvent(
-                                stage="batch_complete",
-                                message=f"Completed batch {event_data['batch_number']} of {event_data['total_batches']}",
-                                progress_percent=event_data.get('progress_percent', 0),
-                                pages_processed=event_data.get('pages_processed', 0)
-                            ).dict(),
-                            timestamp=datetime.utcnow().isoformat() + 'Z',
-                            document_id=session_id
-                        )
+                        SSEEventType.status_update,
+                        StatusUpdateEvent(
+                            stage="batch_complete",
+                            message=f"Completed batch {event_data['batch_number']} of {event_data['total_batches']}",
+                            progress_percent=event_data.get('progress_percent', 0),
+                            pages_processed=event_data.get('pages_processed', 0)
+                        ).dict()
+                    )
+                
+                elif event_type == "extraction_complete":
+                    await sse_manager.emit_event(
+                        session_id,
+                        SSEEventType.status_update,
+                        StatusUpdateEvent(
+                            stage="extraction_complete",
+                            message="Text extraction completed",
+                            progress_percent=90,
+                            pages_processed=processing_status.get('pages_processed', 0)
+                        ).dict()
                     )
                 
             except Exception as e:
                 logger.error(f"Failed to emit processing event: {e}")
+                logger.error(traceback.format_exc())
         
         # Process the PDF with event callback
         await pdf_service.process_and_cache_pdf(
@@ -455,9 +623,13 @@ async def process_pdf_async(
             event_callback=processing_event_callback if settings.ENABLE_SSE else None
         )
         
+        # Calculate processing time
+        processing_time = time.time() - processing_start_time
+        
         # Final status update
         processing_status['status'] = 'ready'
         processing_status['completed_at'] = datetime.utcnow().isoformat() + 'Z'
+        processing_status['processing_time_seconds'] = round(processing_time, 2)
         
         # Get final metadata
         try:
@@ -468,8 +640,9 @@ async def process_pdf_async(
             metadata = json.loads(metadata_text)
             processing_status['pages_processed'] = metadata.get('page_count', 0)
             processing_status['total_pages'] = metadata.get('total_pages', 0)
-        except:
-            pass
+            processing_status['metadata'] = metadata
+        except Exception as e:
+            logger.warning(f"Could not load final metadata: {e}")
         
         await storage_service.upload_file(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -478,28 +651,22 @@ async def process_pdf_async(
         )
         
         # Emit completion event
-        if settings.ENABLE_SSE:
-            await emit_sse_event(
-                session_id,
-                SSEEvent(
-                    event_type=SSEEventType.processing_complete,
-                    data=ProcessingCompleteEvent(
-                        status="ready",
-                        total_pages=processing_status.get('pages_processed', 0),
-                        processing_time=time.time() - time.mktime(
-                            datetime.fromisoformat(processing_status['started_at'].rstrip('Z')).timetuple()
-                        ),
-                        resources_summary={
-                            "pages_with_images": processing_status.get('pages_processed', 0),
-                            "pages_with_thumbnails": processing_status.get('pages_processed', 0),
-                            "context_available": True,
-                            "metadata_available": True
-                        }
-                    ).dict(),
-                    timestamp=datetime.utcnow().isoformat() + 'Z',
-                    document_id=session_id
-                )
-            )
+        await sse_manager.emit_event(
+            session_id,
+            SSEEventType.processing_complete,
+            ProcessingCompleteEvent(
+                status="ready",
+                total_pages=processing_status.get('pages_processed', 0),
+                processing_time=processing_time,
+                resources_summary={
+                    "pages_with_images": processing_status.get('pages_processed', 0),
+                    "pages_with_thumbnails": processing_status.get('pages_processed', 0),
+                    "context_available": True,
+                    "metadata_available": True,
+                    "grid_systems_available": True
+                }
+            ).dict()
+        )
         
         # Update session if available
         if session_service and hasattr(session_service, 'update_session_metadata'):
@@ -509,26 +676,33 @@ async def process_pdf_async(
                     metadata={
                         'processing_complete': True,
                         'status': 'ready',
-                        'pages_processed': processing_status.get('pages_processed', 0)
+                        'pages_processed': processing_status.get('pages_processed', 0),
+                        'processing_time_seconds': processing_time
                     }
                 )
             except Exception as e:
                 logger.warning(f"Session update failed: {e}")
         
-        logger.info(f"✅ Async processing completed for: {session_id}")
+        logger.info(f"✅ Async processing completed for: {session_id} in {processing_time:.2f}s")
         
     except Exception as e:
         logger.error(f"❌ Async processing failed for {session_id}: {e}")
         logger.error(traceback.format_exc())
+        
+        # Calculate how long we processed before failure
+        processing_time = time.time() - processing_start_time
         
         # Save error status
         error_status = {
             'document_id': session_id,
             'status': 'error',
             'error': str(e),
+            'error_type': type(e).__name__,
             'failed_at': datetime.utcnow().isoformat() + 'Z',
             'filename': clean_filename,
-            'author': author
+            'author': author,
+            'processing_time_before_error': round(processing_time, 2),
+            'pages_processed': processing_status.get('pages_processed', 0)
         }
         
         try:
@@ -541,26 +715,32 @@ async def process_pdf_async(
             logger.error(f"Failed to save error status: {storage_error}")
         
         # Emit error event
-        if settings.ENABLE_SSE:
-            await emit_sse_event(
-                session_id,
-                SSEEvent(
-                    event_type=SSEEventType.error,
-                    data=ProcessingErrorEvent(
-                        error_type="processing_failed",
-                        message=str(e),
-                        is_fatal=True,
-                        retry_possible=False
-                    ).dict(),
-                    timestamp=datetime.utcnow().isoformat() + 'Z',
-                    document_id=session_id
-                )
-            )
+        await sse_manager.emit_event(
+            session_id,
+            SSEEventType.error,
+            ProcessingErrorEvent(
+                error_type="processing_failed",
+                message=str(e),
+                is_fatal=True,
+                retry_possible=False,
+                details={
+                    'error_type': type(e).__name__,
+                    'processing_time_before_error': processing_time,
+                    'pages_processed': processing_status.get('pages_processed', 0)
+                }
+            ).dict()
+        )
     
     finally:
         # Remove from processing tasks
         if session_id in processing_tasks:
             del processing_tasks[session_id]
+        
+        # Log final metrics
+        logger.info(f"📊 Processing metrics for {session_id}:")
+        logger.info(f"   Total time: {time.time() - processing_start_time:.2f}s")
+        logger.info(f"   Pages processed: {processing_status.get('pages_processed', 0)}")
+        logger.info(f"   SSE connections: {sse_manager.get_connection_info(session_id)}")
 
 # ===== WRITE OPERATION ROUTES (UNCHANGED) =====
 
@@ -1145,19 +1325,26 @@ async def get_sse_connections(
             detail="Invalid admin token"
         )
     
-    connections_info = {}
-    for doc_id, connections in active_sse_connections.items():
-        connections_info[doc_id] = {
-            "active_connections": len(connections),
-            "connection_ids": list(connections),
-            "event_queues": len(document_event_queues.get(doc_id, []))
-        }
-    
     return {
-        "total_documents": len(active_sse_connections),
-        "total_connections": sum(len(conns) for conns in active_sse_connections.values()),
-        "documents": connections_info,
-        "sse_enabled": settings.ENABLE_SSE
+        **sse_manager.get_connection_info(),
+        "processing_tasks": {
+            doc_id: "running" if not task.done() else "completed"
+            for doc_id, task in processing_tasks.items()
+        }
     }
+
+# ===== CLEANUP TASK =====
+
+async def periodic_cleanup():
+    """Periodic cleanup of stale connections"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Every 5 minutes
+            await sse_manager.cleanup_stale_connections(max_idle_seconds=600)  # 10 minute timeout
+        except Exception as e:
+            logger.error(f"Error in periodic cleanup: {e}")
+
+# Start cleanup task when module loads
+asyncio.create_task(periodic_cleanup())
 
 # NOTE: READ operations (status, download, info) remain in document_routes.py

@@ -1,6 +1,6 @@
-# app/core/config.py - Complete Fixed Version with All Settings + SSE Support
+# app/core/config.py - Complete Fixed Version with All Settings + SSE Support + Visual Grid Detection
 """
-Configuration for Smart Blueprint Chat API with SSE Support
+Configuration for Smart Blueprint Chat API with SSE Support and Visual Grid Detection
 
 CORE PHILOSOPHY:
 1. Load ALL thumbnails - no artificial limits
@@ -8,6 +8,7 @@ CORE PHILOSOPHY:
 3. Storage is not a constraint - accuracy is paramount
 4. The system adapts to document size, not the other way around
 5. Real-time updates via Server-Sent Events (SSE)
+6. Visual grid detection for accurate blueprint analysis
 
 DATA LOADING APPROACH:
 - Check metadata for page count
@@ -15,6 +16,7 @@ DATA LOADING APPROACH:
 - Load ALL thumbnails found
 - Smart AI selection from complete thumbnail set
 - Load high-res only for selected pages
+- Detect actual grid lines from blueprint visuals
 """
 
 from functools import lru_cache
@@ -34,6 +36,7 @@ class AppSettings:
     - Comprehensive analysis with unlimited page support
     - Storage is not a constraint - accuracy is paramount
     - Real-time updates via Server-Sent Events
+    - Visual grid detection for precise blueprint analysis
     """
     
     def __init__(self):
@@ -177,6 +180,23 @@ class AppSettings:
         # === GRID SYSTEM SETTINGS ===
         self.GRID_DETECTION_CONFIDENCE: float = float(os.getenv("GRID_DETECTION_CONFIDENCE", 0.8))
         self.MAX_VISUAL_ELEMENTS: int = int(os.getenv("MAX_VISUAL_ELEMENTS", 200))
+        
+        # === VISUAL GRID DETECTION SETTINGS (NEW) ===
+        self.VISUAL_GRID_DETECTION_ENABLED: bool = os.getenv("VISUAL_GRID_DETECTION_ENABLED", "true").lower() == "true"
+        self.GRID_DETECTION_MIN_CONFIDENCE: float = float(os.getenv("GRID_DETECTION_MIN_CONFIDENCE", 0.7))
+        self.GRID_LINE_DETECTION_THRESHOLD: int = int(os.getenv("GRID_LINE_DETECTION_THRESHOLD", 100))
+        self.GRID_MIN_LINE_LENGTH: int = int(os.getenv("GRID_MIN_LINE_LENGTH", 100))  # Minimum pixels for a grid line
+        self.GRID_LINE_GAP_TOLERANCE: int = int(os.getenv("GRID_LINE_GAP_TOLERANCE", 50))  # Maximum gap in pixels
+        self.GRID_LINE_THICKNESS_MIN: float = float(os.getenv("GRID_LINE_THICKNESS_MIN", 0.5))
+        self.GRID_LINE_THICKNESS_MAX: float = float(os.getenv("GRID_LINE_THICKNESS_MAX", 3.0))
+        self.GRID_DETECTION_DPI_MULTIPLIER: float = float(os.getenv("GRID_DETECTION_DPI_MULTIPLIER", 2.0))  # 2x zoom for detection
+        self.GRID_LINE_ANGLE_TOLERANCE: float = float(os.getenv("GRID_LINE_ANGLE_TOLERANCE", 5.0))  # Degrees from horizontal/vertical
+        self.GRID_LINE_GROUPING_DISTANCE: int = int(os.getenv("GRID_LINE_GROUPING_DISTANCE", 10))  # Pixels to group lines
+        self.GRID_DETECTION_CANNY_LOW: int = int(os.getenv("GRID_DETECTION_CANNY_LOW", 50))  # Canny edge detection low threshold
+        self.GRID_DETECTION_CANNY_HIGH: int = int(os.getenv("GRID_DETECTION_CANNY_HIGH", 150))  # Canny edge detection high threshold
+        self.GRID_DETECTION_HOUGH_THRESHOLD: int = int(os.getenv("GRID_DETECTION_HOUGH_THRESHOLD", 100))  # Hough transform threshold
+        self.GRID_MAX_LABELS_X: int = int(os.getenv("GRID_MAX_LABELS_X", 26))  # Maximum X labels (A-Z)
+        self.GRID_MAX_LABELS_Y: int = int(os.getenv("GRID_MAX_LABELS_Y", 50))  # Maximum Y labels (1-50)
         
         # === STORAGE OPTIMIZATION SETTINGS - UPDATED ===
         self.STORAGE_MAX_CONCURRENT_UPLOADS: int = int(os.getenv("STORAGE_MAX_CONCURRENT_UPLOADS", 25))  # Updated: Increased from 10
@@ -383,6 +403,23 @@ class AppSettings:
             "max_concurrent": self.MAX_CONCURRENT_VALIDATIONS
         }
     
+    def get_grid_detection_settings(self) -> Dict[str, Any]:
+        """Get visual grid detection settings"""
+        return {
+            "enabled": self.VISUAL_GRID_DETECTION_ENABLED,
+            "min_confidence": self.GRID_DETECTION_MIN_CONFIDENCE,
+            "detection_threshold": self.GRID_LINE_DETECTION_THRESHOLD,
+            "min_line_length": self.GRID_MIN_LINE_LENGTH,
+            "line_gap_tolerance": self.GRID_LINE_GAP_TOLERANCE,
+            "line_thickness_range": (self.GRID_LINE_THICKNESS_MIN, self.GRID_LINE_THICKNESS_MAX),
+            "dpi_multiplier": self.GRID_DETECTION_DPI_MULTIPLIER,
+            "angle_tolerance": self.GRID_LINE_ANGLE_TOLERANCE,
+            "grouping_distance": self.GRID_LINE_GROUPING_DISTANCE,
+            "canny_thresholds": (self.GRID_DETECTION_CANNY_LOW, self.GRID_DETECTION_CANNY_HIGH),
+            "hough_threshold": self.GRID_DETECTION_HOUGH_THRESHOLD,
+            "max_labels": {"x": self.GRID_MAX_LABELS_X, "y": self.GRID_MAX_LABELS_Y}
+        }
+    
     def get_unlimited_loading_settings(self) -> Dict[str, Any]:
         """
         Get settings for unlimited thumbnail/page loading
@@ -420,6 +457,7 @@ class AppSettings:
             "unlimited_loading": self.UNLIMITED_PAGE_LOADING,
             "load_all_thumbnails": self.LOAD_ALL_THUMBNAILS,
             "sse": self.ENABLE_SSE,  # Added SSE feature check
+            "visual_grid_detection": self.VISUAL_GRID_DETECTION_ENABLED,  # Added visual grid detection
         }
         return feature_checks.get(feature, False)
     
@@ -507,6 +545,23 @@ CONFIG = {
     "grid_detection_confidence": _settings.GRID_DETECTION_CONFIDENCE,
     "max_visual_elements": _settings.MAX_VISUAL_ELEMENTS,
     
+    # Visual Grid Detection Settings (NEW)
+    "visual_grid_detection_enabled": _settings.VISUAL_GRID_DETECTION_ENABLED,
+    "grid_detection_min_confidence": _settings.GRID_DETECTION_MIN_CONFIDENCE,
+    "grid_line_detection_threshold": _settings.GRID_LINE_DETECTION_THRESHOLD,
+    "grid_min_line_length": _settings.GRID_MIN_LINE_LENGTH,
+    "grid_line_gap_tolerance": _settings.GRID_LINE_GAP_TOLERANCE,
+    "grid_line_thickness_min": _settings.GRID_LINE_THICKNESS_MIN,
+    "grid_line_thickness_max": _settings.GRID_LINE_THICKNESS_MAX,
+    "grid_detection_dpi_multiplier": _settings.GRID_DETECTION_DPI_MULTIPLIER,
+    "grid_line_angle_tolerance": _settings.GRID_LINE_ANGLE_TOLERANCE,
+    "grid_line_grouping_distance": _settings.GRID_LINE_GROUPING_DISTANCE,
+    "grid_detection_canny_low": _settings.GRID_DETECTION_CANNY_LOW,
+    "grid_detection_canny_high": _settings.GRID_DETECTION_CANNY_HIGH,
+    "grid_detection_hough_threshold": _settings.GRID_DETECTION_HOUGH_THRESHOLD,
+    "grid_max_labels_x": _settings.GRID_MAX_LABELS_X,
+    "grid_max_labels_y": _settings.GRID_MAX_LABELS_Y,
+    
     # Storage settings
     "storage_download_timeout": _settings.STORAGE_DOWNLOAD_TIMEOUT,
     "storage_upload_timeout": _settings.STORAGE_UPLOAD_TIMEOUT,
@@ -559,4 +614,11 @@ IMPORTANT NOTES FOR DATA LOADER IMPLEMENTATION:
    - Use keepalive events to maintain connection
    - Handle multiple connections per document
    - Clean up on disconnection
+
+5. Visual Grid Detection should:
+   - Use OpenCV to detect actual grid lines
+   - Apply Hough transform with configured thresholds
+   - Group nearby lines within GRID_LINE_GROUPING_DISTANCE
+   - Maintain confidence scores for detected grids
+   - Fall back to text-based detection when visual fails
 """

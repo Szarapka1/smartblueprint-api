@@ -1,4 +1,4 @@
-# app/services/pdf_service.py - PRODUCTION-GRADE PDF PROCESSING WITH SSE EVENTS
+# app/services/pdf_service.py - PRODUCTION-GRADE PDF PROCESSING WITH ENHANCED GRID DETECTION
 
 import logging
 import fitz  # PyMuPDF
@@ -14,6 +14,8 @@ from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass, field
 import time
+import numpy as np
+import cv2
 
 from app.core.config import AppSettings
 from app.services.storage_service import StorageService
@@ -57,8 +59,19 @@ class GridSystem:
         }
 
 
+@dataclass
+class VisualGridLine:
+    """Represents a detected grid line in the blueprint"""
+    orientation: str  # 'horizontal' or 'vertical'
+    position: float   # x-coordinate for vertical, y-coordinate for horizontal
+    start_point: Tuple[float, float]
+    end_point: Tuple[float, float]
+    confidence: float
+    label: Optional[str] = None
+
+
 class PDFService:
-    """Production-grade PDF processing with proper error handling, memory management, and SSE event support"""
+    """Production-grade PDF processing with enhanced grid detection, proper error handling, memory management, and SSE event support"""
     
     def __init__(self, settings: AppSettings):
         if not settings:
@@ -102,13 +115,19 @@ class PDFService:
             'coordinate': re.compile(r'(?:@|AT)\s*([A-Z]+)[-/]([0-9]+)', re.IGNORECASE)
         }
         
-        logger.info("✅ PDFService initialized (Production Mode with SSE Support)")
+        # Visual grid detection settings
+        self.min_line_length = 100  # Minimum pixels for a line to be considered a grid line
+        self.line_gap_tolerance = 50  # Maximum gap in pixels to consider lines as continuous
+        self.grid_line_thickness_range = (0.5, 3)  # Expected line thickness in pixels
+        
+        logger.info("✅ PDFService initialized (Production Mode with Enhanced Grid Detection)")
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ DPI: Storage={self.storage_dpi}, AI={self.ai_image_dpi}")
         logger.info(f"   📦 Batch size: {self.batch_size} pages")
         logger.info(f"   🔒 Thread safety: Enabled")
         logger.info(f"   💾 Memory management: Active")
         logger.info(f"   📡 SSE Events: Supported")
+        logger.info(f"   🎯 Visual Grid Detection: Enabled")
 
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService,
@@ -348,10 +367,10 @@ class PDFService:
                 tables_found = table_result['found']
                 tables_extracted = table_result['extracted']
             
-            # Grid detection
+            # Enhanced grid detection with visual analysis
             grid_system = None
             if self.enable_grid_detection:
-                grid_system = self._detect_grid_patterns(page, page_text, page_actual)
+                grid_system = await self._detect_grid_patterns_enhanced(page, page_text, page_actual)
             
             # Generate images (using JPEG as per the working version)
             await self._generate_and_upload_page_images_safe(
@@ -378,7 +397,8 @@ class PDFService:
                 'sheet_number': page_analysis.get('sheet_number'),
                 'scale': page_analysis.get('scale'),
                 'key_elements': page_analysis.get('key_elements', []),
-                'has_grid': grid_system is not None
+                'has_grid': grid_system is not None,
+                'grid_confidence': grid_system.confidence if grid_system else 0.0
             }
             
             # Format text for context
@@ -397,7 +417,8 @@ class PDFService:
                     "estimated_time": estimated_time,
                     "has_text": page_metadata['has_text'],
                     "has_tables": page_metadata['has_tables'],
-                    "has_grid": page_metadata['has_grid']
+                    "has_grid": page_metadata['has_grid'],
+                    "grid_confidence": page_metadata['grid_confidence']
                 })
             
             # Clean up page
@@ -418,6 +439,402 @@ class PDFService:
         except Exception as e:
             logger.error(f"Error processing page {page_num + 1}: {e}")
             raise
+
+    async def _detect_grid_patterns_enhanced(self, page: fitz.Page, page_text: str, page_num: int) -> Optional[GridSystem]:
+        """
+        Enhanced grid detection that analyzes actual visual grid lines
+        """
+        try:
+            # First try visual detection
+            visual_grid = await self._detect_visual_grid(page, page_num)
+            
+            if visual_grid and visual_grid.confidence > 0.7:
+                logger.info(f"✅ High confidence visual grid detected on page {page_num}")
+                return visual_grid
+            
+            # Fall back to text-based detection if visual detection fails or has low confidence
+            text_grid = self._detect_grid_patterns(page, page_text, page_num)
+            
+            # Merge results if both detected something
+            if visual_grid and text_grid:
+                # Prefer visual grid coordinates but use text labels if better
+                if len(text_grid.x_labels) > len(visual_grid.x_labels):
+                    visual_grid.x_labels = text_grid.x_labels
+                if len(text_grid.y_labels) > len(visual_grid.y_labels):
+                    visual_grid.y_labels = text_grid.y_labels
+                
+                visual_grid.scale = text_grid.scale or visual_grid.scale
+                return visual_grid
+            
+            return visual_grid or text_grid
+            
+        except Exception as e:
+            logger.error(f"Enhanced grid detection failed: {e}")
+            # Fall back to original method
+            return self._detect_grid_patterns(page, page_text, page_num)
+
+    async def _detect_visual_grid(self, page: fitz.Page, page_num: int) -> Optional[GridSystem]:
+        """
+        Detect actual grid lines from the visual content of the page
+        """
+        try:
+            # Extract page as image for analysis
+            mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better line detection
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            
+            # Convert to numpy array
+            img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(img_data, cv2.COLOR_RGB2GRAY)
+            
+            # Detect lines using Hough transform
+            horizontal_lines = self._detect_horizontal_lines(gray)
+            vertical_lines = self._detect_vertical_lines(gray)
+            
+            # Clean up
+            pix = None
+            
+            if not horizontal_lines and not vertical_lines:
+                logger.info(f"No grid lines detected on page {page_num}")
+                return None
+            
+            # Extract text for label mapping
+            page_text = page.get_text()
+            
+            # Map grid labels to detected lines
+            grid_system = self._create_grid_system_from_lines(
+                horizontal_lines, 
+                vertical_lines, 
+                page_text, 
+                page_num,
+                page.rect.width,
+                page.rect.height
+            )
+            
+            return grid_system
+            
+        except Exception as e:
+            logger.error(f"Visual grid detection failed for page {page_num}: {e}")
+            return None
+
+    def _detect_horizontal_lines(self, image: np.ndarray) -> List[VisualGridLine]:
+        """Detect horizontal grid lines"""
+        lines = []
+        
+        # Apply edge detection
+        edges = cv2.Canny(image, 50, 150, apertureSize=3)
+        
+        # Detect lines using Probabilistic Hough Transform
+        detected_lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi/180,
+            threshold=100,
+            minLineLength=self.min_line_length,
+            maxLineGap=self.line_gap_tolerance
+        )
+        
+        if detected_lines is None:
+            return lines
+        
+        # Filter and group horizontal lines
+        horizontal_positions = {}
+        
+        for line in detected_lines:
+            x1, y1, x2, y2 = line[0]
+            
+            # Check if line is horizontal (within 5 degrees)
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if angle < 5 or angle > 175:
+                # Group lines that are close together
+                y_avg = (y1 + y2) / 2
+                
+                # Find nearby line group
+                found_group = False
+                for y_pos in list(horizontal_positions.keys()):
+                    if abs(y_pos - y_avg) < 10:  # Within 10 pixels
+                        horizontal_positions[y_pos].append((x1, y1, x2, y2))
+                        found_group = True
+                        break
+                
+                if not found_group:
+                    horizontal_positions[y_avg] = [(x1, y1, x2, y2)]
+        
+        # Create VisualGridLine objects for each group
+        for y_pos, line_segments in horizontal_positions.items():
+            # Find the extent of all segments
+            min_x = min(min(seg[0], seg[2]) for seg in line_segments)
+            max_x = max(max(seg[0], seg[2]) for seg in line_segments)
+            
+            # Calculate total length vs gaps to determine confidence
+            total_length = sum(abs(seg[2] - seg[0]) for seg in line_segments)
+            span_length = max_x - min_x
+            confidence = total_length / span_length if span_length > 0 else 0
+            
+            if confidence > 0.5:  # At least 50% coverage
+                lines.append(VisualGridLine(
+                    orientation='horizontal',
+                    position=y_pos / 2,  # Adjust for 2x zoom
+                    start_point=(min_x / 2, y_pos / 2),
+                    end_point=(max_x / 2, y_pos / 2),
+                    confidence=confidence
+                ))
+        
+        return sorted(lines, key=lambda l: l.position)
+
+    def _detect_vertical_lines(self, image: np.ndarray) -> List[VisualGridLine]:
+        """Detect vertical grid lines"""
+        lines = []
+        
+        # Apply edge detection
+        edges = cv2.Canny(image, 50, 150, apertureSize=3)
+        
+        # Detect lines using Probabilistic Hough Transform
+        detected_lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi/180,
+            threshold=100,
+            minLineLength=self.min_line_length,
+            maxLineGap=self.line_gap_tolerance
+        )
+        
+        if detected_lines is None:
+            return lines
+        
+        # Filter and group vertical lines
+        vertical_positions = {}
+        
+        for line in detected_lines:
+            x1, y1, x2, y2 = line[0]
+            
+            # Check if line is vertical (within 5 degrees of 90)
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if 85 < angle < 95:
+                # Group lines that are close together
+                x_avg = (x1 + x2) / 2
+                
+                # Find nearby line group
+                found_group = False
+                for x_pos in list(vertical_positions.keys()):
+                    if abs(x_pos - x_avg) < 10:  # Within 10 pixels
+                        vertical_positions[x_pos].append((x1, y1, x2, y2))
+                        found_group = True
+                        break
+                
+                if not found_group:
+                    vertical_positions[x_avg] = [(x1, y1, x2, y2)]
+        
+        # Create VisualGridLine objects for each group
+        for x_pos, line_segments in vertical_positions.items():
+            # Find the extent of all segments
+            min_y = min(min(seg[1], seg[3]) for seg in line_segments)
+            max_y = max(max(seg[1], seg[3]) for seg in line_segments)
+            
+            # Calculate total length vs gaps to determine confidence
+            total_length = sum(abs(seg[3] - seg[1]) for seg in line_segments)
+            span_length = max_y - min_y
+            confidence = total_length / span_length if span_length > 0 else 0
+            
+            if confidence > 0.5:  # At least 50% coverage
+                lines.append(VisualGridLine(
+                    orientation='vertical',
+                    position=x_pos / 2,  # Adjust for 2x zoom
+                    start_point=(x_pos / 2, min_y / 2),
+                    end_point=(x_pos / 2, max_y / 2),
+                    confidence=confidence
+                ))
+        
+        return sorted(lines, key=lambda l: l.position)
+
+    def _create_grid_system_from_lines(
+        self, 
+        horizontal_lines: List[VisualGridLine],
+        vertical_lines: List[VisualGridLine],
+        page_text: str,
+        page_num: int,
+        page_width: float,
+        page_height: float
+    ) -> GridSystem:
+        """Create GridSystem from detected lines and text labels"""
+        
+        # Extract grid labels from text
+        x_labels, y_labels = self._extract_grid_labels_from_text(page_text)
+        
+        # Create grid system
+        grid = GridSystem(page_number=page_num)
+        
+        # Map vertical lines to X coordinates/labels
+        if vertical_lines:
+            # Try to match labels to lines
+            if len(x_labels) == len(vertical_lines):
+                # Direct mapping
+                for i, (label, line) in enumerate(zip(sorted(x_labels), vertical_lines)):
+                    grid.x_labels.append(label)
+                    grid.x_coordinates[label] = int(line.position)
+                    grid.x_lines.append(int(line.position))
+            else:
+                # Use line positions directly
+                for i, line in enumerate(vertical_lines):
+                    label = chr(65 + i) if i < 26 else f"X{i}"  # A, B, C... then X26, X27...
+                    grid.x_labels.append(label)
+                    grid.x_coordinates[label] = int(line.position)
+                    grid.x_lines.append(int(line.position))
+            
+            # Calculate average cell width
+            if len(vertical_lines) > 1:
+                spacings = [vertical_lines[i+1].position - vertical_lines[i].position 
+                           for i in range(len(vertical_lines)-1)]
+                grid.cell_width = int(sum(spacings) / len(spacings))
+            
+            grid.origin_x = int(vertical_lines[0].position) if vertical_lines else 0
+        
+        # Map horizontal lines to Y coordinates/labels  
+        if horizontal_lines:
+            # Try to match labels to lines
+            if len(y_labels) == len(horizontal_lines):
+                # Direct mapping
+                for i, (label, line) in enumerate(zip(sorted(y_labels, key=lambda x: int(x) if x.isdigit() else 0), horizontal_lines)):
+                    grid.y_labels.append(label)
+                    grid.y_coordinates[label] = int(line.position)
+                    grid.y_lines.append(int(line.position))
+            else:
+                # Use line positions directly
+                for i, line in enumerate(horizontal_lines):
+                    label = str(i + 1)
+                    grid.y_labels.append(label)
+                    grid.y_coordinates[label] = int(line.position)
+                    grid.y_lines.append(int(line.position))
+            
+            # Calculate average cell height
+            if len(horizontal_lines) > 1:
+                spacings = [horizontal_lines[i+1].position - horizontal_lines[i].position 
+                           for i in range(len(horizontal_lines)-1)]
+                grid.cell_height = int(sum(spacings) / len(spacings))
+            
+            grid.origin_y = int(horizontal_lines[0].position) if horizontal_lines else 0
+        
+        # Calculate confidence based on line detection quality
+        avg_confidence = 0
+        if vertical_lines:
+            avg_confidence += sum(l.confidence for l in vertical_lines) / len(vertical_lines) * 0.5
+        if horizontal_lines:
+            avg_confidence += sum(l.confidence for l in horizontal_lines) / len(horizontal_lines) * 0.5
+        
+        grid.confidence = avg_confidence
+        
+        # Detect scale if present
+        grid.scale = self._extract_scale_from_text(page_text)
+        
+        logger.info(f"Created grid system: {len(grid.x_labels)}x{len(grid.y_labels)} with confidence {grid.confidence:.2f}")
+        
+        return grid
+
+    def _extract_grid_labels_from_text(self, text: str) -> Tuple[List[str], List[str]]:
+        """Extract grid labels from page text"""
+        x_labels = set()
+        y_labels = set()
+        
+        # Search for patterns
+        search_text = text[:10000] if len(text) > 10000 else text
+        
+        for pattern_name, pattern in self.grid_patterns.items():
+            for match in pattern.finditer(search_text):
+                if pattern_name in ['column', 'column_line']:
+                    x_labels.add(match.group(1).upper())
+                elif pattern_name == 'row':
+                    y_labels.add(match.group(1))
+                elif pattern_name == 'grid_ref' or pattern_name == 'coordinate':
+                    x_labels.add(match.group(1).upper())
+                    y_labels.add(match.group(2))
+                elif pattern_name in ['grid_line', 'axis']:
+                    ref = match.group(1)
+                    if ref.isalpha():
+                        x_labels.add(ref.upper())
+                    elif ref.isdigit():
+                        y_labels.add(ref)
+        
+        return sorted(list(x_labels)), sorted(list(y_labels), key=lambda x: int(x) if x.isdigit() else 0)
+
+    def _extract_scale_from_text(self, text: str) -> Optional[str]:
+        """Extract scale information from text"""
+        scale_patterns = [
+            re.compile(r'SCALE[\s:]+([0-9/]+"\s*=\s*[0-9\'-]+)', re.IGNORECASE),
+            re.compile(r'SCALE[\s:]+([0-9]+:[0-9]+)', re.IGNORECASE),
+            re.compile(r'([0-9/]+"\s*=\s*[0-9\'-]+)', re.IGNORECASE),
+        ]
+        
+        for pattern in scale_patterns:
+            match = pattern.search(text[:5000])  # Search in first 5000 chars
+            if match:
+                return match.group(1)
+        
+        return None
+
+    def _detect_grid_patterns(self, page: fitz.Page, page_text: str, page_num: int) -> Optional[GridSystem]:
+        """Original text-based grid detection as fallback"""
+        try:
+            # Quick text-based detection
+            x_refs = set()
+            y_refs = set()
+            
+            # Search in first 10000 chars for performance
+            search_text = page_text[:10000] if len(page_text) > 10000 else page_text
+            
+            # Look for grid patterns
+            for pattern_name, pattern in self.grid_patterns.items():
+                matches = list(pattern.finditer(search_text))[:20]  # Limit matches
+                for match in matches:
+                    if pattern_name == 'grid_ref':
+                        x_refs.add(match.group(1))
+                        y_refs.add(match.group(2))
+                    elif pattern_name == 'coordinate':
+                        x_refs.add(match.group(1))
+                        y_refs.add(match.group(2))
+                    elif pattern_name in ['column_line', 'grid_line', 'axis', 'column']:
+                        ref = match.group(1)
+                        if ref.isalpha():
+                            x_refs.add(ref)
+                        elif ref.isdigit():
+                            y_refs.add(ref)
+                    elif pattern_name == 'row':
+                        y_refs.add(match.group(1))
+            
+            if not x_refs and not y_refs:
+                return None
+            
+            # Create grid system with validation
+            grid = GridSystem(
+                page_number=page_num,
+                x_labels=sorted(list(x_refs))[:20],  # Limit to 20 columns
+                y_labels=sorted(list(y_refs), key=lambda x: int(x) if x.isdigit() else 0)[:30],  # Limit to 30 rows
+                confidence=0.5 if x_refs and y_refs else 0.3
+            )
+            
+            # Estimate positions (fallback when visual detection not available)
+            page_width = page.rect.width
+            page_height = page.rect.height
+            
+            if grid.x_labels:
+                spacing = page_width / (len(grid.x_labels) + 1)
+                for i, label in enumerate(grid.x_labels):
+                    grid.x_coordinates[label] = int((i + 1) * spacing)
+                grid.cell_width = int(spacing)
+            
+            if grid.y_labels:
+                spacing = page_height / (len(grid.y_labels) + 1)
+                for i, label in enumerate(grid.y_labels):
+                    grid.y_coordinates[label] = int((i + 1) * spacing)
+                grid.cell_height = int(spacing)
+            
+            logger.info(f"🎯 Text-based grid detected on page {page_num}: {len(grid.x_labels)}x{len(grid.y_labels)}")
+            
+            return grid
+            
+        except Exception as e:
+            logger.error(f"Grid detection failed: {e}")
+            return None
 
     async def _extract_tables_safe(self, page: fitz.Page) -> Dict[str, Any]:
         """Safely extract ALL tables from page with robust error handling"""
@@ -582,6 +999,8 @@ class PDFService:
         
         if grid_system:
             formatted_text += f"Grid: {len(grid_system.x_labels)}x{len(grid_system.y_labels)}\n"
+            if grid_system.confidence > 0:
+                formatted_text += f"Grid Confidence: {grid_system.confidence:.2f}\n"
         
         if page_analysis.get('scale'):
             formatted_text += f"Scale: {page_analysis['scale']}\n"
@@ -666,70 +1085,6 @@ class PDFService:
                 img.close()
             if 'output' in locals():
                 output.close()
-
-    def _detect_grid_patterns(self, page: fitz.Page, page_text: str, page_num: int) -> Optional[GridSystem]:
-        """Detect grid system from page with validation"""
-        try:
-            # Quick text-based detection
-            x_refs = set()
-            y_refs = set()
-            
-            # Search in first 10000 chars for performance
-            search_text = page_text[:10000] if len(page_text) > 10000 else page_text
-            
-            # Look for grid patterns
-            for pattern_name, pattern in self.grid_patterns.items():
-                matches = list(pattern.finditer(search_text))[:20]  # Limit matches
-                for match in matches:
-                    if pattern_name == 'grid_ref':
-                        x_refs.add(match.group(1))
-                        y_refs.add(match.group(2))
-                    elif pattern_name == 'coordinate':
-                        x_refs.add(match.group(1))
-                        y_refs.add(match.group(2))
-                    elif pattern_name in ['column_line', 'grid_line', 'axis', 'column']:
-                        ref = match.group(1)
-                        if ref.isalpha():
-                            x_refs.add(ref)
-                        elif ref.isdigit():
-                            y_refs.add(ref)
-                    elif pattern_name == 'row':
-                        y_refs.add(match.group(1))
-            
-            if not x_refs and not y_refs:
-                return None
-            
-            # Create grid system with validation
-            grid = GridSystem(
-                page_number=page_num,
-                x_labels=sorted(list(x_refs))[:20],  # Limit to 20 columns
-                y_labels=sorted(list(y_refs), key=lambda x: int(x) if x.isdigit() else 0)[:30],  # Limit to 30 rows
-                confidence=0.5 if x_refs and y_refs else 0.3
-            )
-            
-            # Estimate positions
-            page_width = page.rect.width
-            page_height = page.rect.height
-            
-            if grid.x_labels:
-                spacing = page_width / (len(grid.x_labels) + 1)
-                for i, label in enumerate(grid.x_labels):
-                    grid.x_coordinates[label] = int((i + 1) * spacing)
-                grid.cell_width = int(spacing)
-            
-            if grid.y_labels:
-                spacing = page_height / (len(grid.y_labels) + 1)
-                for i, label in enumerate(grid.y_labels):
-                    grid.y_coordinates[label] = int((i + 1) * spacing)
-                grid.cell_height = int(spacing)
-            
-            logger.info(f"🎯 Grid detected on page {page_num}: {len(grid.x_labels)}x{len(grid.y_labels)}")
-            
-            return grid
-            
-        except Exception as e:
-            logger.error(f"Grid detection failed: {e}")
-            return None
 
     def _analyze_page_content(self, text: str, page_num: int) -> Dict[str, Any]:
         """Analyze page content with enhanced pattern matching"""
@@ -846,7 +1201,8 @@ class PDFService:
                         "resource_type": "grid_systems",
                         "resource_id": "grid_systems",
                         "metadata": {
-                            "grid_count": len(all_grid_systems)
+                            "grid_count": len(all_grid_systems),
+                            "pages_with_grids": list(all_grid_systems.keys())
                         }
                     })
             
@@ -894,6 +1250,7 @@ class PDFService:
                 'drawing_types': defaultdict(list),
                 'sheet_numbers': {},
                 'grid_pages': [],
+                'grid_confidence': {},
                 'table_summary': {
                     'total_tables_found': 0,
                     'total_tables_extracted': 0,
@@ -909,6 +1266,7 @@ class PDFService:
                     'drawing_type': page_detail.get('drawing_type'),
                     'sheet_number': page_detail.get('sheet_number'),
                     'has_grid': page_detail.get('has_grid', False),
+                    'grid_confidence': page_detail.get('grid_confidence', 0.0),
                     'has_tables': page_detail.get('has_tables', False),
                     'table_count': page_detail.get('table_count', 0)
                 }
@@ -921,6 +1279,7 @@ class PDFService:
                 
                 if page_detail.get('has_grid'):
                     index['grid_pages'].append(page_num)
+                    index['grid_confidence'][page_num] = page_detail.get('grid_confidence', 0.0)
                 
                 # Track table information
                 if page_detail.get('has_tables'):
@@ -971,20 +1330,29 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "4.0.0-PRODUCTION-SSE",
-            "mode": "production_grade_with_sse",
+            "version": "5.0.0-PRODUCTION-ENHANCED-GRID",
+            "mode": "production_grade_with_visual_grid_detection",
             "capabilities": {
                 "max_pages": self.max_pages,
                 "batch_size": self.batch_size,
                 "full_text_extraction": True,
                 "table_extraction": True,
-                "unlimited_tables": True,  # Added to show unlimited capability
+                "unlimited_tables": True,
                 "grid_detection": True,
+                "visual_grid_detection": True,  # NEW
+                "grid_confidence_scoring": True,  # NEW
                 "multi_resolution_images": True,
                 "ai_optimized": True,
                 "thread_safe": True,
                 "memory_managed": True,
-                "sse_events": True  # New capability
+                "sse_events": True
+            },
+            "grid_detection": {
+                "text_based": True,
+                "visual_based": True,
+                "line_detection": "Hough Transform",
+                "confidence_scoring": True,
+                "fallback_support": True
             },
             "security": {
                 "input_validation": True,
