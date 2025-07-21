@@ -275,11 +275,19 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ AI Service failed: {e}")
             logger.error(traceback.format_exc())
         
-        # 4. Initialize Session Service
+        # 4. Initialize Session Service - FIXED INITIALIZATION
         initialization_status["session"]["status"] = "initializing"
         try:
-            session_service = SessionService(settings, app.state.storage_service)
-            await session_service.start_background_cleanup()
+            # Initialize with only settings
+            session_service = SessionService(settings)
+            
+            # Set storage service if available
+            if app.state.storage_service:
+                session_service.set_storage_service(app.state.storage_service)
+            
+            # Start the service
+            await session_service.start()
+            
             app.state.session_service = session_service
             initialization_status["session"]["status"] = "success"
             logger.info("✅ Session Service initialized successfully")
@@ -350,7 +358,7 @@ async def lifespan(app: FastAPI):
         
         if hasattr(app.state, 'session_service') and app.state.session_service:
             try:
-                await app.state.session_service.shutdown()
+                await app.state.session_service.stop()
                 logger.info("✅ Session Service shutdown complete")
             except Exception as e:
                 logger.error(f"❌ Session Service shutdown error: {e}")
@@ -640,6 +648,23 @@ async def get_configuration():
 @app.get("/debug/error-test", tags=["Debug"])
 async def test_error_handling():
     raise ValueError("This is a test error to verify verbose error handling is working correctly!")
+
+@app.get("/debug/routes", tags=["Debug"])
+async def list_routes():
+    """List all registered routes for debugging"""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "path"):
+            routes.append({
+                "path": route.path,
+                "methods": list(route.methods) if hasattr(route, "methods") else None,
+                "name": route.name if hasattr(route, "name") else None,
+                "endpoint": route.endpoint.__name__ if hasattr(route, "endpoint") and hasattr(route.endpoint, "__name__") else None
+            })
+    return {
+        "total_routes": len(routes),
+        "routes": sorted(routes, key=lambda x: x["path"])
+    }
 
 # --- Application Entry Point ---
 if __name__ == "__main__":

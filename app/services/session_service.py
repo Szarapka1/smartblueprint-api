@@ -147,7 +147,7 @@ class SessionService:
     """Service for managing document sessions with persistent storage."""
     
     def __init__(self, settings: AppSettings):
-        """Initialize session service."""
+        """Initialize session service with settings only."""
         if not settings:
             raise ValueError("AppSettings instance is required")
         
@@ -202,6 +202,15 @@ class SessionService:
             await self._save_sessions_to_storage()
         
         logger.info("✅ Session service stopped")
+    
+    # Legacy method names for backward compatibility
+    async def start_background_cleanup(self):
+        """Legacy method name - redirects to start()"""
+        await self.start()
+    
+    async def shutdown(self):
+        """Legacy method name - redirects to stop()"""
+        await self.stop()
     
     async def create_session(self, document_id: str, original_filename: str) -> DocumentSession:
         """Create a new document session."""
@@ -502,3 +511,7 @@ class SessionService:
             "session_timeout_hours": self.session_timeout_hours,
             "highlight_duration_hours": self.highlight_session_duration_hours
         }
+    
+    def is_running(self) -> bool:
+        """Check if the service is running."""
+        return self._cleanup_task is not None and not self._cleanup_task.done()
