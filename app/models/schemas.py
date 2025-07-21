@@ -451,9 +451,30 @@ class Annotation(AnnotationBase):
     related_trades: List[str] = Field(default_factory=list)
     coordination_required: bool = Field(False)
 
-class AnnotationCreate(AnnotationBase):
-    """Create a new annotation - inherits all fields from AnnotationBase"""
-    pass
+class AnnotationCreate(BaseModel):
+    """Create a new annotation"""
+    annotation_type: str
+    page_number: int = Field(..., ge=1)
+    author: str
+    is_private: bool = Field(True)
+    
+    # Common fields
+    text: Optional[str] = Field(None)
+    
+    # Fields for pen annotations
+    points: Optional[List[Dict[str, float]]] = Field(None)
+    color: Optional[str] = Field(None)
+    line_width: Optional[int] = Field(None)
+    
+    # Fields for note annotations
+    x: Optional[float] = Field(None)
+    y: Optional[float] = Field(None)
+    note_type: Optional[str] = Field(None)
+    
+    # Fields for highlight annotations
+    element_id: Optional[str] = Field(None)
+    grid_reference: Optional[str] = Field(None)
+    confidence: Optional[float] = Field(None)
 
 class AnnotationUpdate(BaseModel):
     """Update an existing annotation"""
@@ -473,11 +494,48 @@ class AnnotationResponse(BaseModel):
     annotation_id: str
     document_id: str
     page_number: int
-    element_type: str
-    grid_reference: str
+    annotation_type: str
+    author: str
+    timestamp: str
+    is_private: bool
+    published: bool
+    
+    # Optional fields based on type
+    element_type: Optional[str] = None
+    grid_reference: Optional[str] = None
     query_session_id: Optional[str] = None
-    created_at: str
+    created_at: Optional[str] = None
     assigned_trade: Optional[str] = None
+    
+    # Pen-specific
+    points: Optional[List[Dict[str, float]]] = None
+    color: Optional[str] = None
+    lineWidth: Optional[int] = None
+    
+    # Note-specific
+    x: Optional[float] = None
+    y: Optional[float] = None
+    text: Optional[str] = None
+    note_type: Optional[str] = None
+    
+    # Highlight-specific
+    element_id: Optional[str] = None
+    confidence: Optional[float] = None
+
+# --- MISSING MODELS ADDED ---
+
+class AnnotationListResponse(BaseModel):
+    """Response for listing annotations"""
+    document_id: str
+    annotations: List[Dict[str, Any]]  # List of annotation objects
+    highlights: List[Dict[str, Any]] = Field(default_factory=list)  # AI highlights
+    total_count: int
+    page_filter: Optional[int] = None
+    type_filter: Optional[str] = None
+
+class BulkAnnotationRequest(BaseModel):
+    """Request for creating multiple annotations at once"""
+    annotations: List[AnnotationCreate]
 
 # --- Document Management Models ---
 
@@ -648,6 +706,7 @@ __all__ = [
     
     # Annotation Models
     "Annotation", "AnnotationBase", "AnnotationCreate", "AnnotationUpdate",
+    "AnnotationListResponse", "BulkAnnotationRequest",
     
     # Trade Models
     "TradeConflict",
