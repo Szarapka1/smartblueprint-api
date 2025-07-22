@@ -2,7 +2,8 @@
 
 import logging
 import asyncio
-from typing import List, Optional, Dict, Any, AsyncGenerator
+import json
+from typing import List, Optional, Dict, Any, AsyncGenerator, Tuple
 from app.core.config import get_settings
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
@@ -131,6 +132,8 @@ class StorageService:
                 upload_options['content_settings'] = ContentSettings(content_type='image/jpeg')
             elif blob_name.lower().endswith('.pdf'):
                 upload_options['content_settings'] = ContentSettings(content_type='application/pdf')
+            elif blob_name.lower().endswith('.json'):
+                upload_options['content_settings'] = ContentSettings(content_type='application/json')
             
             # For large files (>4MB), use optimized upload settings
             if len(data) > 4 * 1024 * 1024:
@@ -192,6 +195,29 @@ class StorageService:
                 except UnicodeDecodeError:
                     continue
             raise ValueError(f"Could not decode blob '{blob_name}' with any supported encoding")
+
+    async def download_blob_as_json(self, container_name: str, blob_name: str) -> Dict[str, Any]:
+        """Download blob content and parse as JSON"""
+        try:
+            # Download as text
+            text_content = await self.download_blob_as_text(container_name, blob_name)
+            
+            # Parse JSON
+            return json.loads(text_content)
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from blob '{blob_name}': {e}")
+            # Return empty dict for missing/invalid JSON files to prevent crashes
+            logger.warning(f"Returning empty dict for invalid JSON in '{blob_name}'")
+            return {}
+        except FileNotFoundError:
+            # Return empty dict for missing files to prevent crashes
+            logger.warning(f"Blob '{blob_name}' not found, returning empty dict")
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to download JSON blob '{blob_name}': {e}")
+            # Return empty dict to prevent crashes
+            return {}
 
     async def list_blobs(self, container_name: str, prefix: str = "", 
                         suffix: str = "") -> List[str]:
@@ -279,6 +305,35 @@ class StorageService:
                 logger.error(f"❌ Failed to delete '{blob_name}': {e}")
                 raise RuntimeError(f"Blob deletion failed: {e}")
 
+    async def delete_blobs_with_prefix(self, container_name: str, prefix: str) -> int:
+        """Delete all blobs with a given prefix"""
+        if not prefix:
+            raise ValueError("Prefix cannot be empty for bulk deletion")
+        
+        try:
+            # List all blobs with prefix
+            blobs_to_delete = await self.list_blobs(container_name, prefix=prefix)
+            
+            if not blobs_to_delete:
+                logger.info(f"No blobs found with prefix '{prefix}'")
+                return 0
+            
+            # Delete each blob
+            deleted_count = 0
+            for blob_name in blobs_to_delete:
+                try:
+                    if await self.delete_blob(container_name, blob_name):
+                        deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete blob '{blob_name}': {e}")
+            
+            logger.info(f"✅ Deleted {deleted_count}/{len(blobs_to_delete)} blobs with prefix '{prefix}'")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"Failed to delete blobs with prefix '{prefix}': {e}")
+            raise RuntimeError(f"Bulk deletion failed: {e}")
+
     async def batch_download_blobs(self, container_name: str, blob_names: List[str], 
                                   max_concurrent: int = 5) -> Dict[str, bytes]:
         """Download multiple blobs in parallel with validation"""
@@ -297,7 +352,7 @@ class StorageService:
         max_concurrent = min(max_concurrent, 10)
         semaphore = asyncio.Semaphore(max_concurrent)
         
-        async def download_with_semaphore(blob_name: str) -> tuple[str, Optional[bytes]]:
+        async def download_with_semaphore(blob_name: str) -> Tuple[str, Optional[bytes]]:
             async with semaphore:
                 try:
                     data = await self.download_blob_as_bytes(container_name, blob_name)
@@ -344,7 +399,7 @@ class StorageService:
         max_concurrent = min(max_concurrent, 10)
         semaphore = asyncio.Semaphore(max_concurrent)
         
-        async def upload_with_semaphore(blob_name: str, data: bytes) -> tuple[str, bool]:
+        async def upload_with_semaphore(blob_name: str, data: bytes) -> Tuple[str, bool]:
             async with semaphore:
                 try:
                     await self.upload_file(container_name, blob_name, data)
@@ -477,7 +532,7 @@ class StorageService:
             },
             "supported_formats": {
                 "documents": ["pdf"],
-                "images": ["png", "jpg", "jpeg"],  # Optimized for these formats
+                "images": ["png", "jpg", "jpeg"],
                 "metadata": ["json", "txt"]
             },
             "has_connection_string": bool(self.settings.AZURE_STORAGE_CONNECTION_STRING),
