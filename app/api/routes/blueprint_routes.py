@@ -1,8 +1,9 @@
-# app/api/routes/blueprint_routes.py - WRITE OPERATIONS WITH PRODUCTION SSE SUPPORT
+# app/api/routes/blueprint_routes.py - WRITE OPERATIONS WITH PRODUCTION SSE SUPPORT (FIXED)
 
 """
 Blueprint Write Operations - Handles document upload, processing, chat, and annotations
 Production-ready Server-Sent Events (SSE) implementation with robust error handling
+FIXED VERSION: Includes all necessary debugging and error handling
 """
 
 import traceback
@@ -494,9 +495,11 @@ async def process_pdf_async(
     """
     processing_start_time = time.time()
     
+    logger.info("="*50)
+    logger.info(f"🔄 ASYNC PROCESSING STARTED: {session_id}")
+    logger.info("="*50)
+    
     try:
-        logger.info(f"🔄 Starting async processing for document: {session_id}")
-        
         # Initial processing status
         processing_status = {
             'document_id': session_id,
@@ -508,8 +511,11 @@ async def process_pdf_async(
             'total_pages': 0,
             'current_batch': 0,
             'total_batches': 0,
-            'sse_enabled': settings.ENABLE_SSE
+            'sse_enabled': settings.ENABLE_SSE,
+            'processing_stage': 'initializing'
         }
+        
+        logger.info("📝 Updating status to 'processing'...")
         
         await storage_service.upload_file(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -518,6 +524,7 @@ async def process_pdf_async(
         )
         
         # Emit initial status event
+        logger.info("📡 Emitting SSE event: processing_started")
         await sse_manager.emit_event(
             session_id,
             SSEEventType.status_update,
@@ -532,11 +539,14 @@ async def process_pdf_async(
         # Define robust event callback for PDF service
         async def processing_event_callback(event_type: str, event_data: Dict[str, Any]):
             """Callback to emit SSE events during processing"""
+            logger.debug(f"📡 Event callback: {event_type} - {event_data}")
+            
             try:
                 if event_type == "page_processed":
                     # Update status
                     processing_status['pages_processed'] = event_data.get('page_number', 0)
                     processing_status['total_pages'] = event_data.get('total_pages', 0)
+                    processing_status['processing_stage'] = f"processing_page_{event_data.get('page_number', 0)}"
                     
                     # Save status
                     await storage_service.upload_file(
@@ -557,10 +567,14 @@ async def process_pdf_async(
                             estimated_time=event_data.get('estimated_time')
                         ).dict()
                     )
+                    
+                    logger.info(f"✅ Page {event_data['page_number']}/{event_data['total_pages']} processed")
                 
                 elif event_type == "resource_ready":
                     resource_type = event_data.get('resource_type', 'unknown')
                     page_number = event_data.get('page_number')
+                    
+                    logger.info(f"📦 Resource ready: {resource_type} for page {page_number}")
                     
                     # Build resource URL
                     url = None
@@ -588,6 +602,8 @@ async def process_pdf_async(
                     )
                 
                 elif event_type == "batch_complete":
+                    logger.info(f"📦 Batch {event_data['batch_number']}/{event_data['total_batches']} complete")
+                    
                     await sse_manager.emit_event(
                         session_id,
                         SSEEventType.status_update,
@@ -600,6 +616,8 @@ async def process_pdf_async(
                     )
                 
                 elif event_type == "extraction_complete":
+                    logger.info("📝 Text extraction completed")
+                    
                     await sse_manager.emit_event(
                         session_id,
                         SSEEventType.status_update,
@@ -616,12 +634,16 @@ async def process_pdf_async(
                 logger.error(traceback.format_exc())
         
         # Process the PDF with event callback
+        logger.info("🚀 Calling pdf_service.process_and_cache_pdf...")
+        
         await pdf_service.process_and_cache_pdf(
             session_id=session_id,
             pdf_bytes=contents,
             storage_service=storage_service,
             event_callback=processing_event_callback if settings.ENABLE_SSE else None
         )
+        
+        logger.info("✅ PDF processing completed successfully")
         
         # Calculate processing time
         processing_time = time.time() - processing_start_time
@@ -630,6 +652,7 @@ async def process_pdf_async(
         processing_status['status'] = 'ready'
         processing_status['completed_at'] = datetime.utcnow().isoformat() + 'Z'
         processing_status['processing_time_seconds'] = round(processing_time, 2)
+        processing_status['processing_stage'] = 'completed'
         
         # Get final metadata
         try:
@@ -641,8 +664,13 @@ async def process_pdf_async(
             processing_status['pages_processed'] = metadata.get('page_count', 0)
             processing_status['total_pages'] = metadata.get('total_pages', 0)
             processing_status['metadata'] = metadata
+            
+            logger.info(f"📊 Metadata loaded: {metadata.get('page_count', 0)} pages")
+            
         except Exception as e:
             logger.warning(f"Could not load final metadata: {e}")
+        
+        logger.info("📝 Updating final status to 'ready'...")
         
         await storage_service.upload_file(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
@@ -651,6 +679,7 @@ async def process_pdf_async(
         )
         
         # Emit completion event
+        logger.info("📡 Emitting SSE event: processing_complete")
         await sse_manager.emit_event(
             session_id,
             SSEEventType.processing_complete,
@@ -680,14 +709,22 @@ async def process_pdf_async(
                         'processing_time_seconds': processing_time
                     }
                 )
+                logger.info("✅ Session metadata updated")
             except Exception as e:
                 logger.warning(f"Session update failed: {e}")
         
-        logger.info(f"✅ Async processing completed for: {session_id} in {processing_time:.2f}s")
+        logger.info("="*50)
+        logger.info(f"✅ ASYNC PROCESSING COMPLETED: {session_id}")
+        logger.info(f"   Total time: {processing_time:.2f}s")
+        logger.info(f"   Pages: {processing_status.get('pages_processed', 0)}")
+        logger.info("="*50)
         
     except Exception as e:
-        logger.error(f"❌ Async processing failed for {session_id}: {e}")
+        logger.error("="*50)
+        logger.error(f"❌ ASYNC PROCESSING FAILED: {session_id}")
+        logger.error(f"   Error: {e}")
         logger.error(traceback.format_exc())
+        logger.error("="*50)
         
         # Calculate how long we processed before failure
         processing_time = time.time() - processing_start_time
@@ -698,11 +735,13 @@ async def process_pdf_async(
             'status': 'error',
             'error': str(e),
             'error_type': type(e).__name__,
+            'error_traceback': traceback.format_exc(),
             'failed_at': datetime.utcnow().isoformat() + 'Z',
             'filename': clean_filename,
             'author': author,
             'processing_time_before_error': round(processing_time, 2),
-            'pages_processed': processing_status.get('pages_processed', 0)
+            'pages_processed': processing_status.get('pages_processed', 0),
+            'processing_stage': processing_status.get('processing_stage', 'unknown')
         }
         
         try:
@@ -711,6 +750,7 @@ async def process_pdf_async(
                 blob_name=f"{session_id}_status.json",
                 data=json.dumps(error_status).encode('utf-8')
             )
+            logger.info("✅ Error status saved")
         except Exception as storage_error:
             logger.error(f"Failed to save error status: {storage_error}")
         
@@ -726,7 +766,8 @@ async def process_pdf_async(
                 details={
                     'error_type': type(e).__name__,
                     'processing_time_before_error': processing_time,
-                    'pages_processed': processing_status.get('pages_processed', 0)
+                    'pages_processed': processing_status.get('pages_processed', 0),
+                    'stage': processing_status.get('processing_stage', 'unknown')
                 }
             ).dict()
         )
@@ -735,6 +776,7 @@ async def process_pdf_async(
         # Remove from processing tasks
         if session_id in processing_tasks:
             del processing_tasks[session_id]
+            logger.info(f"📋 Removed from processing tasks. Active tasks: {len(processing_tasks)}")
         
         # Log final metrics
         logger.info(f"📊 Processing metrics for {session_id}:")
@@ -742,7 +784,7 @@ async def process_pdf_async(
         logger.info(f"   Pages processed: {processing_status.get('pages_processed', 0)}")
         logger.info(f"   SSE connections: {sse_manager.get_connection_info(session_id)}")
 
-# ===== WRITE OPERATION ROUTES (UNCHANGED) =====
+# ===== WRITE OPERATION ROUTES =====
 
 @blueprint_router.post(
     "/documents/upload",
@@ -758,9 +800,13 @@ async def upload_document(
     trade: Optional[str] = Form(default=None, description="Trade/discipline associated with the document")
 ):
     """
-    Upload a PDF document for processing.
+    Upload a PDF document for processing with enhanced debugging.
     Returns immediately with document ID while processing happens asynchronously.
     """
+    
+    logger.info("="*50)
+    logger.info("📤 UPLOAD ENDPOINT CALLED")
+    logger.info("="*50)
     
     # Validate request
     if not file or not file.filename:
@@ -778,6 +824,7 @@ async def upload_document(
     # Read file content
     try:
         contents = await file.read()
+        logger.info(f"✅ File read successfully: {len(contents)} bytes")
     except Exception as e:
         logger.error(f"Failed to read file: {e}")
         raise HTTPException(
@@ -788,6 +835,8 @@ async def upload_document(
     # Validate file size
     file_size_mb = len(contents) / (1024 * 1024)
     max_size_mb = settings.MAX_FILE_SIZE_MB
+    
+    logger.info(f"📊 File size: {file_size_mb:.1f}MB (max: {max_size_mb}MB)")
     
     if file_size_mb > max_size_mb:
         raise HTTPException(
@@ -806,9 +855,24 @@ async def upload_document(
     clean_filename = sanitize_filename(file.filename)
     session_id = str(uuid.uuid4())
     
+    logger.info(f"📋 Session ID: {session_id}")
+    logger.info(f"📄 Filename: {clean_filename}")
+    logger.info(f"👤 Author: {author}")
+    if trade:
+        logger.info(f"🔨 Trade: {trade}")
+    
     try:
-        # Get storage service
+        # Check available services
+        logger.info("🔍 Checking available services...")
+        
         storage_service = getattr(request.app.state, 'storage_service', None)
+        pdf_service = getattr(request.app.state, 'pdf_service', None)
+        session_service = getattr(request.app.state, 'session_service', None)
+        
+        logger.info(f"   Storage Service: {'✅ Available' if storage_service else '❌ NOT AVAILABLE'}")
+        logger.info(f"   PDF Service: {'✅ Available' if pdf_service else '❌ NOT AVAILABLE'}")
+        logger.info(f"   Session Service: {'✅ Available' if session_service else '❌ NOT AVAILABLE'}")
+        
         if not storage_service:
             logger.error("Storage service not available")
             raise HTTPException(
@@ -816,14 +880,10 @@ async def upload_document(
                 detail="Storage service is not available. Please try again later."
             )
         
-        logger.info(f"📤 Uploading document: {clean_filename} ({file_size_mb:.1f}MB)")
-        logger.info(f"   Session ID: {session_id}")
-        logger.info(f"   Author: {author}")
-        if trade:
-            logger.info(f"   Trade: {trade}")
-        
         # Upload original PDF
         pdf_blob_name = f"{session_id}.pdf"
+        logger.info(f"📤 Uploading to blob: {pdf_blob_name}")
+        
         await storage_service.upload_file(
             container_name=settings.AZURE_CONTAINER_NAME,
             blob_name=pdf_blob_name,
@@ -850,16 +910,20 @@ async def upload_document(
             'sse_url': f"/api/v1/documents/{session_id}/status/stream" if settings.ENABLE_SSE else None
         }
         
+        logger.info("📝 Creating status file...")
+        
         await storage_service.upload_file(
             container_name=settings.AZURE_CACHE_CONTAINER_NAME,
             blob_name=f"{session_id}_status.json",
             data=json.dumps(initial_status).encode('utf-8')
         )
         
+        logger.info("✅ Status file created")
+        
         # Create session if service available
-        session_service = getattr(request.app.state, 'session_service', None)
         if session_service:
             try:
+                logger.info("📊 Creating session...")
                 await session_service.create_session(
                     document_id=session_id,
                     original_filename=clean_filename
@@ -868,8 +932,7 @@ async def upload_document(
             except Exception as e:
                 logger.warning(f"Session creation failed (non-critical): {e}")
         
-        # Get PDF service
-        pdf_service = getattr(request.app.state, 'pdf_service', None)
+        # Check PDF service
         if not pdf_service:
             logger.warning("⚠️  PDF service not available - upload only mode")
             
@@ -882,20 +945,65 @@ async def upload_document(
             )
         
         # Start async processing
-        task = asyncio.create_task(
-            process_pdf_async(
-                session_id=session_id,
-                contents=contents,
-                clean_filename=clean_filename,
-                author=author,
-                storage_service=storage_service,
-                pdf_service=pdf_service,
-                session_service=session_service
-            )
-        )
+        logger.info("🚀 Starting async processing task...")
         
-        # Store task reference
-        processing_tasks[session_id] = task
+        try:
+            task = asyncio.create_task(
+                process_pdf_async(
+                    session_id=session_id,
+                    contents=contents,
+                    clean_filename=clean_filename,
+                    author=author,
+                    storage_service=storage_service,
+                    pdf_service=pdf_service,
+                    session_service=session_service
+                )
+            )
+            
+            # Store task reference
+            processing_tasks[session_id] = task
+            
+            logger.info(f"✅ Async task created successfully")
+            logger.info(f"📋 Active processing tasks: {len(processing_tasks)}")
+            
+            # Add a callback to log when task completes
+            def task_done_callback(future):
+                try:
+                    result = future.result()
+                    logger.info(f"✅ Task completed for {session_id}")
+                except Exception as e:
+                    logger.error(f"❌ Task failed for {session_id}: {e}")
+                    logger.error(traceback.format_exc())
+            
+            task.add_done_callback(task_done_callback)
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create async task: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Update status to error
+            error_status = {
+                'document_id': session_id,
+                'status': 'error',
+                'error': f"Failed to start processing: {str(e)}",
+                'filename': clean_filename,
+                'author': author,
+                'uploaded_at': datetime.utcnow().isoformat() + 'Z'
+            }
+            
+            await storage_service.upload_file(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{session_id}_status.json",
+                data=json.dumps(error_status).encode('utf-8')
+            )
+            
+            return DocumentUploadResponse(
+                document_id=session_id,
+                filename=clean_filename,
+                status="error",
+                message=f"Processing failed to start: {str(e)}",
+                file_size_mb=round(file_size_mb, 2)
+            )
         
         logger.info(f"📋 Returning processing status for: {session_id}")
         
@@ -917,8 +1025,6 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Upload failed: {str(e)}"
         )
-
-# ===== REMAINING ENDPOINTS (UNCHANGED) =====
 
 @blueprint_router.post(
     "/documents/{document_id}/chat",
@@ -1333,6 +1439,292 @@ async def get_sse_connections(
         }
     }
 
+# ===== DEBUG ENDPOINTS =====
+
+@blueprint_router.get(
+    "/debug/service-health",
+    summary="Check service health and initialization",
+    description="Debug endpoint to verify all services are properly initialized"
+)
+async def check_service_health(request: Request):
+    """
+    Check the health and availability of all services
+    """
+    health_status = {
+        "timestamp": datetime.utcnow().isoformat() + 'Z',
+        "services": {},
+        "settings": {},
+        "tasks": {}
+    }
+    
+    # Check storage service
+    storage_service = getattr(request.app.state, 'storage_service', None)
+    if storage_service:
+        try:
+            # Try to list blobs to verify connection
+            test_list = await storage_service.list_blobs(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                prefix="_test_"
+            )
+            health_status["services"]["storage"] = {
+                "available": True,
+                "status": "healthy",
+                "connection_info": storage_service.get_connection_info()
+            }
+        except Exception as e:
+            health_status["services"]["storage"] = {
+                "available": True,
+                "status": "error",
+                "error": str(e)
+            }
+    else:
+        health_status["services"]["storage"] = {
+            "available": False,
+            "status": "not_initialized"
+        }
+    
+    # Check PDF service
+    pdf_service = getattr(request.app.state, 'pdf_service', None)
+    if pdf_service:
+        try:
+            stats = pdf_service.get_processing_stats()
+            health_status["services"]["pdf"] = {
+                "available": True,
+                "status": "healthy",
+                "stats": stats
+            }
+        except Exception as e:
+            health_status["services"]["pdf"] = {
+                "available": True,
+                "status": "error",
+                "error": str(e)
+            }
+    else:
+        health_status["services"]["pdf"] = {
+            "available": False,
+            "status": "not_initialized"
+        }
+    
+    # Check session service
+    session_service = getattr(request.app.state, 'session_service', None)
+    health_status["services"]["session"] = {
+        "available": session_service is not None,
+        "status": "healthy" if session_service else "not_initialized"
+    }
+    
+    # Check AI service
+    ai_service = getattr(request.app.state, 'ai_service', None)
+    health_status["services"]["ai"] = {
+        "available": ai_service is not None,
+        "status": "healthy" if ai_service else "not_initialized"
+    }
+    
+    # Check SSE manager
+    health_status["services"]["sse"] = {
+        "available": True,
+        "enabled": settings.ENABLE_SSE,
+        "connections": sse_manager.get_connection_info()
+    }
+    
+    # Check important settings
+    health_status["settings"] = {
+        "ENABLE_SSE": settings.ENABLE_SSE,
+        "MAX_FILE_SIZE_MB": settings.MAX_FILE_SIZE_MB,
+        "PDF_MAX_PAGES": settings.PDF_MAX_PAGES,
+        "AZURE_CONTAINER_NAME": settings.AZURE_CONTAINER_NAME,
+        "AZURE_CACHE_CONTAINER_NAME": settings.AZURE_CACHE_CONTAINER_NAME,
+        "AZURE_STORAGE_CONNECTION_STRING": bool(settings.AZURE_STORAGE_CONNECTION_STRING),
+        "OPENAI_API_KEY": bool(settings.OPENAI_API_KEY)
+    }
+    
+    # Check active processing tasks
+    health_status["tasks"] = {
+        "active_processing_tasks": len(processing_tasks),
+        "task_ids": list(processing_tasks.keys()),
+        "task_status": {
+            task_id: "running" if not task.done() else "completed"
+            for task_id, task in processing_tasks.items()
+        }
+    }
+    
+    # Overall health
+    all_services_healthy = all(
+        service.get("available", False) and service.get("status") != "error"
+        for service in health_status["services"].values()
+    )
+    
+    health_status["overall_health"] = "healthy" if all_services_healthy else "degraded"
+    
+    return health_status
+
+@blueprint_router.post(
+    "/debug/test-processing",
+    summary="Test PDF processing with a small file",
+    description="Debug endpoint to test PDF processing pipeline"
+)
+async def test_pdf_processing(
+    request: Request,
+    test_type: str = Query("minimal", description="Type of test: minimal, full")
+):
+    """
+    Test PDF processing with a minimal PDF file
+    """
+    try:
+        import io
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import letter
+    except ImportError:
+        return {
+            "error": "reportlab not installed",
+            "message": "Please install reportlab: pip install reportlab"
+        }
+    
+    # Create a simple test PDF
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    
+    if test_type == "minimal":
+        # Single page PDF
+        c.drawString(100, 750, "Test PDF Document")
+        c.drawString(100, 700, "This is a test page for debugging.")
+        c.drawString(100, 650, "Grid Reference: A-1")
+        c.showPage()
+    else:
+        # Multi-page PDF
+        for i in range(3):
+            c.drawString(100, 750, f"Test PDF - Page {i+1}")
+            c.drawString(100, 700, f"Grid Reference: {chr(65+i)}-{i+1}")
+            c.showPage()
+    
+    c.save()
+    
+    # Get PDF bytes
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    
+    # Create a mock upload file
+    test_file = UploadFile(
+        filename="test_debug.pdf",
+        file=io.BytesIO(pdf_bytes)
+    )
+    
+    # Process through normal upload endpoint
+    try:
+        response = await upload_document(
+            request=request,
+            file=test_file,
+            author="Debug Test",
+            trade="Testing"
+        )
+        
+        return {
+            "test_type": test_type,
+            "pdf_size_bytes": len(pdf_bytes),
+            "upload_response": response.dict(),
+            "debug_info": {
+                "services_available": {
+                    "storage": getattr(request.app.state, 'storage_service', None) is not None,
+                    "pdf": getattr(request.app.state, 'pdf_service', None) is not None,
+                    "session": getattr(request.app.state, 'session_service', None) is not None,
+                    "ai": getattr(request.app.state, 'ai_service', None) is not None
+                }
+            }
+        }
+    except Exception as e:
+        return {
+            "test_type": test_type,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@blueprint_router.post(
+    "/debug/retry-processing/{document_id}",
+    summary="Manually retry processing for a stuck document",
+    description="Debug endpoint to retry processing if async task failed"
+)
+async def retry_document_processing(
+    request: Request,
+    document_id: str
+):
+    """
+    Manually retry processing for a document
+    """
+    clean_document_id = validate_document_id(document_id)
+    
+    storage_service = getattr(request.app.state, 'storage_service', None)
+    pdf_service = getattr(request.app.state, 'pdf_service', None)
+    
+    if not storage_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Storage service unavailable"
+        )
+    
+    if not pdf_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PDF service unavailable"
+        )
+    
+    try:
+        # Check if document exists
+        pdf_exists = await storage_service.blob_exists(
+            container_name=settings.AZURE_CONTAINER_NAME,
+            blob_name=f"{clean_document_id}.pdf"
+        )
+        
+        if not pdf_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document {clean_document_id} not found"
+            )
+        
+        # Download PDF
+        pdf_bytes = await storage_service.download_blob_as_bytes(
+            container_name=settings.AZURE_CONTAINER_NAME,
+            blob_name=f"{clean_document_id}.pdf"
+        )
+        
+        # Get current status
+        try:
+            status_text = await storage_service.download_blob_as_text(
+                container_name=settings.AZURE_CACHE_CONTAINER_NAME,
+                blob_name=f"{clean_document_id}_status.json"
+            )
+            current_status = json.loads(status_text)
+        except:
+            current_status = {}
+        
+        # Start processing
+        task = asyncio.create_task(
+            process_pdf_async(
+                session_id=clean_document_id,
+                contents=pdf_bytes,
+                clean_filename=current_status.get('filename', 'unknown.pdf'),
+                author=current_status.get('author', 'Unknown'),
+                storage_service=storage_service,
+                pdf_service=pdf_service,
+                session_service=getattr(request.app.state, 'session_service', None)
+            )
+        )
+        
+        processing_tasks[clean_document_id] = task
+        
+        return {
+            "status": "success",
+            "message": f"Reprocessing started for document {clean_document_id}",
+            "document_id": clean_document_id,
+            "active_tasks": len(processing_tasks)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retry processing: {str(e)}"
+        )
+
 # ===== CLEANUP TASK =====
 
 async def periodic_cleanup():
@@ -1345,6 +1737,10 @@ async def periodic_cleanup():
             logger.error(f"Error in periodic cleanup: {e}")
 
 # Start cleanup task when module loads
-asyncio.create_task(periodic_cleanup())
+try:
+    asyncio.create_task(periodic_cleanup())
+except RuntimeError:
+    # Ignore if no event loop is running yet
+    pass
 
 # NOTE: READ operations (status, download, info) remain in document_routes.py

@@ -15,17 +15,43 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 # Import settings first
 from app.core.config import get_settings
 
-# Import services
+# Import core services with error handling
 from app.services.storage_service import StorageService
 from app.services.pdf_service import PDFService
-from app.services.vision_ai.ai_service_core import VisualIntelligenceFirst
-from app.services.session_service import SessionService
 
-# Import API routers
+# Try to import optional services
+try:
+    from app.services.vision_ai.ai_service_core import VisualIntelligenceFirst
+    AI_SERVICE_AVAILABLE = True
+except ImportError:
+    AI_SERVICE_AVAILABLE = False
+    logging.warning("AI service module not found - AI features will be disabled")
+
+try:
+    from app.services.session_service import SessionService
+    SESSION_SERVICE_AVAILABLE = True
+except ImportError:
+    SESSION_SERVICE_AVAILABLE = False
+    logging.warning("Session service module not found - session tracking will be disabled")
+
+# Import core API routers (these should exist)
 from app.api.routes.blueprint_routes import blueprint_router
 from app.api.routes.document_routes import document_router
-from app.api.routes.annotation_routes import annotation_router
-from app.api.routes.note_routes import note_router
+
+# Try to import optional routers
+try:
+    from app.api.routes.annotation_routes import annotation_router
+    ANNOTATION_ROUTES_AVAILABLE = True
+except ImportError:
+    ANNOTATION_ROUTES_AVAILABLE = False
+    logging.warning("Annotation routes not found - annotation endpoints will be unavailable")
+
+try:
+    from app.api.routes.note_routes import note_router
+    NOTE_ROUTES_AVAILABLE = True
+except ImportError:
+    NOTE_ROUTES_AVAILABLE = False
+    logging.warning("Note routes not found - note endpoints will be unavailable")
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -195,6 +221,63 @@ class SSEEventManager:
 # Store active processing tasks
 processing_tasks = {}
 
+# --- Stub Session Service if not available ---
+if not SESSION_SERVICE_AVAILABLE:
+    class SessionService:
+        """Stub session service when real implementation is not available"""
+        def __init__(self, settings):
+            self.settings = settings
+            self._running = False
+            logger.info("Using stub SessionService")
+        
+        def set_storage_service(self, storage_service):
+            pass
+        
+        async def start(self):
+            self._running = True
+            
+        async def stop(self):
+            self._running = False
+            
+        def is_running(self):
+            return self._running
+        
+        async def create_session(self, document_id: str, original_filename: str):
+            logger.debug(f"Stub: create_session called for {document_id}")
+            
+        async def update_session_metadata(self, document_id: str, metadata: dict):
+            logger.debug(f"Stub: update_session_metadata called for {document_id}")
+            
+        async def record_chat_activity(self, document_id: str, user: str, chat_data: dict):
+            logger.debug(f"Stub: record_chat_activity called for {document_id}")
+            
+        async def clear_session(self, document_id: str):
+            logger.debug(f"Stub: clear_session called for {document_id}")
+        
+        async def get_session_info(self, document_id: str):
+            return {"status": "stub_session", "document_id": document_id}
+
+# --- Stub AI Service if not available ---
+if not AI_SERVICE_AVAILABLE:
+    class VisualIntelligenceFirst:
+        """Stub AI service when real implementation is not available"""
+        def __init__(self, settings):
+            self.settings = settings
+            logger.info("Using stub AI Service")
+        
+        async def get_ai_response(self, **kwargs):
+            return {
+                "ai_response": "AI service is not available. Please ensure the AI service module is installed and OPENAI_API_KEY is configured.",
+                "visual_highlights": [],
+                "note_suggestion": None
+            }
+        
+        def get_professional_capabilities(self):
+            return {"status": "stub", "message": "AI service not available"}
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
 # --- Application Lifecycle Management ---
 
 @asynccontextmanager
@@ -259,7 +342,7 @@ async def lifespan(app: FastAPI):
         # 3. Initialize AI Service
         initialization_status["ai"]["status"] = "initializing"
         try:
-            if settings.OPENAI_API_KEY:
+            if settings.OPENAI_API_KEY and (AI_SERVICE_AVAILABLE or True):  # Always try
                 ai_service = VisualIntelligenceFirst(settings)
                 app.state.ai_service = ai_service
                 initialization_status["ai"]["status"] = "success"
@@ -267,7 +350,7 @@ async def lifespan(app: FastAPI):
             else:
                 app.state.ai_service = None
                 initialization_status["ai"]["status"] = "disabled"
-                logger.warning("⚠️ AI Service disabled - no API key")
+                logger.warning("⚠️ AI Service disabled - no API key or module not available")
         except Exception as e:
             initialization_status["ai"]["status"] = "failed"
             initialization_status["ai"]["error"] = str(e)
@@ -275,10 +358,10 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ AI Service failed: {e}")
             logger.error(traceback.format_exc())
         
-        # 4. Initialize Session Service - FIXED INITIALIZATION
+        # 4. Initialize Session Service
         initialization_status["session"]["status"] = "initializing"
         try:
-            # Initialize with only settings
+            # Always use SessionService (stub or real)
             session_service = SessionService(settings)
             
             # Set storage service if available
@@ -475,10 +558,20 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 # --- Include API Routers ---
+# Always include core routers
 app.include_router(blueprint_router, tags=["Blueprint Analysis"])
 app.include_router(document_router, tags=["Document Management"])
-app.include_router(annotation_router, tags=["Annotations"])
-app.include_router(note_router, tags=["Notes"])
+
+# Conditionally include optional routers
+if ANNOTATION_ROUTES_AVAILABLE:
+    app.include_router(annotation_router, tags=["Annotations"])
+else:
+    logger.warning("⚠️ Annotation routes not included - module not found")
+
+if NOTE_ROUTES_AVAILABLE:
+    app.include_router(note_router, tags=["Notes"])
+else:
+    logger.warning("⚠️ Note routes not included - module not found")
 
 # --- Root Endpoints ---
 @app.get("/", tags=["System"])
@@ -510,6 +603,12 @@ async def root():
             "ai": hasattr(app.state, 'ai_service') and app.state.ai_service is not None,
             "session": hasattr(app.state, 'session_service') and app.state.session_service is not None,
             "sse": hasattr(app.state, 'sse_manager') and app.state.sse_manager is not None
+        },
+        "modules_available": {
+            "ai_service": AI_SERVICE_AVAILABLE,
+            "session_service": SESSION_SERVICE_AVAILABLE,
+            "annotation_routes": ANNOTATION_ROUTES_AVAILABLE,
+            "note_routes": NOTE_ROUTES_AVAILABLE
         },
         "sse_config": settings.get_sse_settings() if settings.ENABLE_SSE else None
     }
