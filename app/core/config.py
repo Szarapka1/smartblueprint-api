@@ -66,6 +66,12 @@ class AppSettings:
         self.SSE_ENABLE_COMPRESSION: bool = os.getenv("SSE_ENABLE_COMPRESSION", "true").lower() == "true"  # Compress event data
         self.ENABLE_SSE: bool = os.getenv("ENABLE_SSE", "true").lower() == "true"  # Master feature flag
         
+        # === NEW SSE SETTINGS FOR FIXES ===
+        self.SSE_MAX_QUEUE_SIZE_PER_CONNECTION: int = int(os.getenv("SSE_MAX_QUEUE_SIZE_PER_CONNECTION", 1000))
+        self.SSE_DROPPED_EVENT_THRESHOLD: int = int(os.getenv("SSE_DROPPED_EVENT_THRESHOLD", 100))
+        self.SSE_SLOW_CONSUMER_THRESHOLD: int = int(os.getenv("SSE_SLOW_CONSUMER_THRESHOLD", 50))
+        self.SSE_EVENT_HISTORY_CLEANUP_SIZE: int = int(os.getenv("SSE_EVENT_HISTORY_CLEANUP_SIZE", 25))
+        
         # === AZURE BLOB STORAGE ===
         self.AZURE_STORAGE_CONNECTION_STRING: str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
         self.AZURE_CONTAINER_NAME: str = os.getenv("AZURE_CONTAINER_NAME", "blueprints")
@@ -87,6 +93,10 @@ class AppSettings:
         self.PROCESSING_BATCH_SIZE: int = int(os.getenv("PROCESSING_BATCH_SIZE", 25))  # Updated: Increased from 10
         self.PDF_PNG_COMPRESSION: int = int(os.getenv("PDF_PNG_COMPRESSION", 6))
         self.PDF_JPEG_QUALITY: int = int(os.getenv("PDF_JPEG_QUALITY", 85))
+        
+        # === NEW PROCESSING SETTINGS FOR FIXES ===
+        self.STATUS_UPDATE_LOCK_TIMEOUT: float = float(os.getenv("STATUS_UPDATE_LOCK_TIMEOUT", 5.0))
+        self.PROCESSING_HEALTH_CHECK_INTERVAL: int = int(os.getenv("PROCESSING_HEALTH_CHECK_INTERVAL", 30))
         
         # === CACHE AND MEMORY LIMITS ===
         self.MAX_MEMORY_CACHE_SIZE: int = int(os.getenv("MAX_MEMORY_CACHE_SIZE", 100))
@@ -206,6 +216,10 @@ class AppSettings:
         self.STORAGE_UPLOAD_TIMEOUT: float = float(os.getenv("STORAGE_UPLOAD_TIMEOUT", 600.0))  # Updated: 10 minutes (was 120.0)
         self.STORAGE_BATCH_TIMEOUT: float = float(os.getenv("STORAGE_BATCH_TIMEOUT", 1200.0))  # Added: 20 minutes
         
+        # === NEW STORAGE RETRY SETTINGS FOR FIXES ===
+        self.STORAGE_RETRY_ATTEMPTS: int = int(os.getenv("STORAGE_RETRY_ATTEMPTS", 3))
+        self.STORAGE_RETRY_DELAY: float = float(os.getenv("STORAGE_RETRY_DELAY", 1.0))
+        
         # === BACKGROUND PROCESSING SETTINGS ===
         self.ENABLE_BACKGROUND_PROCESSING: bool = os.getenv("ENABLE_BACKGROUND_PROCESSING", "true").lower() == "true"
         self.MAX_CONCURRENT_JOBS: int = int(os.getenv("MAX_CONCURRENT_JOBS", 5))
@@ -259,7 +273,11 @@ class AppSettings:
             "max_connections_per_document": self.SSE_MAX_CONNECTIONS_PER_DOCUMENT,
             "retry_interval": self.SSE_RETRY_INTERVAL,
             "event_queue_size": self.SSE_EVENT_QUEUE_SIZE,
-            "enable_compression": self.SSE_ENABLE_COMPRESSION
+            "enable_compression": self.SSE_ENABLE_COMPRESSION,
+            "max_queue_size_per_connection": self.SSE_MAX_QUEUE_SIZE_PER_CONNECTION,
+            "dropped_event_threshold": self.SSE_DROPPED_EVENT_THRESHOLD,
+            "slow_consumer_threshold": self.SSE_SLOW_CONSUMER_THRESHOLD,
+            "event_history_cleanup_size": self.SSE_EVENT_HISTORY_CLEANUP_SIZE
         }
     
     def get_note_types(self) -> List[str]:
@@ -307,7 +325,9 @@ class AppSettings:
             "enable_pagination": self.STORAGE_ENABLE_PAGINATION,
             "download_timeout": self.STORAGE_DOWNLOAD_TIMEOUT,
             "upload_timeout": self.STORAGE_UPLOAD_TIMEOUT,
-            "batch_timeout": self.STORAGE_BATCH_TIMEOUT
+            "batch_timeout": self.STORAGE_BATCH_TIMEOUT,
+            "retry_attempts": self.STORAGE_RETRY_ATTEMPTS,
+            "retry_delay": self.STORAGE_RETRY_DELAY
         }
     
     def get_ai_settings(self) -> Dict[str, Any]:
@@ -436,6 +456,17 @@ class AppSettings:
             "max_visual_elements": self.MAX_VISUAL_ELEMENTS,
             "max_file_size_mb": self.MAX_FILE_SIZE_MB,
             "max_cache_size_mb": self.MAX_CACHE_SIZE_MB,
+        }
+    
+    def get_processing_settings(self) -> Dict[str, Any]:
+        """Get processing-specific settings"""
+        return {
+            "status_update_lock_timeout": self.STATUS_UPDATE_LOCK_TIMEOUT,
+            "processing_health_check_interval": self.PROCESSING_HEALTH_CHECK_INTERVAL,
+            "processing_check_interval": self.PROCESSING_CHECK_INTERVAL,
+            "job_timeout_seconds": self.JOB_TIMEOUT_SECONDS,
+            "max_concurrent_jobs": self.MAX_CONCURRENT_JOBS,
+            "enable_background_processing": self.ENABLE_BACKGROUND_PROCESSING
         }
     
     def is_feature_enabled(self, feature: str) -> bool:
@@ -568,6 +599,8 @@ CONFIG = {
     "storage_batch_timeout": _settings.STORAGE_BATCH_TIMEOUT,
     "storage_max_concurrent_downloads": _settings.STORAGE_MAX_CONCURRENT_DOWNLOADS,
     "storage_max_concurrent_uploads": _settings.STORAGE_MAX_CONCURRENT_UPLOADS,
+    "storage_retry_attempts": _settings.STORAGE_RETRY_ATTEMPTS,
+    "storage_retry_delay": _settings.STORAGE_RETRY_DELAY,
     
     # General timeouts
     "request_timeout": _settings.REQUEST_TIMEOUT,
@@ -583,6 +616,15 @@ CONFIG = {
     "sse_retry_interval": _settings.SSE_RETRY_INTERVAL,
     "sse_event_queue_size": _settings.SSE_EVENT_QUEUE_SIZE,
     "sse_enable_compression": _settings.SSE_ENABLE_COMPRESSION,
+    "sse_max_queue_size_per_connection": _settings.SSE_MAX_QUEUE_SIZE_PER_CONNECTION,
+    "sse_dropped_event_threshold": _settings.SSE_DROPPED_EVENT_THRESHOLD,
+    "sse_slow_consumer_threshold": _settings.SSE_SLOW_CONSUMER_THRESHOLD,
+    "sse_event_history_cleanup_size": _settings.SSE_EVENT_HISTORY_CLEANUP_SIZE,
+    
+    # Processing settings
+    "status_update_lock_timeout": _settings.STATUS_UPDATE_LOCK_TIMEOUT,
+    "processing_health_check_interval": _settings.PROCESSING_HEALTH_CHECK_INTERVAL,
+    "processing_check_interval": _settings.PROCESSING_CHECK_INTERVAL,
 }
 
 # Export settings for convenience

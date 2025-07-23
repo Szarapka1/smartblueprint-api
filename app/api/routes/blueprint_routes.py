@@ -3,7 +3,7 @@
 """
 Blueprint Write Operations - Handles document upload, processing, chat, and annotations
 Production-ready Server-Sent Events (SSE) implementation with robust error handling
-FIXED VERSION: Includes all necessary debugging and error handling
+FIXED VERSION: Proper queue management, connection health checks, and memory leak prevention
 """
 
 import traceback
@@ -18,9 +18,10 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Union, AsyncGenerator
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, status, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 import weakref
+import gc
 
 # Core imports
 from app.core.config import get_settings
@@ -47,10 +48,10 @@ blueprint_router = APIRouter(
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-# ===== PRODUCTION SSE EVENT MANAGEMENT =====
+# ===== PRODUCTION SSE EVENT MANAGEMENT WITH FIXES =====
 
 class SSEConnectionManager:
-    """Production-ready SSE connection and event manager"""
+    """Production-ready SSE connection and event manager with queue overflow handling"""
     
     def __init__(self):
         # Connection tracking
@@ -58,17 +59,22 @@ class SSEConnectionManager:
         self._connection_metadata = {}  # {connection_id: metadata}
         self._locks = defaultdict(asyncio.Lock)
         
-        # Event history for late joiners (limited buffer)
-        self._event_history = defaultdict(list)  # {document_id: [recent_events]}
-        self._history_limit = 50
+        # Event history for late joiners with automatic cleanup
+        self._event_history = defaultdict(lambda: deque(maxlen=settings.SSE_EVENT_HISTORY_CLEANUP_SIZE))
+        self._history_limit = settings.SSE_EVENT_HISTORY_CLEANUP_SIZE
         
         # Metrics
         self._total_connections = 0
         self._total_events_sent = 0
         self._connection_errors = 0
+        self._dropped_events = 0
         
         # Cleanup tracking
         self._cleanup_tasks = weakref.WeakValueDictionary()
+        
+        # Connection health tracking
+        self._last_health_check = time.time()
+        self._health_check_interval = settings.PROCESSING_HEALTH_CHECK_INTERVAL
         
     async def add_connection(
         self, 
@@ -78,8 +84,8 @@ class SSEConnectionManager:
     ) -> asyncio.Queue:
         """Add a new SSE connection with production safeguards"""
         async with self._locks[document_id]:
-            # Create queue with appropriate size for testing
-            queue = asyncio.Queue(maxsize=settings.SSE_EVENT_QUEUE_SIZE * 2)  # Double size for testing
+            # Create queue with configured size (not double for production)
+            queue = asyncio.Queue(maxsize=settings.SSE_MAX_QUEUE_SIZE_PER_CONNECTION)
             
             # Store connection
             self._connections[document_id][connection_id] = queue
@@ -88,7 +94,10 @@ class SSEConnectionManager:
                 'connected_at': datetime.utcnow(),
                 'last_activity': datetime.utcnow(),
                 'events_sent': 0,
-                'errors': 0
+                'errors': 0,
+                'dropped_events': 0,
+                'slow_consumer': False,
+                'health_status': 'healthy'
             }
             
             # Update metrics
@@ -96,9 +105,11 @@ class SSEConnectionManager:
             
             # Send event history if requested (for late joiners)
             if send_history and document_id in self._event_history:
-                for event in self._event_history[document_id][-10:]:  # Last 10 events
+                # Send only recent events
+                history_events = list(self._event_history[document_id])[-10:]
+                for event in history_events:
                     try:
-                        await queue.put(event)
+                        queue.put_nowait(event)
                     except asyncio.QueueFull:
                         logger.warning(f"Queue full when sending history to {connection_id}")
                         break
@@ -123,13 +134,20 @@ class SSEConnectionManager:
                         break
                 
                 # Remove metadata
-                if connection_id in self._connection_metadata:
-                    del self._connection_metadata[connection_id]
+                metadata = self._connection_metadata.pop(connection_id, {})
+                
+                # Log connection statistics
+                if metadata:
+                    logger.info(f"📊 Connection stats for {connection_id}:")
+                    logger.info(f"   Events sent: {metadata.get('events_sent', 0)}")
+                    logger.info(f"   Events dropped: {metadata.get('dropped_events', 0)}")
+                    logger.info(f"   Errors: {metadata.get('errors', 0)}")
+                    logger.info(f"   Slow consumer: {metadata.get('slow_consumer', False)}")
                 
                 # Clean up empty document entries
                 if not self._connections[document_id]:
                     del self._connections[document_id]
-                    # Optionally clear history for completed documents
+                    # Clear history when no connections remain
                     if document_id in self._event_history:
                         del self._event_history[document_id]
                 
@@ -142,7 +160,7 @@ class SSEConnectionManager:
         event_data: Dict[str, Any],
         store_history: bool = True
     ):
-        """Emit event to all connections with production error handling"""
+        """Emit event to all connections with improved queue overflow handling"""
         if not settings.ENABLE_SSE:
             return
         
@@ -162,17 +180,10 @@ class SSEConnectionManager:
             'document_id': event.document_id
         })
         
-        # Store in history if requested
+        # Store in history if requested (using deque with maxlen for automatic cleanup)
         if store_history:
             async with self._locks[document_id]:
-                if document_id not in self._event_history:
-                    self._event_history[document_id] = []
-                
                 self._event_history[document_id].append(event_json)
-                
-                # Limit history size
-                if len(self._event_history[document_id]) > self._history_limit:
-                    self._event_history[document_id] = self._event_history[document_id][-self._history_limit:]
         
         # Send to all connections
         async with self._locks[document_id]:
@@ -183,61 +194,127 @@ class SSEConnectionManager:
             failed_connections = []
             
             for connection_id, queue in self._connections[document_id].items():
+                metadata = self._connection_metadata.get(connection_id, {})
+                
                 try:
-                    # Try to put event in queue with timeout
-                    await asyncio.wait_for(
-                        queue.put(event_json),
-                        timeout=1.0
-                    )
+                    # Check if connection is marked as slow consumer
+                    if metadata.get('slow_consumer', False):
+                        # For slow consumers, drop less important events
+                        if event_type == SSEEventType.keepalive:
+                            metadata['dropped_events'] = metadata.get('dropped_events', 0) + 1
+                            self._dropped_events += 1
+                            continue
                     
-                    # Update metadata
-                    if connection_id in self._connection_metadata:
-                        self._connection_metadata[connection_id]['events_sent'] += 1
-                        self._connection_metadata[connection_id]['last_activity'] = datetime.utcnow()
-                    
-                    self._total_events_sent += 1
-                    
-                except asyncio.TimeoutError:
-                    logger.warning(f"Timeout sending event to {connection_id}")
-                    failed_connections.append(connection_id)
-                    if connection_id in self._connection_metadata:
-                        self._connection_metadata[connection_id]['errors'] += 1
+                    # Try to put event in queue with short timeout
+                    try:
+                        await asyncio.wait_for(
+                            queue.put(event_json),
+                            timeout=0.1  # 100ms timeout for fast failure
+                        )
+                        
+                        # Update metadata
+                        metadata['events_sent'] = metadata.get('events_sent', 0) + 1
+                        metadata['last_activity'] = datetime.utcnow()
+                        metadata['errors'] = 0  # Reset error count on success
+                        self._total_events_sent += 1
+                        
+                    except asyncio.TimeoutError:
+                        # Queue is full or slow - handle gracefully
+                        metadata['dropped_events'] = metadata.get('dropped_events', 0) + 1
+                        self._dropped_events += 1
+                        
+                        # Mark as slow consumer if dropping too many events
+                        if metadata['dropped_events'] > settings.SSE_SLOW_CONSUMER_THRESHOLD:
+                            metadata['slow_consumer'] = True
+                            logger.warning(f"Marking {connection_id} as slow consumer")
+                        
+                        # Only fail connection if dropping critical events
+                        if event_type in [SSEEventType.processing_complete, SSEEventType.error]:
+                            metadata['errors'] = metadata.get('errors', 0) + 1
+                            if metadata['errors'] > 5:
+                                failed_connections.append(connection_id)
                     
                 except asyncio.QueueFull:
-                    # Queue is full, try to remove oldest event
-                    logger.warning(f"Queue full for {connection_id}, dropping oldest event")
-                    try:
-                        # Remove oldest event
-                        old_event = await asyncio.wait_for(queue.get(), timeout=0.1)
-                        # Add new event
-                        await asyncio.wait_for(queue.put(event_json), timeout=0.1)
-                        
-                        if connection_id in self._connection_metadata:
-                            self._connection_metadata[connection_id]['events_sent'] += 1
+                    # Queue is full - try to remove oldest event for critical events only
+                    if event_type in [SSEEventType.processing_complete, SSEEventType.error]:
+                        try:
+                            # Remove oldest event
+                            old_event = await asyncio.wait_for(queue.get(), timeout=0.05)
+                            # Add new event
+                            await asyncio.wait_for(queue.put(event_json), timeout=0.05)
                             
-                    except:
-                        failed_connections.append(connection_id)
-                        if connection_id in self._connection_metadata:
-                            self._connection_metadata[connection_id]['errors'] += 1
+                            metadata['events_sent'] = metadata.get('events_sent', 0) + 1
+                            metadata['dropped_events'] = metadata.get('dropped_events', 0) + 1
+                            self._dropped_events += 1
+                            
+                        except:
+                            metadata['errors'] = metadata.get('errors', 0) + 1
+                            metadata['dropped_events'] = metadata.get('dropped_events', 0) + 1
+                            self._dropped_events += 1
+                    else:
+                        # For non-critical events, just drop
+                        metadata['dropped_events'] = metadata.get('dropped_events', 0) + 1
+                        self._dropped_events += 1
                 
                 except Exception as e:
                     logger.error(f"Error sending event to {connection_id}: {e}")
-                    failed_connections.append(connection_id)
+                    metadata['errors'] = metadata.get('errors', 0) + 1
                     self._connection_errors += 1
+                    
+                    # Only remove on persistent errors
+                    if metadata['errors'] > 10:
+                        failed_connections.append(connection_id)
             
             # Clean up failed connections
             for conn_id in failed_connections:
-                if self._connection_metadata.get(conn_id, {}).get('errors', 0) > 5:
-                    logger.warning(f"Removing connection {conn_id} due to repeated errors")
-                    await self.remove_connection(document_id, conn_id)
+                logger.warning(f"Removing failed connection {conn_id}")
+                await self.remove_connection(document_id, conn_id)
+    
+    async def check_connection_health(self, connection_id: str) -> bool:
+        """Check if a connection is healthy"""
+        metadata = self._connection_metadata.get(connection_id, {})
+        
+        # Check if connection exists
+        if not metadata:
+            return False
+        
+        # Check for excessive errors
+        if metadata.get('errors', 0) > 10:
+            metadata['health_status'] = 'unhealthy'
+            return False
+        
+        # Check for excessive dropped events
+        if metadata.get('dropped_events', 0) > settings.SSE_DROPPED_EVENT_THRESHOLD:
+            metadata['health_status'] = 'degraded'
+            # Still return True as connection is alive, just degraded
+        
+        # Check last activity
+        last_activity = metadata.get('last_activity', datetime.utcnow())
+        if (datetime.utcnow() - last_activity).total_seconds() > settings.SSE_CLIENT_TIMEOUT:
+            metadata['health_status'] = 'inactive'
+            return False
+        
+        return True
     
     def get_connection_info(self, document_id: Optional[str] = None) -> Dict[str, Any]:
         """Get connection statistics"""
         if document_id:
+            connections_info = []
+            for conn_id in self._connections.get(document_id, {}):
+                metadata = self._connection_metadata.get(conn_id, {})
+                connections_info.append({
+                    'connection_id': conn_id,
+                    'health_status': metadata.get('health_status', 'unknown'),
+                    'slow_consumer': metadata.get('slow_consumer', False),
+                    'events_sent': metadata.get('events_sent', 0),
+                    'dropped_events': metadata.get('dropped_events', 0),
+                    'errors': metadata.get('errors', 0)
+                })
+            
             return {
                 'document_id': document_id,
                 'active_connections': len(self._connections.get(document_id, {})),
-                'connection_ids': list(self._connections.get(document_id, {}).keys()),
+                'connections': connections_info,
                 'event_history_size': len(self._event_history.get(document_id, []))
             }
         else:
@@ -246,11 +323,16 @@ class SSEConnectionManager:
                 'total_active_connections': sum(len(conns) for conns in self._connections.values()),
                 'total_connections_created': self._total_connections,
                 'total_events_sent': self._total_events_sent,
+                'total_events_dropped': self._dropped_events,
                 'connection_errors': self._connection_errors,
                 'documents': {
                     doc_id: {
                         'connections': len(conns),
-                        'history_size': len(self._event_history.get(doc_id, []))
+                        'history_size': len(self._event_history.get(doc_id, [])),
+                        'slow_consumers': sum(
+                            1 for conn_id in conns
+                            if self._connection_metadata.get(conn_id, {}).get('slow_consumer', False)
+                        )
                     }
                     for doc_id, conns in self._connections.items()
                 }
@@ -261,7 +343,7 @@ class SSEConnectionManager:
         now = datetime.utcnow()
         stale_connections = []
         
-        for conn_id, metadata in self._connection_metadata.items():
+        for conn_id, metadata in list(self._connection_metadata.items()):
             last_activity = metadata.get('last_activity', now)
             if (now - last_activity).total_seconds() > max_idle_seconds:
                 stale_connections.append((metadata['document_id'], conn_id))
@@ -269,12 +351,17 @@ class SSEConnectionManager:
         for doc_id, conn_id in stale_connections:
             logger.info(f"Cleaning up stale connection: {conn_id}")
             await self.remove_connection(doc_id, conn_id)
+        
+        # Force garbage collection if many connections were cleaned
+        if len(stale_connections) > 10:
+            gc.collect()
 
 # Global SSE manager instance
 sse_manager = SSEConnectionManager()
 
-# Store active processing tasks
+# Store active processing tasks with safe cleanup
 processing_tasks = {}
+processing_tasks_lock = asyncio.Lock()
 
 # ===== UTILITY FUNCTIONS =====
 
@@ -319,7 +406,7 @@ def sanitize_filename(filename: str) -> str:
     clean_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     return clean_name
 
-# ===== SSE STREAMING ENDPOINT =====
+# ===== SSE STREAMING ENDPOINT WITH CONNECTION HEALTH CHECKS =====
 
 @blueprint_router.get(
     "/documents/{document_id}/status/stream",
@@ -333,7 +420,7 @@ async def stream_document_status(
 ):
     """
     Stream real-time document processing status using Server-Sent Events.
-    Production-ready implementation with proper error handling.
+    Production-ready implementation with proper error handling and health checks.
     """
     if not settings.ENABLE_SSE:
         raise HTTPException(
@@ -347,9 +434,20 @@ async def stream_document_status(
     logger.info(f"📡 SSE connection request for document: {clean_document_id}")
     logger.info(f"   Connection ID: {connection_id}")
     
+    async def check_connection_health() -> bool:
+        """Check if client is still connected"""
+        try:
+            if await request.is_disconnected():
+                return False
+            # Additional health check via SSE manager
+            return await sse_manager.check_connection_health(connection_id)
+        except:
+            return False
+    
     async def event_generator() -> AsyncGenerator[str, None]:
-        """Generate SSE events for the client"""
+        """Generate SSE events for the client with health monitoring"""
         queue = None
+        health_check_task = None
         
         try:
             # Add connection to manager
@@ -390,19 +488,35 @@ async def stream_document_status(
                 except Exception as e:
                     logger.error(f"Failed to get initial status: {e}")
             
+            # Start periodic health check
+            async def periodic_health_check():
+                while True:
+                    await asyncio.sleep(10)  # Check every 10 seconds
+                    if not await check_connection_health():
+                        logger.info(f"Health check failed for {connection_id}")
+                        break
+            
+            health_check_task = asyncio.create_task(periodic_health_check())
+            
             # Main event loop
             last_keepalive = time.time()
             connection_start = time.time()
-            max_connection_time = 3600  # 1 hour max for testing
+            max_connection_time = 3600  # 1 hour max
             
             while True:
+                # Check connection health
+                if not await check_connection_health():
+                    logger.info(f"🏥 Connection health check failed: {connection_id}")
+                    yield f"event: health_failed\ndata: {{\"message\": \"Connection health check failed\"}}\n\n"
+                    break
+                
+                # Check connection time limit
+                if time.time() - connection_start > max_connection_time:
+                    logger.info(f"⏰ Max connection time reached for {connection_id}")
+                    yield f"event: connection_timeout\ndata: {{\"message\": \"Maximum connection time reached\"}}\n\n"
+                    break
+                
                 try:
-                    # Check connection time limit for testing
-                    if time.time() - connection_start > max_connection_time:
-                        logger.info(f"⏰ Max connection time reached for {connection_id}")
-                        yield f"event: connection_timeout\ndata: {{\"message\": \"Maximum connection time reached\"}}\n\n"
-                        break
-                    
                     # Wait for events with timeout for keepalive
                     try:
                         event_data = await asyncio.wait_for(
@@ -442,15 +556,6 @@ async def stream_document_status(
                     logger.error(traceback.format_exc())
                     yield f"event: error\ndata: {{\"error\": \"Internal error in event stream\", \"details\": \"{str(e)}\"}}\n\n"
                     break
-                
-                # Check if client is still connected
-                if await request.is_disconnected():
-                    logger.info(f"🔌 Client disconnected: {connection_id}")
-                    break
-                
-                # Periodic connection health check
-                if int(time.time()) % 30 == 0:  # Every 30 seconds
-                    yield f"event: health\ndata: {{\"status\": \"healthy\", \"timestamp\": \"{datetime.utcnow().isoformat()}Z\"}}\n\n"
             
         except Exception as e:
             logger.error(f"Fatal error in SSE generator: {e}")
@@ -458,6 +563,14 @@ async def stream_document_status(
             yield f"event: fatal_error\ndata: {{\"error\": \"Fatal error occurred\", \"details\": \"{str(e)}\"}}\n\n"
         
         finally:
+            # Cancel health check task
+            if health_check_task and not health_check_task.done():
+                health_check_task.cancel()
+                try:
+                    await health_check_task
+                except asyncio.CancelledError:
+                    pass
+            
             # Always clean up connection
             logger.info(f"🧹 Cleaning up SSE connection: {connection_id}")
             await sse_manager.remove_connection(clean_document_id, connection_id)
@@ -479,7 +592,7 @@ async def stream_document_status(
         }
     )
 
-# ===== ASYNC PROCESSING WITH SSE EVENTS =====
+# ===== ASYNC PROCESSING WITH SSE EVENTS AND SAFE TASK CLEANUP =====
 
 async def process_pdf_async(
     session_id: str,
@@ -491,7 +604,7 @@ async def process_pdf_async(
     session_service
 ):
     """
-    Process PDF asynchronously with production SSE event emission
+    Process PDF asynchronously with production SSE event emission and safe cleanup
     """
     processing_start_time = time.time()
     
@@ -548,7 +661,7 @@ async def process_pdf_async(
                     processing_status['total_pages'] = event_data.get('total_pages', 0)
                     processing_status['processing_stage'] = f"processing_page_{event_data.get('page_number', 0)}"
                     
-                    # Save status
+                    # Save status (will use thread-safe update in pdf_service)
                     await storage_service.upload_file(
                         container_name=settings.AZURE_CACHE_CONTAINER_NAME,
                         blob_name=f"{session_id}_status.json",
@@ -773,10 +886,14 @@ async def process_pdf_async(
         )
     
     finally:
-        # Remove from processing tasks
-        if session_id in processing_tasks:
-            del processing_tasks[session_id]
-            logger.info(f"📋 Removed from processing tasks. Active tasks: {len(processing_tasks)}")
+        # Safe task cleanup with lock
+        async with processing_tasks_lock:
+            # Use pop to safely remove without KeyError
+            task = processing_tasks.pop(session_id, None)
+            if task:
+                logger.info(f"📋 Removed from processing tasks. Active tasks: {len(processing_tasks)}")
+            else:
+                logger.warning(f"Task {session_id} was already removed from processing tasks")
         
         # Log final metrics
         logger.info(f"📊 Processing metrics for {session_id}:")
@@ -960,13 +1077,14 @@ async def upload_document(
                 )
             )
             
-            # Store task reference
-            processing_tasks[session_id] = task
+            # Store task reference with lock
+            async with processing_tasks_lock:
+                processing_tasks[session_id] = task
             
             logger.info(f"✅ Async task created successfully")
             logger.info(f"📋 Active processing tasks: {len(processing_tasks)}")
             
-            # Add a callback to log when task completes
+            # Add a callback to log when task completes (with safe cleanup)
             def task_done_callback(future):
                 try:
                     result = future.result()
@@ -974,6 +1092,14 @@ async def upload_document(
                 except Exception as e:
                     logger.error(f"❌ Task failed for {session_id}: {e}")
                     logger.error(traceback.format_exc())
+                finally:
+                    # Safe cleanup
+                    asyncio.create_task(async_task_cleanup(session_id))
+            
+            async def async_task_cleanup(task_id: str):
+                """Async cleanup with lock"""
+                async with processing_tasks_lock:
+                    processing_tasks.pop(task_id, None)
             
             task.add_done_callback(task_done_callback)
             
@@ -1320,6 +1446,13 @@ async def clear_document(
     try:
         logger.info(f"🗑️ Clearing document: {clean_document_id}")
         
+        # Cancel any active processing tasks
+        async with processing_tasks_lock:
+            task = processing_tasks.pop(clean_document_id, None)
+            if task and not task.done():
+                task.cancel()
+                logger.info(f"Cancelled active processing task for {clean_document_id}")
+        
         # Delete from main container
         deleted_count = 0
         
@@ -1431,12 +1564,19 @@ async def get_sse_connections(
             detail="Invalid admin token"
         )
     
-    return {
-        **sse_manager.get_connection_info(),
-        "processing_tasks": {
+    # Get connection info
+    connection_info = sse_manager.get_connection_info()
+    
+    # Get processing tasks info with lock
+    async with processing_tasks_lock:
+        tasks_info = {
             doc_id: "running" if not task.done() else "completed"
             for doc_id, task in processing_tasks.items()
         }
+    
+    return {
+        **connection_info,
+        "processing_tasks": tasks_info
     }
 
 # ===== DEBUG ENDPOINTS =====
@@ -1534,18 +1674,21 @@ async def check_service_health(request: Request):
         "AZURE_CONTAINER_NAME": settings.AZURE_CONTAINER_NAME,
         "AZURE_CACHE_CONTAINER_NAME": settings.AZURE_CACHE_CONTAINER_NAME,
         "AZURE_STORAGE_CONNECTION_STRING": bool(settings.AZURE_STORAGE_CONNECTION_STRING),
-        "OPENAI_API_KEY": bool(settings.OPENAI_API_KEY)
+        "OPENAI_API_KEY": bool(settings.OPENAI_API_KEY),
+        "SSE_SLOW_CONSUMER_THRESHOLD": settings.SSE_SLOW_CONSUMER_THRESHOLD,
+        "SSE_DROPPED_EVENT_THRESHOLD": settings.SSE_DROPPED_EVENT_THRESHOLD
     }
     
     # Check active processing tasks
-    health_status["tasks"] = {
-        "active_processing_tasks": len(processing_tasks),
-        "task_ids": list(processing_tasks.keys()),
-        "task_status": {
-            task_id: "running" if not task.done() else "completed"
-            for task_id, task in processing_tasks.items()
+    async with processing_tasks_lock:
+        health_status["tasks"] = {
+            "active_processing_tasks": len(processing_tasks),
+            "task_ids": list(processing_tasks.keys()),
+            "task_status": {
+                task_id: "running" if not task.done() else "completed"
+                for task_id, task in processing_tasks.items()
+            }
         }
-    }
     
     # Overall health
     all_services_healthy = all(
@@ -1708,7 +1851,9 @@ async def retry_document_processing(
             )
         )
         
-        processing_tasks[clean_document_id] = task
+        # Store task with lock
+        async with processing_tasks_lock:
+            processing_tasks[clean_document_id] = task
         
         return {
             "status": "success",
@@ -1728,11 +1873,30 @@ async def retry_document_processing(
 # ===== CLEANUP TASK =====
 
 async def periodic_cleanup():
-    """Periodic cleanup of stale connections"""
+    """Periodic cleanup of stale connections and tasks"""
     while True:
         try:
             await asyncio.sleep(300)  # Every 5 minutes
+            
+            # Cleanup stale SSE connections
             await sse_manager.cleanup_stale_connections(max_idle_seconds=600)  # 10 minute timeout
+            
+            # Cleanup completed tasks
+            async with processing_tasks_lock:
+                completed_tasks = [
+                    task_id for task_id, task in processing_tasks.items()
+                    if task.done()
+                ]
+                for task_id in completed_tasks:
+                    processing_tasks.pop(task_id, None)
+                
+                if completed_tasks:
+                    logger.info(f"Cleaned up {len(completed_tasks)} completed tasks")
+            
+            # Force garbage collection if needed
+            if len(completed_tasks) > 5:
+                gc.collect()
+                
         except Exception as e:
             logger.error(f"Error in periodic cleanup: {e}")
 

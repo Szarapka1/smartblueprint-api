@@ -1,4 +1,4 @@
-# app/services/storage_service.py - PRODUCTION-GRADE WITH PROPER ERROR HANDLING
+# app/services/storage_service.py - PRODUCTION-GRADE WITH PROPER ERROR HANDLING AND RETRY LOGIC
 
 import logging
 import asyncio
@@ -6,14 +6,55 @@ import json
 from typing import List, Optional, Dict, Any, AsyncGenerator, Tuple
 from app.core.config import get_settings
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError, ServiceRequestError, ServiceResponseError
 from azure.storage.blob import BlobPrefix, ContentSettings
 import re
+from functools import wraps
+import time
 
 logger = logging.getLogger(__name__)
 
+
+def retry_on_failure(max_attempts: Optional[int] = None, delay: Optional[float] = None, backoff: float = 2.0):
+    """
+    Decorator for retrying failed operations with exponential backoff
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(self, *args, **kwargs):
+            # Use settings from config if not provided
+            attempts = max_attempts or self.settings.STORAGE_RETRY_ATTEMPTS
+            retry_delay = delay or self.settings.STORAGE_RETRY_DELAY
+            
+            last_exception = None
+            for attempt in range(attempts):
+                try:
+                    return await func(self, *args, **kwargs)
+                except (ServiceRequestError, ServiceResponseError, asyncio.TimeoutError) as e:
+                    last_exception = e
+                    if attempt < attempts - 1:
+                        wait_time = retry_delay * (backoff ** attempt)
+                        logger.warning(
+                            f"Attempt {attempt + 1}/{attempts} failed for {func.__name__}: {e}. "
+                            f"Retrying in {wait_time:.1f}s..."
+                        )
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"All {attempts} attempts failed for {func.__name__}: {e}")
+                except Exception as e:
+                    # Non-retryable exceptions
+                    logger.error(f"Non-retryable error in {func.__name__}: {e}")
+                    raise
+            
+            # If we get here, all retries failed
+            raise last_exception
+        
+        return wrapper
+    return decorator
+
+
 class StorageService:
-    """Production-grade Azure Blob Storage service with robust error handling"""
+    """Production-grade Azure Blob Storage service with robust error handling and retry logic"""
     
     def __init__(self, settings=None):
         # Use provided settings or get from config
@@ -23,6 +64,7 @@ class StorageService:
             raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
         
         self._lock = asyncio.Lock()  # Thread safety for operations
+        self._container_clients = {}  # Cache for container clients
         
         try:
             # Create blob service client with optimized settings
@@ -40,14 +82,19 @@ class StorageService:
                 self.settings.AZURE_CACHE_CONTAINER_NAME
             )
             
+            # Cache the clients
+            self._container_clients[self.settings.AZURE_CONTAINER_NAME] = self.main_container_client
+            self._container_clients[self.settings.AZURE_CACHE_CONTAINER_NAME] = self.cache_container_client
+            
             logger.info("✅ StorageService initialized successfully")
             
         except Exception as e:
             logger.critical(f"❌ Failed to initialize Azure Blob Storage client: {e}")
             raise ValueError(f"Azure Storage initialization failed: {e}")
 
+    @retry_on_failure()
     async def verify_connection(self):
-        """Verify connection and ensure required containers exist"""
+        """Verify connection and ensure required containers exist with retry logic"""
         async with self._lock:
             logger.info("🔍 Verifying Azure Storage connection and containers...")
             
@@ -89,9 +136,16 @@ class StorageService:
             
         return blob_name
 
+    def _get_container_client(self, container_name: str) -> ContainerClient:
+        """Get container client with caching"""
+        if container_name not in self._container_clients:
+            raise ValueError(f"Invalid container name: {container_name}")
+        return self._container_clients[container_name]
+
+    @retry_on_failure()
     async def upload_file(self, container_name: str, blob_name: str, data: bytes, 
                          content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
-        """Upload data to Azure Blob Storage with validation and error handling"""
+        """Upload data to Azure Blob Storage with validation, error handling, and retry logic"""
         blob_name = self._validate_blob_name(blob_name)
         
         if not isinstance(data, bytes):
@@ -100,17 +154,10 @@ class StorageService:
         if len(data) == 0:
             raise ValueError("Cannot upload empty data")
         
-        # Validate container name
-        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
-                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
-            raise ValueError(f"Invalid container name: {container_name}")
+        # Get container client
+        container_client = self._get_container_client(container_name)
         
         try:
-            # Use pre-created container clients
-            container_client = (self.cache_container_client 
-                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
-                              else self.main_container_client)
-            
             blob_client = container_client.get_blob_client(blob=blob_name)
             
             # Prepare upload options
@@ -140,41 +187,60 @@ class StorageService:
                 upload_options['max_concurrency'] = 4  # Parallel upload chunks
                 upload_options['validate_content'] = False  # Skip MD5 validation for speed
             
-            await blob_client.upload_blob(**upload_options)
+            # Set timeout based on file size
+            timeout = min(self.settings.STORAGE_UPLOAD_TIMEOUT, 30 + (len(data) / (1024 * 1024)) * 2)
+            
+            await asyncio.wait_for(
+                blob_client.upload_blob(**upload_options),
+                timeout=timeout
+            )
             
             logger.info(f"✅ Uploaded '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
             return blob_client.url
             
+        except asyncio.TimeoutError:
+            logger.error(f"❌ Upload timeout for blob '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
+            raise RuntimeError(f"Blob upload timed out after {timeout}s")
         except Exception as e:
             logger.error(f"❌ Failed to upload blob '{blob_name}': {e}")
             raise RuntimeError(f"Blob upload failed: {e}")
 
+    @retry_on_failure()
     async def download_blob_as_bytes(self, container_name: str, blob_name: str) -> bytes:
-        """Download blob content as bytes with validation"""
+        """Download blob content as bytes with validation and retry logic"""
         blob_name = self._validate_blob_name(blob_name)
         
-        # Validate container name
-        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
-                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
-            raise ValueError(f"Invalid container name: {container_name}")
+        # Get container client
+        container_client = self._get_container_client(container_name)
         
         try:
-            container_client = (self.cache_container_client 
-                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
-                              else self.main_container_client)
-            
             blob_client = container_client.get_blob_client(blob=blob_name)
             
-            # Stream download for efficiency
-            download_stream = await blob_client.download_blob(max_concurrency=4)
-            data = await download_stream.readall()
+            # Check if blob exists first (with retry)
+            exists = await blob_client.exists()
+            if not exists:
+                raise FileNotFoundError(f"Blob '{blob_name}' not found in container '{container_name}'")
+            
+            # Stream download for efficiency with timeout
+            download_stream = await asyncio.wait_for(
+                blob_client.download_blob(max_concurrency=4),
+                timeout=self.settings.STORAGE_DOWNLOAD_TIMEOUT
+            )
+            
+            data = await asyncio.wait_for(
+                download_stream.readall(),
+                timeout=self.settings.STORAGE_DOWNLOAD_TIMEOUT
+            )
             
             logger.debug(f"✅ Downloaded '{blob_name}' ({len(data)/1024/1024:.1f}MB)")
             return data
             
-        except ResourceNotFoundError:
-            logger.error(f"❌ Blob '{blob_name}' not found in container '{container_name}'")
-            raise FileNotFoundError(f"Blob '{blob_name}' not found in container '{container_name}'")
+        except FileNotFoundError:
+            # Don't retry for file not found
+            raise
+        except asyncio.TimeoutError:
+            logger.error(f"❌ Download timeout for blob '{blob_name}'")
+            raise RuntimeError(f"Blob download timed out")
         except Exception as e:
             logger.error(f"❌ Failed to download blob '{blob_name}': {e}")
             raise RuntimeError(f"Blob download failed: {e}")
@@ -219,13 +285,12 @@ class StorageService:
             # Return empty dict to prevent crashes
             return {}
 
+    @retry_on_failure()
     async def list_blobs(self, container_name: str, prefix: str = "", 
                         suffix: str = "") -> List[str]:
-        """List blob names with validation and error handling"""
+        """List blob names with validation, error handling, and retry logic"""
         # Validate container name
-        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
-                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
-            raise ValueError(f"Invalid container name: {container_name}")
+        container_client = self._get_container_client(container_name)
         
         # Validate prefix and suffix (optimized regex)
         if prefix and not re.match(r'^[\w\-./]*$', prefix):
@@ -234,17 +299,22 @@ class StorageService:
             raise ValueError("Suffix contains invalid characters")
         
         try:
-            container_client = (self.cache_container_client 
-                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
-                              else self.main_container_client)
-            
             blob_names = []
             
             # Use prefix for server-side filtering
             list_kwargs = {"name_starts_with": prefix} if prefix else {}
             
-            # List blobs with prefix filter
-            async for blob in container_client.list_blobs(**list_kwargs):
+            # List blobs with prefix filter and timeout
+            list_operation = container_client.list_blobs(**list_kwargs)
+            
+            # Process with timeout
+            start_time = time.time()
+            async for blob in list_operation:
+                # Check timeout
+                if time.time() - start_time > self.settings.STORAGE_DOWNLOAD_TIMEOUT:
+                    logger.warning(f"List blobs operation timed out after processing {len(blob_names)} blobs")
+                    break
+                
                 # Apply suffix filter client-side if needed
                 if suffix and not blob.name.endswith(suffix):
                     continue
@@ -257,43 +327,45 @@ class StorageService:
             logger.error(f"❌ Failed to list blobs: {e}")
             raise RuntimeError(f"Blob listing failed: {e}")
 
+    @retry_on_failure(max_attempts=2)  # Fewer retries for existence checks
     async def blob_exists(self, container_name: str, blob_name: str) -> bool:
-        """Check if a blob exists with validation"""
+        """Check if a blob exists with validation and retry logic"""
         try:
             blob_name = self._validate_blob_name(blob_name)
             
-            # Validate container name
-            if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
-                                      self.settings.AZURE_CACHE_CONTAINER_NAME]:
-                return False
-            
-            container_client = (self.cache_container_client 
-                              if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
-                              else self.main_container_client)
+            # Get container client
+            container_client = self._get_container_client(container_name)
             
             blob_client = container_client.get_blob_client(blob=blob_name)
-            return await blob_client.exists()
             
+            # Add timeout for existence check
+            return await asyncio.wait_for(
+                blob_client.exists(),
+                timeout=10.0  # 10 second timeout for existence checks
+            )
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout checking existence of blob '{blob_name}'")
+            return False
         except Exception:
             return False
 
+    @retry_on_failure()
     async def delete_blob(self, container_name: str, blob_name: str) -> bool:
-        """Delete a blob with validation"""
+        """Delete a blob with validation and retry logic"""
         blob_name = self._validate_blob_name(blob_name)
         
-        # Validate container name
-        if container_name not in [self.settings.AZURE_CONTAINER_NAME, 
-                                  self.settings.AZURE_CACHE_CONTAINER_NAME]:
-            raise ValueError(f"Invalid container name: {container_name}")
+        # Get container client
+        container_client = self._get_container_client(container_name)
         
         async with self._lock:  # Thread safety for delete operations
             try:
-                container_client = (self.cache_container_client 
-                                  if container_name == self.settings.AZURE_CACHE_CONTAINER_NAME 
-                                  else self.main_container_client)
-                
                 blob_client = container_client.get_blob_client(blob=blob_name)
-                await blob_client.delete_blob()
+                
+                await asyncio.wait_for(
+                    blob_client.delete_blob(),
+                    timeout=30.0  # 30 second timeout for deletes
+                )
                 
                 logger.info(f"✅ Deleted '{blob_name}'")
                 return True
@@ -301,6 +373,9 @@ class StorageService:
             except ResourceNotFoundError:
                 logger.warning(f"⚠️ Blob '{blob_name}' not found (already deleted)")
                 return False
+            except asyncio.TimeoutError:
+                logger.error(f"❌ Delete timeout for blob '{blob_name}'")
+                raise RuntimeError(f"Blob deletion timed out")
             except Exception as e:
                 logger.error(f"❌ Failed to delete '{blob_name}': {e}")
                 raise RuntimeError(f"Blob deletion failed: {e}")
@@ -318,14 +393,22 @@ class StorageService:
                 logger.info(f"No blobs found with prefix '{prefix}'")
                 return 0
             
-            # Delete each blob
-            deleted_count = 0
-            for blob_name in blobs_to_delete:
-                try:
-                    if await self.delete_blob(container_name, blob_name):
-                        deleted_count += 1
-                except Exception as e:
-                    logger.warning(f"Failed to delete blob '{blob_name}': {e}")
+            # Delete each blob with concurrency control
+            semaphore = asyncio.Semaphore(10)  # Limit concurrent deletions
+            
+            async def delete_with_semaphore(blob_name: str) -> bool:
+                async with semaphore:
+                    try:
+                        return await self.delete_blob(container_name, blob_name)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete blob '{blob_name}': {e}")
+                        return False
+            
+            # Delete all blobs in parallel
+            tasks = [delete_with_semaphore(blob_name) for blob_name in blobs_to_delete]
+            results = await asyncio.gather(*tasks)
+            
+            deleted_count = sum(1 for result in results if result)
             
             logger.info(f"✅ Deleted {deleted_count}/{len(blobs_to_delete)} blobs with prefix '{prefix}'")
             return deleted_count
@@ -336,7 +419,7 @@ class StorageService:
 
     async def batch_download_blobs(self, container_name: str, blob_names: List[str], 
                                   max_concurrent: int = 5) -> Dict[str, bytes]:
-        """Download multiple blobs in parallel with validation"""
+        """Download multiple blobs in parallel with validation and retry logic"""
         # Validate all blob names first
         validated_names = []
         for name in blob_names:
@@ -349,7 +432,7 @@ class StorageService:
             return {}
         
         # Limit concurrency to reasonable value
-        max_concurrent = min(max_concurrent, 10)
+        max_concurrent = min(max_concurrent, self.settings.STORAGE_MAX_CONCURRENT_DOWNLOADS)
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def download_with_semaphore(blob_name: str) -> Tuple[str, Optional[bytes]]:
@@ -364,9 +447,24 @@ class StorageService:
                     logger.error(f"Failed to download {blob_name}: {e}")
                     return (blob_name, None)
         
-        # Download all blobs in parallel
+        # Download all blobs in parallel with timeout
         tasks = [download_with_semaphore(name) for name in validated_names]
-        results = await asyncio.gather(*tasks)
+        
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=self.settings.STORAGE_BATCH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Batch download timed out after {self.settings.STORAGE_BATCH_TIMEOUT}s")
+            # Return partial results
+            results = []
+            for task in tasks:
+                if task.done():
+                    try:
+                        results.append(task.result())
+                    except:
+                        pass
         
         # Process results
         downloaded = {}
@@ -379,7 +477,7 @@ class StorageService:
 
     async def batch_upload_blobs(self, container_name: str, blobs: Dict[str, bytes], 
                                 max_concurrent: int = 5) -> Dict[str, bool]:
-        """Upload multiple blobs in parallel with validation"""
+        """Upload multiple blobs in parallel with validation and retry logic"""
         # Validate all blob names first
         validated_blobs = {}
         for name, data in blobs.items():
@@ -396,7 +494,7 @@ class StorageService:
             return {}
         
         # Limit concurrency
-        max_concurrent = min(max_concurrent, 10)
+        max_concurrent = min(max_concurrent, self.settings.STORAGE_MAX_CONCURRENT_UPLOADS)
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def upload_with_semaphore(blob_name: str, data: bytes) -> Tuple[str, bool]:
@@ -408,20 +506,36 @@ class StorageService:
                     logger.error(f"Failed to upload {blob_name}: {e}")
                     return (blob_name, False)
         
-        # Upload all blobs in parallel
+        # Upload all blobs in parallel with timeout
         tasks = [upload_with_semaphore(name, data) for name, data in validated_blobs.items()]
-        results = await asyncio.gather(*tasks)
+        
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=self.settings.STORAGE_BATCH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Batch upload timed out after {self.settings.STORAGE_BATCH_TIMEOUT}s")
+            # Return partial results
+            results = []
+            for task in tasks:
+                if task.done():
+                    try:
+                        results.append(task.result())
+                    except:
+                        results.append((None, False))
         
         # Return upload results
-        upload_results = {name: success for name, success in results}
+        upload_results = {name: success for name, success in results if name}
         
         successful = sum(1 for success in upload_results.values() if success)
         logger.info(f"✅ Batch uploaded {successful}/{len(validated_blobs)} blobs")
         
         return upload_results
 
+    @retry_on_failure()
     async def list_document_ids(self, container_name: str) -> List[str]:
-        """List all document IDs by finding _context.txt files"""
+        """List all document IDs by finding _context.txt files with retry logic"""
         try:
             # Use suffix filter to only get context files
             context_files = await self.list_blobs(
@@ -528,7 +642,9 @@ class StorageService:
                 "parallel_uploads": "Supported",
                 "pre_created_clients": True,
                 "thread_safety": "Full asyncio locking",
-                "batch_operations": "Optimized with controlled concurrency"
+                "batch_operations": "Optimized with controlled concurrency",
+                "retry_logic": f"{self.settings.STORAGE_RETRY_ATTEMPTS} attempts with exponential backoff",
+                "connection_pooling": "Container clients cached for performance"
             },
             "supported_formats": {
                 "documents": ["pdf"],
@@ -536,7 +652,17 @@ class StorageService:
                 "metadata": ["json", "txt"]
             },
             "has_connection_string": bool(self.settings.AZURE_STORAGE_CONNECTION_STRING),
-            "connection_string_length": len(self.settings.AZURE_STORAGE_CONNECTION_STRING) if self.settings.AZURE_STORAGE_CONNECTION_STRING else 0
+            "connection_string_length": len(self.settings.AZURE_STORAGE_CONNECTION_STRING) if self.settings.AZURE_STORAGE_CONNECTION_STRING else 0,
+            "retry_settings": {
+                "max_attempts": self.settings.STORAGE_RETRY_ATTEMPTS,
+                "initial_delay": self.settings.STORAGE_RETRY_DELAY,
+                "backoff_factor": 2.0
+            },
+            "timeout_settings": {
+                "upload": self.settings.STORAGE_UPLOAD_TIMEOUT,
+                "download": self.settings.STORAGE_DOWNLOAD_TIMEOUT,
+                "batch": self.settings.STORAGE_BATCH_TIMEOUT
+            }
         }
 
     async def __aenter__(self):

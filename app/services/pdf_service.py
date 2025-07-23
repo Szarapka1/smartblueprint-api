@@ -1,4 +1,4 @@
-# app/services/pdf_service.py - PRODUCTION-GRADE PDF PROCESSING WITH ENHANCED GRID DETECTION
+# app/services/pdf_service.py - PRODUCTION-GRADE PDF PROCESSING WITH ENHANCED GRID DETECTION AND THREAD SAFETY
 
 import logging
 import fitz  # PyMuPDF
@@ -15,6 +15,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 import time
 import numpy as np
+import traceback
 
 # Safe OpenCV import
 try:
@@ -84,14 +85,16 @@ class VisualGridLine:
 
 
 class PDFService:
-    """Production-grade PDF processing with enhanced grid detection, proper error handling, memory management, and SSE event support"""
+    """Production-grade PDF processing with enhanced grid detection, proper error handling, memory management, thread safety, and SSE event support"""
     
     def __init__(self, settings: AppSettings):
         if not settings:
             raise ValueError("AppSettings instance is required")
         
         self.settings = settings
-        self._lock = asyncio.Lock()  # Thread safety
+        self._lock = asyncio.Lock()  # Thread safety for general operations
+        self._status_lock = asyncio.Lock()  # Dedicated lock for status updates
+        self._status_update_locks: Dict[str, asyncio.Lock] = {}  # Per-document status locks
         
         # Resolution settings - balanced for quality and performance
         self.storage_dpi = settings.PDF_HIGH_RESOLUTION  # 150 DPI for storage
@@ -141,17 +144,35 @@ class PDFService:
         logger.info(f"   📄 Max pages: {self.max_pages}")
         logger.info(f"   🖼️ DPI: Storage={self.storage_dpi}, AI={self.ai_image_dpi}")
         logger.info(f"   📦 Batch size: {self.batch_size} pages")
-        logger.info(f"   🔒 Thread safety: Enabled")
+        logger.info(f"   🔒 Thread safety: Enhanced with status locks")
         logger.info(f"   💾 Memory management: Active")
         logger.info(f"   📡 SSE Events: Supported")
         logger.info(f"   🎯 Visual Grid Detection: {'Enabled' if OPENCV_AVAILABLE else 'Disabled (OpenCV not available)'}")
         logger.info(f"   📐 Universal Grid System: Enabled")
 
+    def _get_status_lock(self, session_id: str) -> asyncio.Lock:
+        """Get or create a status lock for a specific document"""
+        if session_id not in self._status_update_locks:
+            self._status_update_locks[session_id] = asyncio.Lock()
+        return self._status_update_locks[session_id]
+
+    async def _safe_event_callback(self, event_callback: Optional[Callable], event_type: str, event_data: Dict[str, Any]):
+        """Safely call event callback with error handling"""
+        if not event_callback:
+            return
+            
+        try:
+            await event_callback(event_type, event_data)
+        except Exception as e:
+            logger.error(f"Error in event callback for {event_type}: {e}")
+            logger.error(traceback.format_exc())
+            # Don't propagate callback errors to main processing
+
     async def process_and_cache_pdf(self, session_id: str, pdf_bytes: bytes, 
                                    storage_service: StorageService,
                                    event_callback: Optional[Callable] = None):
         """
-        Process PDF with production-grade error handling, memory management, and SSE event emission
+        Process PDF with production-grade error handling, memory management, thread safety, and SSE event emission
         
         Args:
             session_id: Document ID
@@ -206,6 +227,14 @@ class PDFService:
                         
                         logger.info(f"📦 Processing batch {batch_num}/{total_batches}: pages {batch_start + 1}-{batch_end}")
                         
+                        # Emit batch start event
+                        await self._safe_event_callback(event_callback, "batch_start", {
+                            "batch_number": batch_num,
+                            "total_batches": total_batches,
+                            "start_page": batch_start + 1,
+                            "end_page": batch_end
+                        })
+                        
                         # Process batch
                         batch_results = await self._process_batch_safe(
                             doc, batch_pages, session_id, storage_service, event_callback
@@ -225,19 +254,18 @@ class PDFService:
                                 self._update_extraction_summary(metadata, result)
                                 pages_processed += 1
                         
-                        # Update status
+                        # Update status with thread safety
                         metadata['pages_processed'] = pages_processed
                         await self._update_status(session_id, 'processing', metadata, storage_service)
                         
                         # Emit batch complete event
-                        if event_callback:
-                            progress_percent = round((pages_processed / pages_to_process) * 100)
-                            await event_callback("batch_complete", {
-                                "batch_number": batch_num,
-                                "total_batches": total_batches,
-                                "pages_processed": pages_processed,
-                                "progress_percent": progress_percent
-                            })
+                        progress_percent = round((pages_processed / pages_to_process) * 100)
+                        await self._safe_event_callback(event_callback, "batch_complete", {
+                            "batch_number": batch_num,
+                            "total_batches": total_batches,
+                            "pages_processed": pages_processed,
+                            "progress_percent": progress_percent
+                        })
                         
                         # Memory management
                         if (batch_end % self.gc_frequency) == 0:
@@ -260,7 +288,16 @@ class PDFService:
                     # Update final status to 'ready'
                     metadata['status'] = 'ready'
                     metadata['processing_time'] = round(time.time() - processing_start, 2)
+                    metadata['completed_at'] = datetime.utcnow().isoformat() + 'Z'
                     await self._update_status(session_id, 'ready', metadata, storage_service)
+                    
+                    # Emit processing complete event
+                    await self._safe_event_callback(event_callback, "processing_complete", {
+                        "status": "ready",
+                        "total_pages": pages_processed,
+                        "processing_time": metadata['processing_time'],
+                        "grid_systems_detected": metadata.get('grid_systems_detected', 0)
+                    })
                     
                     logger.info(f"✅ Processing complete for {session_id}")
                     logger.info(f"   📝 Pages processed: {pages_processed}")
@@ -269,31 +306,56 @@ class PDFService:
                 finally:
                     doc.close()
                     gc.collect()
+                    # Clean up status lock
+                    if session_id in self._status_update_locks:
+                        del self._status_update_locks[session_id]
                     
             except Exception as e:
                 logger.error(f"❌ Processing failed: {e}", exc_info=True)
                 await self._save_error_state(session_id, str(e), storage_service)
+                # Emit error event
+                await self._safe_event_callback(event_callback, "processing_error", {
+                    "error_type": type(e).__name__,
+                    "message": str(e),
+                    "is_fatal": True
+                })
                 raise RuntimeError(f"PDF processing failed: {str(e)}")
 
     async def _update_status(self, session_id: str, status: str, metadata: Dict, storage_service: StorageService):
-        """Update status file to match what blueprint_routes expects"""
-        status_data = {
-            'document_id': session_id,
-            'status': status,  # 'processing', 'ready', or 'error'
-            'updated_at': datetime.utcnow().isoformat() + 'Z',
-            'pages_processed': metadata.get('pages_processed', 0),
-            'total_pages': metadata.get('total_pages', 0),
-            'started_at': metadata.get('started_at'),
-            'completed_at': metadata.get('completed_at'),
-            'error': metadata.get('error')
-        }
+        """Update status file with thread safety to prevent race conditions"""
+        # Get document-specific lock
+        status_lock = self._get_status_lock(session_id)
         
-        await storage_service.upload_file(
-            container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
-            blob_name=f"{session_id}_status.json",  # Changed from _processing_status.json
-            data=json.dumps(status_data).encode('utf-8'),
-            content_type="application/json"
-        )
+        async with status_lock:
+            try:
+                # Add timeout to prevent deadlocks
+                async with asyncio.timeout(self.settings.STATUS_UPDATE_LOCK_TIMEOUT):
+                    status_data = {
+                        'document_id': session_id,
+                        'status': status,  # 'processing', 'ready', or 'error'
+                        'updated_at': datetime.utcnow().isoformat() + 'Z',
+                        'pages_processed': metadata.get('pages_processed', 0),
+                        'total_pages': metadata.get('total_pages', 0),
+                        'started_at': metadata.get('started_at'),
+                        'completed_at': metadata.get('completed_at'),
+                        'error': metadata.get('error'),
+                        'processing_time': metadata.get('processing_time'),
+                        'last_update_timestamp': time.time()  # For debugging race conditions
+                    }
+                    
+                    await storage_service.upload_file(
+                        container_name=self.settings.AZURE_CACHE_CONTAINER_NAME,
+                        blob_name=f"{session_id}_status.json",
+                        data=json.dumps(status_data).encode('utf-8'),
+                        content_type="application/json"
+                    )
+                    
+            except asyncio.TimeoutError:
+                logger.error(f"Status update timeout for {session_id}")
+                # Continue without failing the entire process
+            except Exception as e:
+                logger.error(f"Failed to update status for {session_id}: {e}")
+                # Continue without failing the entire process
 
     def _initialize_metadata(self, session_id: str, doc: fitz.Document, 
                            pages_to_process: int, total_pages: int, 
@@ -317,7 +379,8 @@ class PDFService:
                 'total_tables_found': 0
             },
             'started_at': datetime.utcnow().isoformat() + 'Z',
-            'pages_processed': 0
+            'pages_processed': 0,
+            'grid_systems_detected': 0
         }
 
     def _update_extraction_summary(self, metadata: Dict[str, Any], result: Dict[str, Any]):
@@ -333,6 +396,10 @@ class PDFService:
             metadata['extraction_summary']['total_tables_found'] += result['tables_found']
         if 'tables_extracted' in result:
             metadata['extraction_summary']['total_tables_extracted'] += result['tables_extracted']
+        
+        # Update grid systems count
+        if result.get('grid_system'):
+            metadata['grid_systems_detected'] = metadata.get('grid_systems_detected', 0) + 1
 
     async def _process_batch_safe(self, doc: fitz.Document, page_numbers: List[int], 
                                  session_id: str, storage_service: StorageService,
@@ -355,6 +422,13 @@ class PDFService:
                     'error': str(e),
                     'text': '',
                     'metadata': {'page_number': page_num + 1}
+                })
+                
+                # Emit page error event
+                await self._safe_event_callback(event_callback, "page_error", {
+                    "page_number": page_num + 1,
+                    "error": str(e),
+                    "error_type": type(e).__name__
                 })
         
         return results
@@ -424,22 +498,21 @@ class PDFService:
             formatted_text = self._format_page_text(page_actual, page_analysis, grid_system, page_text)
             
             # Emit page processed event
-            if event_callback:
-                total_pages = doc.page_count
-                progress_percent = round((page_actual / total_pages) * 100)
-                estimated_time = int((total_pages - page_actual) * self.processing_delay)
-                
-                await event_callback("page_processed", {
-                    "page_number": page_actual,
-                    "total_pages": total_pages,
-                    "progress_percent": progress_percent,
-                    "estimated_time": estimated_time,
-                    "has_text": page_metadata['has_text'],
-                    "has_tables": page_metadata['has_tables'],
-                    "has_grid": page_metadata['has_grid'],
-                    "grid_confidence": page_metadata['grid_confidence'],
-                    "grid_type": page_metadata['grid_type']
-                })
+            total_pages = doc.page_count
+            progress_percent = round((page_actual / total_pages) * 100)
+            estimated_time = int((total_pages - page_actual) * self.processing_delay)
+            
+            await self._safe_event_callback(event_callback, "page_processed", {
+                "page_number": page_actual,
+                "total_pages": total_pages,
+                "progress_percent": progress_percent,
+                "estimated_time": estimated_time,
+                "has_text": page_metadata['has_text'],
+                "has_tables": page_metadata['has_tables'],
+                "has_grid": page_metadata['has_grid'],
+                "grid_confidence": page_metadata['grid_confidence'],
+                "grid_type": page_metadata['grid_type']
+            })
             
             # Clean up page
             page.clean_contents()
@@ -1160,7 +1233,12 @@ class PDFService:
         except Exception as e:
             logger.error(f"Failed to generate images for page {page_num}: {e}")
             # Don't fail the entire page processing for image generation errors
-            pass
+            # Emit image generation error event
+            await self._safe_event_callback(event_callback, "image_error", {
+                "page_number": page_num,
+                "error": str(e),
+                "error_type": type(e).__name__
+            })
 
     async def _generate_jpeg_image(self, page: fitz.Page, page_num: int, session_id: str,
                                   storage_service: StorageService, dpi: int, quality: int, suffix: str,
@@ -1191,17 +1269,16 @@ class PDFService:
             )
             
             # Emit resource ready event
-            if event_callback:
-                await event_callback("resource_ready", {
-                    "resource_type": resource_type,
-                    "resource_id": f"page_{page_num}_{resource_type}",
-                    "page_number": page_num,
-                    "metadata": {
-                        "dpi": dpi,
-                        "quality": quality,
-                        "size": len(output.getvalue())
-                    }
-                })
+            await self._safe_event_callback(event_callback, "resource_ready", {
+                "resource_type": resource_type,
+                "resource_id": f"page_{page_num}_{resource_type}",
+                "page_number": page_num,
+                "metadata": {
+                    "dpi": dpi,
+                    "quality": quality,
+                    "size": len(output.getvalue())
+                }
+            })
             
         finally:
             # Clean up
@@ -1300,16 +1377,15 @@ class PDFService:
             )
             
             # Emit context ready event
-            if event_callback:
-                await event_callback("resource_ready", {
-                    "resource_type": "context_text",
-                    "resource_id": "context",
-                    "available": True,
-                    "metadata": {
-                        "text_length": len(full_text),
-                        "has_content": bool(full_text.strip())
-                    }
-                })
+            await self._safe_event_callback(event_callback, "resource_ready", {
+                "resource_type": "context_text",
+                "resource_id": "context",
+                "available": True,
+                "metadata": {
+                    "text_length": len(full_text),
+                    "has_content": bool(full_text.strip())
+                }
+            })
             
             # Save grid systems if detected
             if all_grid_systems:
@@ -1321,15 +1397,14 @@ class PDFService:
                 )
                 
                 # Emit grid systems ready event
-                if event_callback:
-                    await event_callback("resource_ready", {
-                        "resource_type": "grid_systems",
-                        "resource_id": "grid_systems",
-                        "metadata": {
-                            "grid_count": len(all_grid_systems),
-                            "pages_with_grids": list(all_grid_systems.keys())
-                        }
-                    })
+                await self._safe_event_callback(event_callback, "resource_ready", {
+                    "resource_type": "grid_systems",
+                    "resource_id": "grid_systems",
+                    "metadata": {
+                        "grid_count": len(all_grid_systems),
+                        "pages_with_grids": list(all_grid_systems.keys())
+                    }
+                })
             
             # Create document index
             await self._create_document_index(
@@ -1350,15 +1425,14 @@ class PDFService:
             )
             
             # Emit metadata ready event
-            if event_callback:
-                await event_callback("resource_ready", {
-                    "resource_type": "metadata",
-                    "resource_id": "metadata",
-                    "metadata": {
-                        "page_count": metadata['page_count'],
-                        "processing_time": metadata['processing_time']
-                    }
-                })
+            await self._safe_event_callback(event_callback, "resource_ready", {
+                "resource_type": "metadata",
+                "resource_id": "metadata",
+                "metadata": {
+                    "page_count": metadata['page_count'],
+                    "processing_time": metadata['processing_time']
+                }
+            })
         
         except Exception as e:
             logger.error(f"Failed to save processing results: {e}")
@@ -1432,16 +1506,17 @@ class PDFService:
 
     async def _save_error_state(self, session_id: str, error: str, 
                                storage_service: StorageService):
-        """Save error information for debugging"""
+        """Save error information for debugging with thread safety"""
         error_info = {
             'document_id': session_id,
             'timestamp': datetime.utcnow().isoformat() + 'Z',
             'error': str(error),
-            'status': 'error'  # Changed from 'failed'
+            'status': 'error',
+            'error_type': 'processing_failed'
         }
         
         try:
-            # Update status file
+            # Update status file with thread safety
             await self._update_status(session_id, 'error', error_info, storage_service)
             
             # Also save detailed error info
@@ -1458,7 +1533,7 @@ class PDFService:
         """Get service statistics"""
         return {
             "service": "PDFService",
-            "version": "6.0.0-UNIVERSAL-GRID-SYSTEM",
+            "version": "6.0.0-UNIVERSAL-GRID-SYSTEM-THREAD-SAFE",
             "mode": "production_grade_with_universal_grid_detection",
             "capabilities": {
                 "max_pages": self.max_pages,
@@ -1474,7 +1549,8 @@ class PDFService:
                 "ai_optimized": True,
                 "thread_safe": True,
                 "memory_managed": True,
-                "sse_events": True
+                "sse_events": True,
+                "status_locking": True
             },
             "grid_detection": {
                 "text_based": True,
@@ -1490,13 +1566,17 @@ class PDFService:
                 "input_validation": True,
                 "size_limits": True,
                 "thread_safety": True,
-                "error_recovery": True
+                "error_recovery": True,
+                "status_locking": True,
+                "race_condition_prevention": True
             },
             "sse_events": {
                 "page_processed": True,
                 "resource_ready": True,
                 "batch_complete": True,
-                "processing_complete": True
+                "processing_complete": True,
+                "error_events": True,
+                "safe_callbacks": True
             }
         }
 
@@ -1508,4 +1588,6 @@ class PDFService:
         """Async context manager exit with cleanup"""
         # Force garbage collection
         gc.collect()
+        # Clear any remaining status locks
+        self._status_update_locks.clear()
         logger.info("✅ PDF service cleaned up")
