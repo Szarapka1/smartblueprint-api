@@ -61,7 +61,7 @@ async def load_document_resources(document_id: str, storage_service) -> Dict[str
     """Load commonly used document resources"""
     cache_container = settings.AZURE_CACHE_CONTAINER_NAME
     
-    # Parallel load of common resources
+    # Parallel load of common resources with no timeout
     tasks = {
         'status': storage_service.download_blob_as_json(
             container_name=cache_container,
@@ -170,7 +170,7 @@ async def check_document_status_enhanced(
                 main_container, f"{clean_document_id}.pdf"
             )
             
-            # Check metadata files
+            # Check metadata files - no timeout for testing
             metadata_checks = await asyncio.gather(
                 storage_service.blob_exists(cache_container, f"{clean_document_id}_context.txt"),
                 storage_service.blob_exists(cache_container, f"{clean_document_id}_metadata.json"),
@@ -293,7 +293,7 @@ async def check_document_status_enhanced(
 async def get_page_resources(
     request: Request,
     document_id: str,
-    page_num: int  # ✅ Path parameter
+    page_num: int
 ):
     """Check what resources are available for a specific page."""
     clean_document_id = validate_document_id(document_id)
@@ -351,7 +351,7 @@ async def get_page_resources(
 async def get_page_image(
     request: Request,
     document_id: str,
-    page_num: int,  # ✅ Path parameter - no Query()
+    page_num: int,
     type: str = Query("full", regex="^(full|ai|thumb)$", description="Image type")
 ):
     """Get a specific page image."""
@@ -828,7 +828,7 @@ async def get_document_summary(request: Request, document_id: str):
         if not storage_service:
             raise HTTPException(status_code=503, detail="Storage service unavailable")
 
-        # Get all data in parallel
+        # Get all data in parallel - no timeout for testing
         results = await asyncio.gather(
             get_document_info(request, document_id),
             get_document_statistics(request, document_id),
