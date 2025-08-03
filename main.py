@@ -166,10 +166,10 @@ class SSEEventManager:
                 for client_id, connection in self.connections[document_id].items():
                     if connection.active:
                         try:
-                            # Non-blocking put with long timeout for testing
+                            # Non-blocking put with timeout
                             await asyncio.wait_for(
                                 connection.queue.put(event),
-                                timeout=30.0  # 30 seconds timeout for testing
+                                timeout=1.0
                             )
                             connection.last_activity = asyncio.get_event_loop().time()
                         except (asyncio.TimeoutError, asyncio.QueueFull):
@@ -485,8 +485,6 @@ app = FastAPI(
     - Detailed error messages exposed
     - Full stack traces in responses
     - No authentication required
-    - Extended timeouts for testing
-    - Maximum file sizes allowed
     
     🚀 **NEW**: Server-Sent Events (SSE) support for real-time status updates
     
@@ -506,8 +504,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  # Allow ALL methods
     allow_headers=["*"],  # Allow ALL headers
-    expose_headers=["*"],  # Expose ALL headers
-    max_age=86400  # 24 hours cache for preflight requests
+    expose_headers=["*"]  # Expose ALL headers
 )
 
 logger.warning("⚠️ CORS: Allowing ALL origins, methods, and headers - TEST MODE ONLY!")
@@ -613,15 +610,7 @@ async def root():
             "annotation_routes": ANNOTATION_ROUTES_AVAILABLE,
             "note_routes": NOTE_ROUTES_AVAILABLE
         },
-        "sse_config": settings.get_sse_settings() if settings.ENABLE_SSE else None,
-        "test_mode_settings": {
-            "max_file_size_mb": settings.MAX_FILE_SIZE_MB,
-            "pdf_max_pages": settings.PDF_MAX_PAGES,
-            "sse_keepalive_interval": settings.SSE_KEEPALIVE_INTERVAL,
-            "sse_client_timeout": settings.SSE_CLIENT_TIMEOUT,
-            "sse_max_connections_per_document": settings.SSE_MAX_CONNECTIONS_PER_DOCUMENT,
-            "processing_batch_size": settings.PROCESSING_BATCH_SIZE
-        }
+        "sse_config": settings.get_sse_settings() if settings.ENABLE_SSE else None
     }
 
 @app.get("/api/v1/health", tags=["System"])
@@ -752,13 +741,7 @@ async def get_configuration():
             "thumbnail_dpi": settings.PDF_THUMBNAIL_DPI,
             "batch_size": settings.PROCESSING_BATCH_SIZE
         },
-        "sse": settings.get_sse_settings() if settings.ENABLE_SSE else None,
-        "test_mode": {
-            "extended_timeouts": True,
-            "verbose_errors": True,
-            "all_cors_allowed": True,
-            "debug_endpoints_enabled": True
-        }
+        "sse": settings.get_sse_settings() if settings.ENABLE_SSE else None
     }
 
 @app.get("/debug/error-test", tags=["Debug"])
@@ -782,41 +765,6 @@ async def list_routes():
         "routes": sorted(routes, key=lambda x: x["path"])
     }
 
-@app.get("/debug/sse-test/{document_id}", tags=["Debug"])
-async def test_sse_connection(document_id: str):
-    """Test SSE functionality by sending test events"""
-    from datetime import datetime
-    
-    sse_manager = getattr(app.state, 'sse_manager', None)
-    if not sse_manager:
-        return {"error": "SSE manager not available"}
-    
-    # Send test events
-    test_events = [
-        {
-            "event_type": "test_event",
-            "data": {"message": "Test event 1", "timestamp": datetime.utcnow().isoformat()}
-        },
-        {
-            "event_type": "status_update",
-            "data": {"stage": "test", "message": "Test status update", "progress_percent": 50}
-        },
-        {
-            "event_type": "resource_ready",
-            "data": {"resource_type": "test", "resource_id": "test-1", "url": "/test"}
-        }
-    ]
-    
-    for event in test_events:
-        await sse_manager.send_event(document_id, event["event_type"], event["data"])
-    
-    return {
-        "status": "success",
-        "message": f"Sent {len(test_events)} test events",
-        "document_id": document_id,
-        "active_connections": len(sse_manager.connections.get(document_id, {}))
-    }
-
 # --- Application Entry Point ---
 if __name__ == "__main__":
     logger.info("="*60)
@@ -827,10 +775,8 @@ if __name__ == "__main__":
     logger.info(f"🌐 CORS: Allowing ALL origins")
     logger.info(f"📝 Error details: FULLY EXPOSED")
     logger.info(f"🔓 Authentication: DISABLED")
-    logger.info(f"⏱️  Timeouts: EXTENDED for testing")
-    logger.info(f"📦 File sizes: MAXIMUM allowed")
     if settings.ENABLE_SSE:
-        logger.info(f"📡 SSE: ENABLED with extended timeouts")
+        logger.info(f"📡 SSE: ENABLED")
     logger.info("="*60)
     
     uvicorn.run(
@@ -839,8 +785,5 @@ if __name__ == "__main__":
         port=settings.PORT,
         reload=True,  # Auto-reload on code changes
         log_level="debug",  # Verbose logging
-        access_log=True,  # Log all requests
-        timeout_keep_alive=300,  # 5 minute keep-alive
-        ws_ping_interval=60,  # WebSocket ping interval
-        ws_ping_timeout=300  # WebSocket timeout
+        access_log=True  # Log all requests
     )
