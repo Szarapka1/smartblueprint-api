@@ -1426,7 +1426,7 @@ async def clear_document(
 ):
     """
     Clear a document and all associated data.
-    Requires confirmation parameter to prevent accidental deletion.
+    Requires confirmation parameter to prevent accidental deletioghfn.
     """
     if not confirm:
         raise HTTPException(
