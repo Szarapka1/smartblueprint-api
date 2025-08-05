@@ -1839,36 +1839,17 @@ async def retry_document_processing(
             current_status = {}
         
         # Start processing
-        # Start processing with safety wrapper
-async def safe_process_wrapper():
-    try:
-        await process_pdf_async(
-            session_id=clean_document_id,
-            contents=pdf_bytes,
-            clean_filename=current_status.get('filename', 'unknown.pdf'),
-            author=current_status.get('author', 'Unknown'),
-            storage_service=storage_service,
-            pdf_service=pdf_service,
-            session_service=getattr(request.app.state, 'session_service', None)
+        task = asyncio.create_task(
+            process_pdf_async(
+                session_id=clean_document_id,
+                contents=pdf_bytes,
+                clean_filename=current_status.get('filename', 'unknown.pdf'),
+                author=current_status.get('author', 'Unknown'),
+                storage_service=storage_service,
+                pdf_service=pdf_service,
+                session_service=getattr(request.app.state, 'session_service', None)
+            )
         )
-    except Exception as e:
-        logger.error(f"❌ Error in process_pdf_async for {clean_document_id}: {e}", exc_info=True)
-
-# Launch async task
-task = asyncio.create_task(safe_process_wrapper())
-
-# Store task with lock
-async with processing_tasks_lock:
-    processing_tasks[clean_document_id] = task
-
-return {
-    "status": "success",
-    "message": f"Reprocessing started for document {clean_document_id}",
-    "document_id": clean_document_id,
-    "active_tasks": len(processing_tasks)
-}
-
-        
         
         # Store task with lock
         async with processing_tasks_lock:
