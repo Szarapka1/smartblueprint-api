@@ -75,11 +75,14 @@ class QuestionAnalyzer:
                 'complete analysis', 'full review', 'audit'
             ],
             QuestionType.ESTIMATE: [
-                # Primary calculation keywords - let calculation_engine handle specifics
+            # Primary calculation keywords
                 'calculate', 'estimate', 'computation', 'figure out', 'work out',
-                
-                # Cost/Price
-                'cost', 'price', 'budget', 'dollar', '
+            # Cost estimation
+                'cost', 'price', 'budget', 'dollar',
+            # Area/quantity estimation  
+                'area', 'square footage', 'material', 'quantity needed',
+                'how much will', 'rough estimate', 'approximate'
+            ]
         }
         
         # Drawing type patterns
