@@ -1868,7 +1868,7 @@ return {
     "active_tasks": len(processing_tasks)
 }
 
-        )
+        
         
         # Store task with lock
         async with processing_tasks_lock:
