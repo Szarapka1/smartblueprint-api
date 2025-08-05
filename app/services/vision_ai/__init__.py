@@ -6,10 +6,15 @@ from .response_formatter import ResponseFormatter
 from .data_loader import DataLoader
 from .semantic_highlighter import SemanticHighlighter
 from .note_generator import NoteGenerator
+from .page_selection import PageSelector
+from .post_processor import PostProcessor
+from .enhanced_cache import EnhancedCache
+from .calculation_engine import CalculationEngine
 
-# FIXED: Import patterns
+# Import patterns
 from .patterns import VISUAL_PATTERNS, VISION_CONFIG, VISION_PHILOSOPHY, ELEMENT_VARIATIONS
 
+# Import models from schemas
 from app.models.schemas import (
     VisualIntelligenceResult,
     ValidationResult,
@@ -20,11 +25,15 @@ from app.models.schemas import (
     SemanticHighlight
 )
 
+# Alias for backward compatibility
 ProfessionalBlueprintAI = VisualIntelligenceFirst
 
 __all__ = [
+    # Main orchestrator
     "VisualIntelligenceFirst",
     "ProfessionalBlueprintAI",
+    
+    # Core modules
     "QuestionAnalyzer", 
     "VisionIntelligence",
     "ValidationSystem",
@@ -32,6 +41,12 @@ __all__ = [
     "DataLoader",
     "SemanticHighlighter",
     "NoteGenerator",
+    "PageSelector",
+    "PostProcessor",
+    "EnhancedCache",
+    "CalculationEngine",
+    
+    # Models
     "VisualIntelligenceResult",
     "ValidationResult",
     "TrustMetrics",
@@ -39,7 +54,8 @@ __all__ = [
     "NoteSuggestion",
     "ElementGeometry",
     "SemanticHighlight",
-    # FIXED: Add pattern exports
+    
+    # Pattern definitions
     "VISUAL_PATTERNS",
     "VISION_CONFIG",
     "VISION_PHILOSOPHY",

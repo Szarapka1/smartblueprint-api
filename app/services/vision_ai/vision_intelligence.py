@@ -1,10 +1,12 @@
-# vision_intelligence.py - REVISED FOR CONTEXT-AWARE ANALYSIS
+# vision_intelligence.py - COMPLETE REWRITE FOR DOCUMENT INTELLIGENCE
 
 import asyncio
 import re
 import logging
 import json
 from typing import List, Dict, Any, Optional
+from datetime import datetime
+import hashlib
 
 from openai import AsyncOpenAI
 
@@ -17,8 +19,10 @@ logger = logging.getLogger(__name__)
 
 class VisionIntelligence:
     """
-    Advanced Visual Intelligence using GPT-4 Vision.
-    REVISED to use structured data (grids, index) for a context-aware "scan" phase.
+    Document Intelligence System using GPT-4 Vision.
+    
+    PHILOSOPHY: Understand the ENTIRE document first, then answer ANY question.
+    This is not an element hunter - it's a document comprehension system.
     """
 
     def __init__(self, settings):
@@ -27,8 +31,11 @@ class VisionIntelligence:
         self._client: Optional[AsyncOpenAI] = None
         self.vision_semaphore: Optional[asyncio.Semaphore] = None
         self.deterministic_seed = 42
-        self.analysis_context: Dict[str, Any] = {}
-
+        
+        # Document Intelligence Cache - stores complete understanding
+        self.document_knowledge: Dict[str, Any] = {}
+        self.current_document_id: Optional[str] = None
+        
     @property
     def client(self) -> AsyncOpenAI:
         """Lazy client initialization."""
@@ -58,49 +65,693 @@ class VisionIntelligence:
         comprehensive_data: Optional[Dict[str, Any]] = None
     ) -> VisualIntelligenceResult:
         """
-        Core visual analysis method. Uses a multi-phase approach, now primed with structured data.
-        1. Understand the visual context of the drawings.
-        2. Recognize the user's intent and target elements.
-        3. Analyze the drawings, guided by ground-truth data from JSON files.
-        4. Verify the findings against the same structured data.
-        """
-        logger.info(f"🧠 Starting Context-Aware Visual Intelligence Analysis for: {prompt}")
-        logger.info(f"📄 Analyzing {len(images)} image(s).")
+        Main analysis method - BUT NOW IT'S DIFFERENT!
         
-        self.analysis_context = {"pages_analyzed": len(images)}
-        comprehensive_data = comprehensive_data or {}
-
+        Instead of hunting for elements, we:
+        1. Build/retrieve comprehensive document knowledge
+        2. Answer the question from that knowledge
+        3. Return results in the expected format
+        """
+        logger.info(f"🧠 Document Intelligence Analysis for: {prompt}")
+        
+        # Generate document ID from images (or use provided one)
+        doc_id = self._generate_document_id(images)
+        
         try:
-            # PHASE 1: Visual Understanding of the drawings
-            logger.info("👁️ PHASE 1: Visual Understanding")
-            visual_context = await self._visual_understanding_phase(images)
-
-            # PHASE 2: Intelligent Recognition of the user's query
-            logger.info("🎯 PHASE 2: Intelligent Element Recognition")
-            element_understanding = self._intelligent_recognition_phase(question_analysis)
-
-            # PHASE 3: Comprehensive Analysis, now guided by structured data
-            logger.info("📊 PHASE 3: Comprehensive Engineering Analysis (Scan)")
-            analysis_result = await self._comprehensive_analysis_phase(
-                prompt, images, element_understanding, visual_context, comprehensive_data
+            # STEP 1: Do we already understand this document?
+            if not self._has_document_knowledge(doc_id):
+                logger.info("📚 Building comprehensive document intelligence...")
+                await self._build_document_intelligence(
+                    doc_id, images, comprehensive_data
+                )
+            else:
+                logger.info("✅ Using cached document intelligence")
+            
+            # STEP 2: Answer the question from our knowledge
+            logger.info(f"💡 Answering from document knowledge: {prompt}")
+            answer = await self._answer_from_knowledge(
+                prompt, question_analysis, doc_id
             )
-
-            # PHASE 4: Verification against the provided data
-            logger.info("✅ PHASE 4: Verification & Cross-Reference")
-            verified_result = await self._verification_phase(
-                analysis_result, images, comprehensive_data
+            
+            # STEP 3: Convert to expected format
+            visual_result = self._format_as_visual_result(
+                answer, question_analysis, page_number
             )
-
-            visual_result = self._build_visual_result(verified_result, page_number, element_understanding)
-            logger.info(f"✅ Analysis complete: {visual_result.count} {visual_result.element_type}(s) found.")
+            
+            logger.info(f"✅ Intelligence complete: {visual_result.count} {visual_result.element_type}(s)")
             return visual_result
 
         except Exception as e:
-            logger.error(f"❌ Visual Intelligence pipeline error: {e}", exc_info=True)
+            logger.error(f"❌ Document Intelligence error: {e}", exc_info=True)
             return self._create_error_result(page_number, str(e))
 
+    async def _build_document_intelligence(
+        self,
+        doc_id: str,
+        images: List[Dict[str, Any]],
+        comprehensive_data: Optional[Dict[str, Any]] = None
+    ):
+        """
+        BUILD COMPREHENSIVE DOCUMENT UNDERSTANDING - This is the KEY!
+        We analyze EVERYTHING ONCE, understand it deeply, then cache it.
+        """
+        
+        self._ensure_semaphores_initialized()
+        comprehensive_data = comprehensive_data or {}
+        
+        # Initialize knowledge structure
+        knowledge = {
+            "document_id": doc_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "project_overview": {},
+            "page_contents": {},
+            "all_elements": {},
+            "systems": {},
+            "spatial_organization": {},
+            "relationships": {},
+            "specifications": {},
+            "metadata": {
+                "total_pages": len(images),
+                "analysis_version": "2.0"
+            }
+        }
+        
+        # PHASE 1: Project Overview - What is this building/project?
+        logger.info("📋 Phase 1: Understanding the project...")
+        knowledge["project_overview"] = await self._understand_project(images[:5])
+        
+        # PHASE 2: Page-by-Page Deep Analysis
+        logger.info("📄 Phase 2: Analyzing each page comprehensively...")
+        knowledge["page_contents"] = await self._analyze_all_pages(images)
+        
+        # PHASE 3: Element Inventory - Count EVERYTHING
+        logger.info("🔍 Phase 3: Building complete element inventory...")
+        knowledge["all_elements"] = await self._inventory_all_elements(images)
+        
+        # PHASE 4: Systems Understanding
+        logger.info("⚙️ Phase 4: Understanding building systems...")
+        knowledge["systems"] = await self._understand_systems(images, knowledge)
+        
+        # PHASE 5: Spatial Organization
+        logger.info("📐 Phase 5: Understanding spatial organization...")
+        knowledge["spatial_organization"] = self._analyze_spatial_organization(
+            comprehensive_data.get("grid_systems", {}),
+            knowledge["page_contents"]
+        )
+        
+        # PHASE 6: Relationships and Cross-References
+        logger.info("🔗 Phase 6: Building relationships...")
+        knowledge["relationships"] = self._build_relationships(
+            knowledge,
+            comprehensive_data.get("document_index", {})
+        )
+        
+        # Cache this knowledge
+        self.document_knowledge[doc_id] = knowledge
+        self.current_document_id = doc_id
+        
+        logger.info(f"✅ Document Intelligence complete! Understood {len(images)} pages.")
+        logger.info(f"📊 Found {len(knowledge['all_elements'])} element types")
+
+    async def _understand_project(self, sample_images: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Understand what this project/building is about."""
+        
+        prompt = """UNDERSTAND THIS CONSTRUCTION PROJECT
+
+Analyze these blueprint pages and tell me:
+
+1. **PROJECT TYPE**: What is being built? (office, residential, industrial, etc.)
+2. **SCALE**: How big is this project? (square footage, stories, etc.)
+3. **DISCIPLINES**: What drawing disciplines are included? (architectural, MEP, structural, etc.)
+4. **COMPLEXITY**: Simple, moderate, or complex project?
+5. **KEY FEATURES**: Notable elements or systems visible?
+
+Provide a comprehensive overview of what this project is.
+
+RESPONSE FORMAT:
+PROJECT TYPE: [type]
+SCALE: [description]
+DISCIPLINES: [list]
+COMPLEXITY: [level]
+KEY FEATURES: [list]
+SUMMARY: [2-3 sentence overview]"""
+
+        content = self._prepare_vision_content(sample_images, prompt)
+        response = await self._make_vision_request(
+            content,
+            "You are a senior construction professional reviewing a new project set.",
+            2000
+        )
+        
+        return self._parse_project_overview(response)
+
+    async def _analyze_all_pages(self, images: List[Dict[str, Any]]) -> Dict[int, Any]:
+        """Deep analysis of EVERY page - understanding what's on each."""
+        
+        page_contents = {}
+        
+        # Process in batches for efficiency
+        batch_size = 5
+        for i in range(0, len(images), batch_size):
+            batch = images[i:i+batch_size]
+            batch_analysis = await self._analyze_page_batch(batch, i)
+            page_contents.update(batch_analysis)
+        
+        return page_contents
+
+    async def _analyze_page_batch(
+        self, 
+        batch: List[Dict[str, Any]], 
+        start_index: int
+    ) -> Dict[int, Any]:
+        """Analyze a batch of pages comprehensively."""
+        
+        prompt = """COMPREHENSIVE PAGE ANALYSIS
+
+For EACH page shown, provide:
+
+1. **PAGE TYPE**: (floor plan, elevation, section, detail, schedule, etc.)
+2. **CONTENT SUMMARY**: What's shown on this page?
+3. **ELEMENTS VISIBLE**: List ALL construction elements you can see with rough counts
+4. **SYSTEMS SHOWN**: What building systems are depicted?
+5. **KEY INFORMATION**: Important notes, dimensions, or specifications
+
+Don't just count one element type - describe EVERYTHING on each page!
+
+For each page, format as:
+PAGE [number]:
+- TYPE: [type]
+- CONTENT: [what's shown]
+- ELEMENTS: [comprehensive list with counts]
+- SYSTEMS: [list]
+- KEY INFO: [important details]"""
+
+        content = self._prepare_vision_content(batch, prompt)
+        response = await self._make_vision_request(
+            content,
+            "You are analyzing construction drawings to build a complete understanding of what's on each page.",
+            3000
+        )
+        
+        return self._parse_page_analysis(response, start_index)
+
+    async def _inventory_all_elements(self, images: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Create a complete inventory of ALL elements in the document."""
+        
+        prompt = """COMPLETE ELEMENT INVENTORY
+
+Count ALL construction elements across ALL pages. Be exhaustive!
+
+Categories to inventory:
+- ARCHITECTURAL: doors, windows, walls, rooms, stairs, elevators, etc.
+- STRUCTURAL: columns, beams, footings, slabs, etc.
+- ELECTRICAL: outlets, switches, panels, lights, conduits, etc.
+- PLUMBING: fixtures, pipes, valves, drains, water heaters, etc.
+- MECHANICAL: diffusers, ducts, equipment, VAVs, thermostats, etc.
+- FIRE/LIFE SAFETY: sprinklers, alarms, extinguishers, exits, etc.
+- SPECIALTIES: signage, equipment, casework, accessories, etc.
+
+For EACH element type found:
+ELEMENT: [type]
+TOTAL COUNT: [number]
+PAGES FOUND ON: [list]
+TYPICAL TAGS/LABELS: [if any]
+
+Be thorough - this is our master inventory!"""
+
+        # For large documents, we might process in chunks
+        # For now, send all at once
+        content = self._prepare_vision_content(images, prompt)
+        response = await self._make_vision_request(
+            content,
+            "You are creating a comprehensive construction element inventory. Count EVERYTHING visible.",
+            4000
+        )
+        
+        return self._parse_element_inventory(response)
+
+    async def _understand_systems(
+        self, 
+        images: List[Dict[str, Any]], 
+        knowledge: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Understand all building systems and their relationships."""
+        
+        # Focus on system-specific pages if we identified them
+        system_pages = self._identify_system_pages(knowledge["page_contents"])
+        
+        if system_pages:
+            relevant_images = [img for img in images if img.get("page", 0) in system_pages]
+        else:
+            relevant_images = images
+        
+        prompt = """BUILDING SYSTEMS ANALYSIS
+
+Identify and describe ALL building systems:
+
+1. **ELECTRICAL SYSTEM**:
+   - Power distribution (panels, transformers, etc.)
+   - Lighting systems and controls
+   - Emergency power
+   - Special systems (fire alarm, security, etc.)
+
+2. **MECHANICAL SYSTEM**:
+   - HVAC equipment and distribution
+   - Controls and zones
+   - Exhaust systems
+
+3. **PLUMBING SYSTEM**:
+   - Water supply and distribution
+   - Drainage and venting
+   - Fixtures and equipment
+   - Special systems (gas, medical, etc.)
+
+4. **FIRE PROTECTION**:
+   - Sprinkler systems
+   - Standpipes
+   - Fire alarm and detection
+
+5. **STRUCTURAL SYSTEM**:
+   - Foundation type
+   - Framing system
+   - Lateral system
+
+For each system, describe:
+- Components and quantities
+- Distribution/layout strategy
+- Notable features or requirements"""
+
+        content = self._prepare_vision_content(relevant_images[:10], prompt)
+        response = await self._make_vision_request(
+            content,
+            "You are a building systems expert analyzing the MEP and structural systems.",
+            3000
+        )
+        
+        return self._parse_systems_analysis(response)
+
+    async def _answer_from_knowledge(
+        self,
+        prompt: str,
+        question_analysis: Dict[str, Any],
+        doc_id: str
+    ) -> Dict[str, Any]:
+        """
+        Answer ANY question using our comprehensive document knowledge.
+        This is where the magic happens - we already know everything!
+        """
+        
+        knowledge = self.document_knowledge[doc_id]
+        
+        # Build a context-aware prompt with our knowledge
+        answer_prompt = f"""Using my comprehensive knowledge of this construction document, answer this question:
+
+USER QUESTION: {prompt}
+
+MY DOCUMENT KNOWLEDGE:
+- Project: {knowledge['project_overview'].get('summary', 'Construction project')}
+- Total Pages: {knowledge['metadata']['total_pages']}
+- Element Inventory: I have catalogued {len(knowledge['all_elements'])} different element types
+- Systems: I understand {len(knowledge['systems'])} building systems
+
+RELEVANT KNOWLEDGE:
+{self._get_relevant_knowledge(prompt, question_analysis, knowledge)}
+
+Provide a detailed, accurate answer based on my complete understanding of this document.
+If the question asks for counts, locations, or specifications, be precise using my knowledge.
+
+IMPORTANT: I already know what's in this document - I don't need to search, I need to recall and report!"""
+
+        # We don't need images here - we're answering from knowledge!
+        response = await self._query_knowledge(answer_prompt, knowledge)
+        
+        return self._parse_knowledge_answer(response, question_analysis, knowledge)
+
+    async def _query_knowledge(self, prompt: str, knowledge: Dict[str, Any]) -> str:
+        """Query our knowledge base for an answer."""
+        
+        async with self.vision_semaphore:
+            try:
+                # We can use chat completion without images since we're working from knowledge
+                response = await self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a construction document expert with perfect recall of the document you've already analyzed. Answer questions using your stored knowledge."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    max_tokens=2000,
+                    temperature=0.0,
+                    seed=self.deterministic_seed
+                )
+                return response.choices[0].message.content if response and response.choices else ""
+            except Exception as e:
+                logger.error(f"Knowledge query failed: {e}")
+                return ""
+
+    def _get_relevant_knowledge(
+        self,
+        prompt: str,
+        question_analysis: Dict[str, Any],
+        knowledge: Dict[str, Any]
+    ) -> str:
+        """Extract relevant knowledge for the question."""
+        
+        relevant_parts = []
+        element_type = question_analysis.get("element_focus", "element")
+        
+        # If asking about a specific element, provide that inventory
+        if element_type in knowledge["all_elements"]:
+            element_data = knowledge["all_elements"][element_type]
+            relevant_parts.append(
+                f"- {element_type.upper()} INVENTORY: "
+                f"Total Count: {element_data.get('total_count', 0)}, "
+                f"Found on pages: {element_data.get('pages', [])}"
+            )
+        
+        # Add page-specific knowledge if asking about specific pages
+        requested_page = question_analysis.get("requested_page")
+        if requested_page and requested_page in knowledge["page_contents"]:
+            page_data = knowledge["page_contents"][requested_page]
+            relevant_parts.append(
+                f"- PAGE {requested_page} CONTENTS: {page_data.get('content_summary', 'No data')}"
+            )
+        
+        # Add system knowledge if relevant
+        for system_name, system_data in knowledge["systems"].items():
+            if any(word in prompt.lower() for word in system_name.lower().split()):
+                relevant_parts.append(
+                    f"- {system_name.upper()}: {system_data.get('summary', 'System present')}"
+                )
+        
+        return "\n".join(relevant_parts) if relevant_parts else "- Full document knowledge available"
+
+    def _format_as_visual_result(
+        self,
+        answer: Dict[str, Any],
+        question_analysis: Dict[str, Any],
+        page_number: int
+    ) -> VisualIntelligenceResult:
+        """Convert our knowledge-based answer to the expected format."""
+        
+        element_type = answer.get("element_type", question_analysis.get("element_focus", "element"))
+        
+        # Build the result from our answer
+        return VisualIntelligenceResult(
+            element_type=element_type,
+            count=answer.get("count", 0),
+            locations=answer.get("locations", []),
+            confidence=answer.get("confidence", 0.95),  # High confidence from knowledge!
+            grid_references=answer.get("grid_references", []),
+            visual_evidence=answer.get("evidence", [
+                "Found in document knowledge base",
+                f"Document contains comprehensive inventory of {element_type}s"
+            ]),
+            pattern_matches=answer.get("patterns", []),
+            verification_notes=answer.get("notes", [
+                "Answer derived from comprehensive document intelligence"
+            ]),
+            page_number=page_number,
+            analysis_metadata={
+                "source": "document_knowledge",
+                "knowledge_version": "2.0",
+                "total_pages_understood": len(self.document_knowledge.get(
+                    self.current_document_id, {}
+                ).get("page_contents", {}))
+            }
+        )
+
+    # === PARSING METHODS ===
+    
+    def _parse_project_overview(self, response: str) -> Dict[str, Any]:
+        """Parse project overview response."""
+        overview = {
+            "project_type": "Unknown",
+            "scale": "Unknown", 
+            "disciplines": [],
+            "complexity": "Unknown",
+            "key_features": [],
+            "summary": "Construction project"
+        }
+        
+        if not response:
+            return overview
+        
+        # Parse each field
+        type_match = re.search(r'PROJECT TYPE:\s*(.+)', response, re.IGNORECASE)
+        if type_match:
+            overview["project_type"] = type_match.group(1).strip()
+        
+        scale_match = re.search(r'SCALE:\s*(.+)', response, re.IGNORECASE)
+        if scale_match:
+            overview["scale"] = scale_match.group(1).strip()
+        
+        summary_match = re.search(r'SUMMARY:\s*(.+)', response, re.IGNORECASE | re.DOTALL)
+        if summary_match:
+            overview["summary"] = summary_match.group(1).strip()
+        
+        return overview
+
+    def _parse_page_analysis(self, response: str, start_index: int) -> Dict[int, Any]:
+        """Parse page-by-page analysis."""
+        pages = {}
+        
+        if not response:
+            return pages
+        
+        # Split by PAGE markers
+        page_sections = re.split(r'PAGE\s+\d+:', response, flags=re.IGNORECASE)
+        
+        for i, section in enumerate(page_sections[1:], start=1):  # Skip first empty split
+            page_num = start_index + i
+            
+            page_data = {
+                "page_type": "Unknown",
+                "content_summary": "",
+                "elements": {},
+                "systems": [],
+                "key_info": []
+            }
+            
+            # Parse TYPE
+            type_match = re.search(r'TYPE:\s*(.+)', section, re.IGNORECASE)
+            if type_match:
+                page_data["page_type"] = type_match.group(1).strip()
+            
+            # Parse CONTENT
+            content_match = re.search(r'CONTENT:\s*(.+)', section, re.IGNORECASE)
+            if content_match:
+                page_data["content_summary"] = content_match.group(1).strip()
+            
+            # Parse ELEMENTS (this is crucial!)
+            elements_match = re.search(r'ELEMENTS:\s*(.+?)(?:SYSTEMS:|KEY INFO:|$)', section, re.IGNORECASE | re.DOTALL)
+            if elements_match:
+                elements_text = elements_match.group(1)
+                # Parse individual elements with counts
+                element_pattern = r'(\d+)\s+(\w+(?:\s+\w+)*)'
+                for match in re.finditer(element_pattern, elements_text):
+                    count, element_type = match.groups()
+                    page_data["elements"][element_type.lower()] = int(count)
+            
+            pages[page_num] = page_data
+        
+        return pages
+
+    def _parse_element_inventory(self, response: str) -> Dict[str, Any]:
+        """Parse complete element inventory."""
+        inventory = {}
+        
+        if not response:
+            return inventory
+        
+        # Parse each element entry
+        element_pattern = r'ELEMENT:\s*(.+?)\nTOTAL COUNT:\s*(\d+)'
+        
+        for match in re.finditer(element_pattern, response, re.IGNORECASE | re.DOTALL):
+            element_type = match.group(1).strip().lower()
+            count = int(match.group(2))
+            
+            # Also try to get pages
+            pages_match = re.search(
+                f'PAGES FOUND ON:.*?([0-9, ]+)',
+                response[match.end():match.end()+200],
+                re.IGNORECASE
+            )
+            
+            pages = []
+            if pages_match:
+                pages = [int(p.strip()) for p in pages_match.group(1).split(',') if p.strip().isdigit()]
+            
+            inventory[element_type] = {
+                "total_count": count,
+                "pages": pages,
+                "distributed": len(pages) > 1
+            }
+        
+        return inventory
+
+    def _parse_systems_analysis(self, response: str) -> Dict[str, Any]:
+        """Parse building systems analysis."""
+        systems = {}
+        
+        if not response:
+            return systems
+        
+        # Define system categories
+        system_categories = [
+            "ELECTRICAL SYSTEM",
+            "MECHANICAL SYSTEM", 
+            "PLUMBING SYSTEM",
+            "FIRE PROTECTION",
+            "STRUCTURAL SYSTEM"
+        ]
+        
+        for category in system_categories:
+            # Find section for this system
+            pattern = f'{category}:(.+?)(?:{"|".join(system_categories)}:|$)'
+            match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
+            
+            if match:
+                system_text = match.group(1)
+                systems[category.lower().replace(" system", "")] = {
+                    "summary": system_text.strip()[:500],  # First 500 chars
+                    "present": True
+                }
+        
+        return systems
+
+    def _parse_knowledge_answer(
+        self,
+        response: str,
+        question_analysis: Dict[str, Any],
+        knowledge: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Parse answer from knowledge query."""
+        
+        element_type = question_analysis.get("element_focus", "element")
+        
+        # Start with data from our inventory
+        result = {
+            "element_type": element_type,
+            "count": 0,
+            "locations": [],
+            "grid_references": [],
+            "evidence": [],
+            "confidence": 0.95
+        }
+        
+        # If we have this element in our inventory, use that data
+        if element_type in knowledge["all_elements"]:
+            element_data = knowledge["all_elements"][element_type]
+            result["count"] = element_data.get("total_count", 0)
+            
+            # Build locations from page data
+            for page_num in element_data.get("pages", []):
+                if page_num in knowledge["page_contents"]:
+                    page_data = knowledge["page_contents"][page_num]
+                    element_count_on_page = page_data.get("elements", {}).get(element_type, 0)
+                    
+                    # Create location entries
+                    for i in range(min(element_count_on_page, 10)):  # Limit to 10 per page
+                        result["locations"].append({
+                            "page": page_num,
+                            "grid_ref": f"See page {page_num}",
+                            "visual_details": f"{element_type} on {page_data.get('page_type', 'page')}"
+                        })
+        
+        # Parse any specific counts from response
+        count_match = re.search(r'(?:total|count|found).*?(\d+)', response, re.IGNORECASE)
+        if count_match and result["count"] == 0:
+            result["count"] = int(count_match.group(1))
+        
+        result["notes"] = [
+            "Answer based on comprehensive document analysis",
+            f"Document intelligence includes {len(knowledge['all_elements'])} element types"
+        ]
+        
+        return result
+
+    # === HELPER METHODS ===
+    
+    def _generate_document_id(self, images: List[Dict[str, Any]]) -> str:
+        """Generate unique ID for this document."""
+        # Create hash from first image URL or use timestamp
+        if images and images[0].get("url"):
+            return hashlib.md5(images[0]["url"].encode()).hexdigest()[:12]
+        return f"doc_{datetime.utcnow().timestamp()}"
+
+    def _has_document_knowledge(self, doc_id: str) -> bool:
+        """Check if we already have knowledge for this document."""
+        return doc_id in self.document_knowledge
+
+    def _identify_system_pages(self, page_contents: Dict[int, Any]) -> List[int]:
+        """Identify which pages contain system drawings."""
+        system_pages = []
+        
+        system_keywords = ["mechanical", "electrical", "plumbing", "MEP", "HVAC", "power", "lighting"]
+        
+        for page_num, content in page_contents.items():
+            page_type = content.get("page_type", "").lower()
+            if any(keyword in page_type for keyword in system_keywords):
+                system_pages.append(page_num)
+        
+        return system_pages
+
+    def _analyze_spatial_organization(
+        self,
+        grid_systems: Dict[str, Any],
+        page_contents: Dict[int, Any]
+    ) -> Dict[str, Any]:
+        """Understand the spatial organization of the building."""
+        
+        spatial = {
+            "grid_system": "present" if grid_systems else "not detected",
+            "floors": [],
+            "zones": [],
+            "areas": {}
+        }
+        
+        # Extract floor information from page contents
+        for page_num, content in page_contents.items():
+            if "floor plan" in content.get("page_type", "").lower():
+                # Extract floor number if present
+                floor_match = re.search(r'(\d+)(?:st|nd|rd|th)?\s*floor', 
+                                      content.get("content_summary", ""), re.IGNORECASE)
+                if floor_match:
+                    spatial["floors"].append(floor_match.group(1))
+        
+        return spatial
+
+    def _build_relationships(
+        self,
+        knowledge: Dict[str, Any],
+        document_index: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build relationships between elements and pages."""
+        
+        relationships = {
+            "element_to_pages": {},
+            "page_to_elements": {},
+            "cross_references": []
+        }
+        
+        # Build element-to-page mapping
+        for element_type, data in knowledge["all_elements"].items():
+            relationships["element_to_pages"][element_type] = data.get("pages", [])
+        
+        # Build page-to-element mapping
+        for page_num, content in knowledge["page_contents"].items():
+            relationships["page_to_elements"][page_num] = list(content.get("elements", {}).keys())
+        
+        return relationships
+
     def _prepare_vision_content(self, images: List[Dict[str, Any]], text_prompt: str) -> List[Dict[str, Any]]:
-        """Prepares the content payload for the vision API request."""
+        """Prepare content for vision API request."""
         content = []
         for i, image in enumerate(images):
             page_num = image.get("page", i + 1)
@@ -112,9 +763,15 @@ class VisionIntelligence:
         content.append({"type": "text", "text": text_prompt})
         return content
 
-    async def _make_vision_request(self, content: List[Dict[str, Any]], system_prompt: str, max_tokens: int) -> Optional[str]:
-        """Makes a vision API request with proper error handling and rate limiting."""
+    async def _make_vision_request(
+        self, 
+        content: List[Dict[str, Any]], 
+        system_prompt: str, 
+        max_tokens: int
+    ) -> Optional[str]:
+        """Make vision API request with proper error handling."""
         self._ensure_semaphores_initialized()
+        
         async with self.vision_semaphore:
             try:
                 response = await self.client.chat.completions.create(
@@ -132,167 +789,17 @@ class VisionIntelligence:
                 logger.error(f"Vision request failed: {e}")
                 return None
 
-    async def _visual_understanding_phase(self, images: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Phase 1: Let the AI get a general understanding of the provided drawings."""
-        prompt = "Briefly describe these construction drawings. Identify the drawing type (e.g., floor plan, elevation), discipline (e.g., architectural, electrical), and overall level of detail."
-        content = self._prepare_vision_content(images[:3], prompt) # Sample a few pages for efficiency
-        response = await self._make_vision_request(content, "You are an expert construction document analyst.", 1000)
-        # For simplicity in this refactor, we'll use a placeholder. A full implementation would parse this.
-        return {"drawing_type": "floor plan", "discipline": "architectural"}
-
-    def _intelligent_recognition_phase(self, question_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Phase 2: Use the pre-analyzed question to understand what element to find."""
-        return {
-            "element_type": question_analysis.get("element_focus", "element"),
-            "visual_appearance": f"Symbols or drawings representing a {question_analysis.get('element_focus', 'generic construction element')}."
-        }
-
-    async def _comprehensive_analysis_phase(self, prompt: str, images: List[Dict[str, Any]], element_understanding: Dict[str, Any],
-                                           visual_context: Dict[str, Any], comprehensive_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Phase 3: The main analysis, now guided by the ground-truth data."""
-        element_type = element_understanding.get("element_type", "element")
-        
-        # --- Prompt Engineering: Injecting Ground-Truth Data ---
-        ground_truth_prompt = self._build_ground_truth_prompt(comprehensive_data)
-        
-        analysis_prompt = f"""
-        MASTER ENGINEERING ANALYSIS
-
-        **USER QUESTION:** {prompt}
-        **TARGET ELEMENT:** {element_type}s
-        **DRAWING CONTEXT:** {visual_context.get('discipline')} {visual_context.get('drawing_type')}
-
-        {ground_truth_prompt}
-
-        **INSTRUCTIONS:**
-        1.  **SCAN AND VERIFY:** Systematically scan all provided pages. Use the Ground-Truth Data to guide your search and verify what you see.
-        2.  **COUNT ACCURATELY:** Provide a total count across all pages and a breakdown for each page.
-        3.  **LOCATE PRECISELY:** For each element found, provide its page number and its grid reference (e.g., "Page 3, Grid C-4").
-        4.  **DOCUMENT EVERYTHING:** List any tags, labels, or relevant notes associated with each element.
-
-        **RESPONSE FORMAT:**
-        - **TOTAL COUNT:** [Total number of {element_type}s found]
-        - **PAGE BREAKDOWN:**
-          - **Page [Number]:** [Count on this page]
-        - **ELEMENT LIST:**
-          - **1.** Page: [Page Number], Location: [Grid Reference], Details: [Tags, notes, etc.]
-          - **2.** Page: [Page Number], Location: [Grid Reference], Details: [Tags, notes, etc.]
-        """
-
-        content = self._prepare_vision_content(images, analysis_prompt)
-        system_prompt = "You are a Master Construction Professional. Your task is to perform a precise, data-driven analysis of construction drawings, verifying your visual findings against provided ground-truth data."
-        
-        # Increased tokens for comprehensive test
-        response = await self._make_vision_request(content, system_prompt, 4000)
-        
-        return self._parse_analysis_response(response, element_type) if response else self._create_empty_analysis(element_type)
-
-    def _build_ground_truth_prompt(self, comprehensive_data: Dict[str, Any]) -> str:
-        """Builds the prompt section containing the structured data."""
-        prompts = ["**GROUND-TRUTH DATA FOR VERIFICATION:**"]
-        
-        if comprehensive_data.get('grid_systems'):
-            prompts.append(f"- **Grid System:** A grid system has been detected for {len(comprehensive_data['grid_systems'])} page(s). Use this for precise location reporting.")
-        
-        if comprehensive_data.get('document_index'):
-            index = comprehensive_data['document_index']
-            sheets = list(index.get('sheet_numbers', {}).keys())
-            if sheets:
-                prompts.append(f"- **Document Index:** The index includes sheets like {', '.join(sheets[:3])}{'...' if len(sheets) > 3 else ''}. Ensure your findings are consistent.")
-
-        if len(prompts) == 1:
-            return "- No ground-truth data was provided. Rely solely on visual analysis."
-            
-        return "\n".join(prompts)
-
-    async def _verification_phase(self, analysis_result: Dict[str, Any], images: List[Dict[str, Any]],
-                                 comprehensive_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Phase 4: A final, quick self-verification step.
-        The primary, rigorous validation is now handled by the separate ValidationSystem.
-        """
-        logger.info("Performing final self-verification of visual scan.")
-        # This can be expanded, but for now we trust the guided analysis is more accurate
-        # and will be rigorously checked by the main ValidationSystem next.
-        analysis_result.setdefault('verification_notes', []).append("Initial guided scan complete. Awaiting full 4x validation.")
-        return analysis_result
-
-    def _parse_analysis_response(self, response: str, element_type: str) -> Dict[str, Any]:
-        """Parses the detailed analysis response from the vision model."""
-        result = self._create_empty_analysis(element_type)
-        
-        # Parse total count
-        count_match = re.search(r'TOTAL COUNT:\s*(\d+)', response, re.IGNORECASE)
-        if count_match:
-            result['count'] = int(count_match.group(1))
-
-        # Parse element list
-        element_list_text = re.search(r'ELEMENT LIST:([\s\S]*)', response, re.IGNORECASE)
-        if element_list_text:
-            for line in element_list_text.group(1).strip().split('\n'):
-                # Pattern to find Page, Location, and Details
-                match = re.search(r'Page:\s*(\d+),\s*Location:\s*([A-Z0-9-]+),\s*Details:\s*(.*)', line, re.IGNORECASE)
-                if match:
-                    page, location, details = match.groups()
-                    result['locations'].append({
-                        "page": int(page.strip()),
-                        "grid_ref": location.strip(),
-                        "visual_details": details.strip()
-                    })
-                    result['grid_references'].append(location.strip())
-        
-        # If count was found but list parsing failed, we still have the total
-        if result['count'] > 0 and not result['locations']:
-            logger.warning("Could not parse detailed locations, but a total count was found.")
-            result['verification_notes'].append("Could not parse detailed locations.")
-
-        # If list was parsed but count wasn't, update count from list length
-        if result['count'] == 0 and result['locations']:
-            result['count'] = len(result['locations'])
-            
-        return result
-
-    def _build_visual_result(self, analysis_data: Dict[str, Any], page_number: int,
-                             element_understanding: Dict[str, Any]) -> VisualIntelligenceResult:
-        """Builds the final VisualIntelligenceResult object."""
-        confidence = self._calculate_confidence(analysis_data)
-        pages_analyzed = self.analysis_context.get("pages_analyzed", 1)
-        
-        return VisualIntelligenceResult(
-            element_type=analysis_data.get("element_type", "element"),
-            count=analysis_data.get("count", 0),
-            locations=analysis_data.get("locations", []),
-            confidence=confidence,
-            grid_references=analysis_data.get("grid_references", []),
-            verification_notes=analysis_data.get("verification_notes", []),
-            page_number=page_number, # Represents the initial page context of the query
-            analysis_metadata={
-                "pages_analyzed_count": pages_analyzed,
-                "page_counts": analysis_data.get("page_counts", {}),
-            }
-        )
-    
-    def _calculate_confidence(self, analysis_data: Dict[str, Any]) -> float:
-        """Calculates a confidence score based on the quality of the analysis data."""
-        # Start with a high base confidence because the scan is now guided
-        confidence = 0.85
-        if analysis_data.get('count') > 0 and analysis_data.get('locations'):
-            # If we successfully parsed detailed locations, confidence increases
-            confidence = 0.95
-        if "Could not parse" in str(analysis_data.get('verification_notes', [])):
-            confidence -= 0.2
-        return min(0.99, max(0.5, confidence))
-
     def _create_error_result(self, page_number: int, error_message: str) -> VisualIntelligenceResult:
-        """Creates a standardized error result object."""
+        """Create error result in expected format."""
         return VisualIntelligenceResult(
-            element_type="error", count=0, locations=[], confidence=0.0,
-            verification_notes=[f"Analysis failed: {error_message}"], page_number=page_number
+            element_type="error",
+            count=0,
+            locations=[],
+            confidence=0.0,
+            grid_references=[],
+            visual_evidence=[],
+            pattern_matches=[],
+            verification_notes=[f"Analysis failed: {error_message}"],
+            page_number=page_number,
+            analysis_metadata={"error": True}
         )
-
-    def _create_empty_analysis(self, element_type: str) -> Dict[str, Any]:
-        """Creates a default empty analysis dictionary."""
-        return {
-            "element_type": element_type, "count": 0, "locations": [], "evidence": [],
-            "grid_references": [], "verification_notes": [], "page_counts": {}
-        }
