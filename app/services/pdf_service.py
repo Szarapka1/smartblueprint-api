@@ -98,7 +98,7 @@ class PDFService:
         
         # Resolution settings - balanced for quality and performance
         self.storage_dpi = settings.PDF_HIGH_RESOLUTION  # 150 DPI for storage
-        self.ai_image_dpi = settings.PDF_AI_DPI  # 100 DPI for AI
+        self.ai_image_dpi = settings.PDF_AI_DPI  # 250 DPI for AI
         self.thumbnail_dpi = settings.PDF_THUMBNAIL_DPI  # 72 DPI for thumbnails
         
         # Processing settings
