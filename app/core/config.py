@@ -87,12 +87,12 @@ class AppSettings:
         self.PDF_PREVIEW_RESOLUTION: int = int(os.getenv("PDF_PREVIEW_RESOLUTION", 72))
         self.PDF_HIGH_RESOLUTION: int = int(os.getenv("PDF_HIGH_RESOLUTION", 150))
         self.PDF_IMAGE_DPI: int = int(os.getenv("PDF_IMAGE_DPI", 150))
-        self.PDF_AI_DPI: int = int(os.getenv("PDF_AI_DPI", 300))
+        self.PDF_AI_DPI: int = int(os.getenv("PDF_AI_DPI", 700))
         self.PDF_THUMBNAIL_DPI: int = int(os.getenv("PDF_THUMBNAIL_DPI", 72))
         self.PDF_MAX_PAGES: int = int(os.getenv("PDF_MAX_PAGES", 200))  # Increased from 100
         self.PROCESSING_BATCH_SIZE: int = int(os.getenv("PROCESSING_BATCH_SIZE", 25))  # Updated: Increased from 10
         self.PDF_PNG_COMPRESSION: int = int(os.getenv("PDF_PNG_COMPRESSION", 6))
-        self.PDF_JPEG_QUALITY: int = int(os.getenv("PDF_JPEG_QUALITY", 85))
+        self.PDF_JPEG_QUALITY: int = int(os.getenv("PDF_JPEG_QUALITY", 95))
         
         # === NEW PROCESSING SETTINGS FOR FIXES ===
         self.STATUS_UPDATE_LOCK_TIMEOUT: float = float(os.getenv("STATUS_UPDATE_LOCK_TIMEOUT", 5.0))
