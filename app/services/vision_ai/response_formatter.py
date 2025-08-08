@@ -32,7 +32,7 @@ class ResponseFormatter:
             QuestionType.COUNT: self._format_count_response,
             QuestionType.LOCATION: self._format_location_response,
             QuestionType.IDENTIFY: self._format_identification_response,
-            QuestionType.SPECIFICATION: self._format_specification_response,
+            QuestionType.SPECIFICATION: self._format_identification_response,
             QuestionType.COMPLIANCE: self._format_compliance_response,
             QuestionType.GENERAL: self._format_general_response,
             QuestionType.DETAILED: self._format_detailed_response,
