@@ -24,12 +24,15 @@ class VisionIntelligence:
     """
     Universal Construction Drawing Analysis using GPT-4 Vision
     
-    Philosophy: GPT-4V understands construction. We just guide it with 3 simple passes:
+    Philosophy: GPT-4V understands construction. We guide it with 5 comprehensive passes:
     1. Direct visual analysis - answer the question by looking
     2. Detailed verification - check tags, measurements, specs
     3. Documentation check - verify with schedules, notes, calculations
+    4. Full text validation - validate using ALL visible text
+    5. Cross-reference validation - ensure no duplicates, reconcile all sources
     
     Works for ANY construction question - counting, measuring, calculating, compliance, etc.
+    Maximum accuracy through systematic validation.
     """
     
     def __init__(self, settings):
@@ -74,13 +77,15 @@ class VisionIntelligence:
         comprehensive_data: Optional[Dict[str, Any]] = None
     ) -> VisualIntelligenceResult:
         """
-        Core visual analysis method - Universal Triple Verification
+        Core visual analysis method - Universal 5-Pass Verification
         
         Pass 1: Direct visual analysis
         Pass 2: Detailed verification with measurements/tags/specs
         Pass 3: Documentation check (schedules, notes, calculations)
+        Pass 4: Full text validation - verify using ALL visible text
+        Pass 5: Cross-reference validation - check for duplicates and reconcile
         
-        Works for ANY construction question
+        Works for ANY construction question with maximum accuracy
         """
         
         element_type = question_analysis.get("element_focus", "element")
@@ -117,13 +122,27 @@ class VisionIntelligence:
                 prompt, element_type, question_type, images, extracted_text, pass1_result, pass2_result
             )
             
-            # Build final result
+            # PASS 4: Full Text Validation
+            logger.info("📄 PASS 4: Full Text Validation")
+            pass4_result = await self._pass4_text_validation(
+                prompt, element_type, question_type, images, extracted_text, 
+                pass1_result, pass2_result, pass3_result
+            )
+            
+            # PASS 5: Cross-Reference Everything
+            logger.info("🔄 PASS 5: Final Cross-Reference Validation")
+            pass5_result = await self._pass5_cross_reference(
+                prompt, element_type, question_type, images,
+                pass1_result, pass2_result, pass3_result, pass4_result
+            )
+            
+            # Build final result with all validations
             final_result = self._build_universal_consensus(
-                pass1_result, pass2_result, pass3_result,
+                pass1_result, pass2_result, pass3_result, pass4_result, pass5_result,
                 element_type, question_type, page_number, prompt
             )
             
-            logger.info(f"✅ Analysis complete: {final_result.count} {element_type}(s) " +
+            logger.info(f"✅ Analysis complete with 5-pass validation: {final_result.count} {element_type}(s) " +
                        f"with {int(final_result.confidence * 100)}% confidence")
             
             return final_result
