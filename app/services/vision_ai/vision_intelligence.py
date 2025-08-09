@@ -179,76 +179,28 @@ class VisionIntelligence:
         Pass 1: Direct visual analysis - Just answer the question
         """
         
-        # Build context-aware prompt based on question type
-        if question_type == "counting":
-            analysis_prompt = f"""Look at these construction drawings and answer: {prompt}
+        # Simple, direct prompt
+        analysis_prompt = f"""Look at these construction drawings and answer: {prompt}
 
-Count EVERY {element_type} you can see across all {len(images)} pages.
-- Check floor plans, elevations, sections, details, enlarged areas
-- Count each symbol/instance you see
-- Include partial views at drawing edges
+Focus on what the user is asking about. Check all {len(images)} pages.
 
-Direct answer:
-COUNT: [number]
-WHERE: [which pages/areas have {element_type}s]
+Answer:
+RESULT: [your answer - number, measurement, description, etc.]
+WHERE: [which pages/areas you found relevant information]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
-VISUAL NOTES: [what you see - symbols, patterns, distribution]"""
-
-        elif question_type == "measurement":
-            analysis_prompt = f"""Look at these construction drawings and answer: {prompt}
-
-Measure or determine the requested dimension/spacing.
-- Look for dimension strings
-- Check detail drawings for measurements
-- Use grid spacing if shown
-- Note any typical spacing patterns
-
-Direct answer:
-MEASUREMENT: [value and units]
-WHERE MEASURED: [location/detail where you found this]
-CONFIDENCE: [HIGH/MEDIUM/LOW]
-MEASUREMENT NOTES: [how you determined this]"""
-
-        elif question_type == "calculation":
-            analysis_prompt = f"""Look at these construction drawings and answer: {prompt}
-
-Extract the information needed for this calculation.
-- Find relevant dimensions
-- Count quantities if needed
-- Look for material specifications
-- Check notes for additional data
-
-Direct answer:
-RELEVANT DATA: [list all data found for calculation]
-INITIAL CALCULATION: [if possible, provide estimate]
-CONFIDENCE: [HIGH/MEDIUM/LOW]
-CALC NOTES: [what information you found]"""
-
-        else:  # general/identification/compliance
-            analysis_prompt = f"""Look at these construction drawings and answer: {prompt}
-
-Analyze the drawings to provide a direct answer.
-- Look at all relevant areas
-- Check symbols, notes, and specifications
-- Consider all {len(images)} pages
-
-Direct answer:
-ANSWER: [your direct answer to the question]
-EVIDENCE: [what you see that supports this answer]
-CONFIDENCE: [HIGH/MEDIUM/LOW]
-NOTES: [any relevant observations]"""
+NOTES: [brief explanation of what you found]"""
 
         content = self._prepare_vision_content(images, analysis_prompt)
         
         async with self.vision_semaphore:
             response = await self._make_vision_request(
                 content,
-                system_prompt="You are analyzing construction drawings. Provide accurate, direct answers based on what you see.",
-                max_tokens=1500
+                system_prompt="You are analyzing construction drawings. Answer the question directly based on what you see.",
+                max_tokens=1000
             )
         
         if response:
-            return self._parse_pass1_response(response, question_type)
+            return self._parse_simple_response(response, question_type, "RESULT")
         
         return {"primary_answer": None, "confidence": "LOW", "evidence": [], "raw_response": ""}
     
@@ -264,92 +216,34 @@ NOTES: [any relevant observations]"""
         Pass 2: Detailed verification - Check tags, codes, measurements, specs
         """
         
-        # Reference Pass 1 findings
         initial_answer = pass1_result.get("primary_answer", "No initial answer")
         
-        if question_type == "counting":
-            verify_prompt = f"""Verify the count of {element_type}s by checking TAGS and CODES.
+        # Simple verification prompt
+        verify_prompt = f"""Verify your answer to: {prompt}
 
-Initial count: {initial_answer}
+You initially found: {initial_answer}
 
-Now verify by looking for:
-- Element tags/marks (like {element_type[0].upper()}1, {element_type[0].upper()}2, etc.)
-- Grid locations for each {element_type}
-- Any {element_type}s that appear in multiple views (same tag = same element)
+Now look more carefully for:
+- Tags, labels, or codes (like W1, D2, P1, etc.)
+- Exact measurements or dimensions
+- Element specifications or ratings
+- Any details that confirm or change your answer
 
-For each unique element:
-TAG/MARK: [identifier if any]
-LOCATION: [where it appears]
-APPEARS IN: [which views/pages]
-
-VERIFIED COUNT: [final count after checking for duplicates]
-UNIQUE ELEMENTS: [list of unique identifiers found]
-VERIFICATION METHOD: [how you verified]"""
-
-        elif question_type == "measurement":
-            verify_prompt = f"""Verify the measurement/spacing for: {prompt}
-
-Initial answer: {initial_answer}
-
-Now verify by checking:
-- Actual dimension strings on drawings
-- Scale indicators
-- Grid spacing references
-- Detail drawings with measurements
-- Standard spacing requirements
-
-VERIFIED MEASUREMENT: [value with units]
-MEASUREMENT SOURCES: [where you found dimensions]
-SCALE VERIFICATION: [drawing scale if relevant]
-STANDARD COMPLIANCE: [if this meets typical standards]"""
-
-        elif question_type == "calculation":
-            verify_prompt = f"""Verify the data needed for: {prompt}
-
-Initial findings: {initial_answer}
-
-Now verify by collecting:
-- All relevant dimensions with units
-- Quantities and counts
-- Material specifications
-- Any formulas or calculation notes
-- Reference standards
-
-VERIFIED DATA:
-- Dimensions: [list with units]
-- Quantities: [counts of relevant items]
-- Specifications: [materials, ratings, etc.]
-- Additional factors: [any other relevant data]
-CALCULATION CHECK: [verify if data is complete for calculation]"""
-
-        else:
-            verify_prompt = f"""Verify your answer to: {prompt}
-
-Initial answer: {initial_answer}
-
-Now verify by checking:
-- Specific callouts and labels
-- Written specifications
-- Code references
-- Any conflicting information
-- Additional details missed initially
-
-VERIFIED ANSWER: [confirmed or revised answer]
-SUPPORTING DETAILS: [specific evidence]
-CONFLICTS FOUND: [any contradictions]
-CONFIDENCE UPDATE: [more certain or less certain]"""
+VERIFIED ANSWER: [your verified answer]
+WHAT CHANGED: [explain any differences from initial answer]
+DETAILS FOUND: [list specific tags, measurements, specs you found]"""
 
         content = self._prepare_vision_content(images, verify_prompt)
         
         async with self.vision_semaphore:
             response = await self._make_vision_request(
                 content,
-                system_prompt=f"Verify the answer by checking details, tags, measurements, and specifications. Be thorough and precise.",
-                max_tokens=2000
+                system_prompt=f"Verify the answer by checking details carefully. Look for tags, measurements, and specifications.",
+                max_tokens=1500
             )
         
         if response:
-            return self._parse_pass2_response(response, question_type, initial_answer)
+            return self._parse_simple_response(response, question_type, "VERIFIED ANSWER", initial_answer)
         
         return {"verified_answer": initial_answer, "verification_method": "none", "details": {}}
     
@@ -367,46 +261,34 @@ CONFIDENCE UPDATE: [more certain or less certain]"""
         Pass 3: Check schedules, notes, specifications, and documentation
         """
         
-        # Reference previous findings
         current_answer = pass2_result.get("verified_answer", pass1_result.get("primary_answer", "Unknown"))
         
-        # Add extracted text context if available
-        text_context = ""
-        if extracted_text and len(extracted_text) > 100:
-            text_context = f"\nExtracted text from drawings:\n{extracted_text[:2000]}...\n"
-        
-        doc_prompt = f"""Final verification: Check all DOCUMENTATION for: {prompt}
+        # Simple documentation check
+        doc_prompt = f"""Check documentation for: {prompt}
 
 Current answer: {current_answer}
-{text_context}
+
 Look for:
-1. SCHEDULES - Any tables listing {element_type}s, quantities, specifications
-2. GENERAL NOTES - Requirements, standards, installation notes
-3. SPECIFICATIONS - Material specs, ratings, dimensions
-4. CALCULATIONS - Any shown calculations or formulas
-5. LEGENDS - Symbol definitions, abbreviations
-6. CODE REFERENCES - Building codes, standards mentioned
+- Schedules or tables that list quantities/specifications
+- General notes about what you're looking for
+- Any written documentation that helps answer the question
 
-Document findings:
-SCHEDULES FOUND: [YES/NO - which schedules]
-RELEVANT NOTES: [key notes about the question]
-SPECIFICATIONS: [relevant specs found]
-DOCUMENTED ANSWER: [answer according to documentation]
-FINAL VERIFICATION: [does documentation support our answer?]
-
-Final answer to "{prompt}": [consolidated answer]"""
+SCHEDULE/TABLE FOUND: [YES/NO - what type]
+DOCUMENTED ANSWER: [what the documentation says]
+KEY NOTES: [any important notes you found]
+FINAL ANSWER: [your final answer after checking documentation]"""
 
         content = self._prepare_vision_content(images, doc_prompt)
         
         async with self.vision_semaphore:
             response = await self._make_vision_request(
                 content,
-                system_prompt="Check all documentation, schedules, notes, and specifications. Documentation is the most reliable source.",
-                max_tokens=2000
+                system_prompt="Check all schedules, tables, and notes. Documentation is often the most reliable source.",
+                max_tokens=1500
             )
         
         if response:
-            return self._parse_pass3_response(response, question_type, current_answer)
+            return self._parse_simple_response(response, question_type, "FINAL ANSWER", current_answer)
         
         return {"documented_answer": current_answer, "documentation_found": False, "final_answer": current_answer}
     
