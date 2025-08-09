@@ -87,7 +87,7 @@ class AppSettings:
         self.PDF_PREVIEW_RESOLUTION: int = int(os.getenv("PDF_PREVIEW_RESOLUTION", 72))
         self.PDF_HIGH_RESOLUTION: int = int(os.getenv("PDF_HIGH_RESOLUTION", 150))
         self.PDF_IMAGE_DPI: int = int(os.getenv("PDF_IMAGE_DPI", 100))
-        self.PDF_AI_DPI: int = int(os.getenv("PDF_AI_DPI", 300)) 
+        self.PDF_AI_DPI: int = int(os.getenv("PDF_AI_DPI", 600)) 
         self.PDF_THUMBNAIL_DPI: int = int(os.getenv("PDF_THUMBNAIL_DPI", 72))
         self.PDF_MAX_PAGES: int = int(os.getenv("PDF_MAX_PAGES", 200))  # Increased from 100
         self.PROCESSING_BATCH_SIZE: int = int(os.getenv("PROCESSING_BATCH_SIZE", 25))  # Updated: Increased from 10
