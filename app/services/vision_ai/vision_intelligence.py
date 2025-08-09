@@ -3,7 +3,7 @@ import asyncio
 import re
 import logging
 import json
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections import defaultdict, Counter
@@ -22,17 +22,12 @@ logger = logging.getLogger(__name__)
 
 class VisionIntelligence:
     """
-    Universal Construction Drawing Analysis using GPT-4 Vision
+    Triple Verification Visual Intelligence using GPT-4 Vision
     
-    Philosophy: GPT-4V understands construction. We guide it with 5 comprehensive passes:
-    1. Direct visual analysis - answer the question by looking
-    2. Detailed verification - check tags, measurements, specs
-    3. Documentation check - verify with schedules, notes, calculations
-    4. Full text validation - validate using ALL visible text
-    5. Cross-reference validation - ensure no duplicates, reconcile all sources
-    
-    Works for ANY construction question - counting, measuring, calculating, compliance, etc.
-    Maximum accuracy through systematic validation.
+    Philosophy: GPT-4V already knows construction. Just ask it clearly 3 times:
+    1. Visual count
+    2. Visual + spatial verification
+    3. Text review across entire document
     """
     
     def __init__(self, settings):
@@ -56,8 +51,8 @@ class VisionIntelligence:
             
             self._client = AsyncOpenAI(
                 api_key=self.openai_api_key,
-                timeout=CONFIG.get("VISION_REQUEST_TIMEOUT", 60),
-                max_retries=CONFIG.get("VISION_MAX_RETRIES", 3)
+                timeout=CONFIG["VISION_REQUEST_TIMEOUT"],
+                max_retries=CONFIG["VISION_MAX_RETRIES"]
             )
         return self._client
     
@@ -66,7 +61,7 @@ class VisionIntelligence:
         if self.vision_semaphore is None:
             self.vision_semaphore = asyncio.Semaphore(3)
         if self.inference_semaphore is None:
-            self.inference_semaphore = asyncio.Semaphore(CONFIG.get("VISION_INFERENCE_LIMIT", 5))
+            self.inference_semaphore = asyncio.Semaphore(CONFIG["VISION_INFERENCE_LIMIT"])
     
     async def analyze(
         self,
@@ -77,23 +72,18 @@ class VisionIntelligence:
         comprehensive_data: Optional[Dict[str, Any]] = None
     ) -> VisualIntelligenceResult:
         """
-        Core visual analysis method - Universal 5-Pass Verification
+        Core visual analysis method - Triple Verification Approach
         
-        Pass 1: Direct visual analysis
-        Pass 2: Detailed verification with measurements/tags/specs
-        Pass 3: Documentation check (schedules, notes, calculations)
-        Pass 4: Full text validation - verify using ALL visible text
-        Pass 5: Cross-reference validation - check for duplicates and reconcile
+        Pass 1: Direct visual count
+        Pass 2: Visual + spatial verification  
+        Pass 3: Text review across entire document
         
-        Works for ANY construction question with maximum accuracy
+        If all 3 agree = near 100% confidence
         """
         
         element_type = question_analysis.get("element_focus", "element")
-        question_type = self._determine_question_type(prompt)
-        
-        logger.info(f"🧠 Starting analysis for: {prompt}")
-        logger.info(f"📄 Question type: {question_type}, Element: {element_type}")
-        logger.info(f"📄 Analyzing {len(images)} images")
+        logger.info(f"🧠 Starting Triple Verification for {element_type}s")
+        logger.info(f"📄 Analyzing {len(images)} images for: {prompt}")
         
         # Extract text context if available
         extracted_text = ""
@@ -104,45 +94,31 @@ class VisionIntelligence:
             # Ensure semaphores are initialized
             self._ensure_semaphores_initialized()
             
-            # PASS 1: Direct Visual Analysis
-            logger.info("👁️ PASS 1: Direct Visual Analysis")
-            pass1_result = await self._pass1_direct_analysis(
-                prompt, element_type, question_type, images
+            # PASS 1: Direct Visual Count
+            logger.info("👁️ PASS 1: Direct Visual Count")
+            pass1_result = await self._pass1_visual_count(
+                element_type, images, prompt
             )
             
-            # PASS 2: Detailed Verification
-            logger.info("🔍 PASS 2: Detailed Verification")
-            pass2_result = await self._pass2_detailed_verification(
-                prompt, element_type, question_type, images, pass1_result
+            # PASS 2: Visual + Spatial Verification
+            logger.info("📍 PASS 2: Visual + Spatial Verification")
+            pass2_result = await self._pass2_spatial_verification(
+                element_type, images, prompt
             )
             
-            # PASS 3: Documentation Check
-            logger.info("📋 PASS 3: Documentation Check")
-            pass3_result = await self._pass3_documentation_check(
-                prompt, element_type, question_type, images, extracted_text, pass1_result, pass2_result
+            # PASS 3: Text Review
+            logger.info("📄 PASS 3: Document Text Review")
+            pass3_result = await self._pass3_text_review(
+                element_type, images, extracted_text, prompt
             )
             
-            # PASS 4: Full Text Validation
-            logger.info("📄 PASS 4: Full Text Validation")
-            pass4_result = await self._pass4_text_validation(
-                prompt, element_type, question_type, images, extracted_text, 
-                pass1_result, pass2_result, pass3_result
+            # Build consensus result
+            final_result = self._build_consensus_result(
+                pass1_result, pass2_result, pass3_result,
+                element_type, page_number
             )
             
-            # PASS 5: Cross-Reference Everything
-            logger.info("🔄 PASS 5: Final Cross-Reference Validation")
-            pass5_result = await self._pass5_cross_reference(
-                prompt, element_type, question_type, images,
-                pass1_result, pass2_result, pass3_result, pass4_result
-            )
-            
-            # Build final result with all validations
-            final_result = self._build_universal_consensus(
-                pass1_result, pass2_result, pass3_result, pass4_result, pass5_result,
-                element_type, question_type, page_number, prompt
-            )
-            
-            logger.info(f"✅ Analysis complete with 5-pass validation: {final_result.count} {element_type}(s) " +
+            logger.info(f"✅ Triple verification complete: {final_result.count} {element_type}(s) " +
                        f"with {int(final_result.confidence * 100)}% confidence")
             
             return final_result
@@ -151,146 +127,278 @@ class VisionIntelligence:
             logger.error(f"Visual Intelligence error: {e}", exc_info=True)
             return self._create_error_result(element_type, page_number, str(e))
     
-    def _determine_question_type(self, prompt: str) -> str:
-        """Determine what type of question this is"""
-        prompt_lower = prompt.lower()
-        
-        if any(word in prompt_lower for word in ["how many", "count", "number of", "total"]):
-            return "counting"
-        elif any(word in prompt_lower for word in ["spacing", "distance", "between", "apart"]):
-            return "measurement"
-        elif any(word in prompt_lower for word in ["calculate", "how much", "volume", "area", "load"]):
-            return "calculation"
-        elif any(word in prompt_lower for word in ["code", "compliant", "ada", "nfpa", "requirement"]):
-            return "compliance"
-        elif any(word in prompt_lower for word in ["what type", "identify", "what is"]):
-            return "identification"
-        else:
-            return "general"
-    
-    async def _pass1_direct_analysis(
+    async def _pass1_visual_count(
         self,
-        prompt: str,
         element_type: str,
-        question_type: str,
-        images: List[Dict[str, Any]]
+        images: List[Dict[str, Any]],
+        original_prompt: str
     ) -> Dict[str, Any]:
         """
-        Pass 1: Direct visual analysis - Just answer the question
+        Pass 1: Simple direct visual count
+        Just ask GPT-4V to count the elements
         """
         
-        # Simple, direct prompt
-        analysis_prompt = f"""Look at these construction drawings and answer: {prompt}
+        prompt = f"""PASS 1: VISUAL COUNT
 
-Focus on what the user is asking about. Check all {len(images)} pages.
+Count ALL {element_type}s you can see in these construction drawings.
 
-Answer:
-RESULT: [your answer - number, measurement, description, etc.]
-WHERE: [which pages/areas you found relevant information]
+Just count them. Every single one.
+Look carefully at all pages provided.
+
+IMPORTANT: You already know what {element_type}s look like. Trust your vision.
+
+Original question: {original_prompt}
+
+Provide:
+COUNT: [exact number]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
-NOTES: [brief explanation of what you found]"""
+FOUND_ON_PAGES: [list which pages have {element_type}s]"""
 
-        content = self._prepare_vision_content(images, analysis_prompt)
+        content = self._prepare_vision_content(images, prompt)
         
         async with self.vision_semaphore:
             response = await self._make_vision_request(
                 content,
-                system_prompt="You are analyzing construction drawings. Answer the question directly based on what you see.",
+                system_prompt=f"You are counting {element_type}s in construction drawings. Be thorough and accurate.",
                 max_tokens=1000
             )
         
         if response:
-            return self._parse_simple_response(response, question_type, "RESULT")
+            return self._parse_pass1_response(response, element_type)
         
-        return {"primary_answer": None, "confidence": "LOW", "evidence": [], "raw_response": ""}
+        return {"count": 0, "confidence": "LOW", "pages": []}
     
-    async def _pass2_detailed_verification(
+    async def _pass2_spatial_verification(
         self,
-        prompt: str,
         element_type: str,
-        question_type: str,
         images: List[Dict[str, Any]],
-        pass1_result: Dict[str, Any]
+        original_prompt: str
     ) -> Dict[str, Any]:
         """
-        Pass 2: Detailed verification - Check tags, codes, measurements, specs
+        Pass 2: Count with spatial verification
+        Ask for count WITH grid locations
         """
         
-        initial_answer = pass1_result.get("primary_answer", "No initial answer")
-        
-        # Simple verification prompt
-        verify_prompt = f"""Verify your answer to: {prompt}
+        prompt = f"""PASS 2: SPATIAL VERIFICATION
 
-You initially found: {initial_answer}
+Count ALL {element_type}s again, but this time tell me WHERE each one is located.
 
-Now look more carefully for:
-- Tags, labels, or codes (like W1, D2, P1, etc.)
-- Exact measurements or dimensions
-- Element specifications or ratings
-- Any details that confirm or change your answer
+For EACH {element_type}:
+- Give its grid reference (like A-1, B-2, etc.)
+- Brief description of what you see
+- Any labels or tags
 
-VERIFIED ANSWER: [your verified answer]
-WHAT CHANGED: [explain any differences from initial answer]
-DETAILS FOUND: [list specific tags, measurements, specs you found]"""
+Original question: {original_prompt}
 
-        content = self._prepare_vision_content(images, verify_prompt)
+FORMAT:
+TOTAL COUNT: [number]
+LOCATIONS:
+1. Grid [?] - [description]
+2. Grid [?] - [description]
+...
+
+VERIFICATION: Does this count match what you'd expect for this type of drawing?"""
+
+        content = self._prepare_vision_content(images, prompt)
         
         async with self.vision_semaphore:
             response = await self._make_vision_request(
                 content,
-                system_prompt=f"Verify the answer by checking details carefully. Look for tags, measurements, and specifications.",
-                max_tokens=1500
+                system_prompt=f"You are verifying {element_type} locations in construction drawings. Be precise with grid references.",
+                max_tokens=3000
             )
         
         if response:
-            return self._parse_simple_response(response, question_type, "VERIFIED ANSWER", initial_answer)
+            return self._parse_pass2_response(response, element_type)
         
-        return {"verified_answer": initial_answer, "verification_method": "none", "details": {}}
+        return {"count": 0, "locations": [], "grid_references": []}
     
-    async def _pass3_documentation_check(
+    async def _pass3_text_review(
         self,
-        prompt: str,
         element_type: str,
-        question_type: str,
         images: List[Dict[str, Any]],
         extracted_text: str,
-        pass1_result: Dict[str, Any],
-        pass2_result: Dict[str, Any]
+        original_prompt: str
     ) -> Dict[str, Any]:
         """
-        Pass 3: Check schedules, notes, specifications, and documentation
+        Pass 3: Review ALL text in document
+        Not just schedules - ALL text, notes, labels, specs
         """
         
-        current_answer = pass2_result.get("verified_answer", pass1_result.get("primary_answer", "Unknown"))
+        # Add extracted text context if available
+        text_context = ""
+        if extracted_text:
+            text_context = f"""
+EXTRACTED TEXT FROM DOCUMENT:
+{extracted_text[:2000]}...
+
+Review this text for any mentions of {element_type}s, quantities, specifications, or related information.
+"""
         
-        # Simple documentation check
-        doc_prompt = f"""Check documentation for: {prompt}
+        prompt = f"""PASS 3: COMPREHENSIVE TEXT REVIEW
 
-Current answer: {current_answer}
+Review ALL text in these drawings for information about {element_type}s:
+- Title blocks
+- General notes  
+- Schedules (if any)
+- Specifications
+- Labels and tags
+- Legend items
+- Any text mentioning {element_type}s
 
-Look for:
-- Schedules or tables that list quantities/specifications
-- General notes about what you're looking for
-- Any written documentation that helps answer the question
+{text_context}
 
-SCHEDULE/TABLE FOUND: [YES/NO - what type]
-DOCUMENTED ANSWER: [what the documentation says]
-KEY NOTES: [any important notes you found]
-FINAL ANSWER: [your final answer after checking documentation]"""
+Original question: {original_prompt}
 
-        content = self._prepare_vision_content(images, doc_prompt)
+PROVIDE:
+TEXT-BASED COUNT: [number if found in text]
+SOURCES:
+- [list where you found quantity information]
+KEY FINDINGS:
+- [any important text about {element_type}s]
+SCHEDULE_COUNT: [number if schedule exists, or "No schedule found"]"""
+
+        content = self._prepare_vision_content(images, prompt)
         
         async with self.vision_semaphore:
             response = await self._make_vision_request(
                 content,
-                system_prompt="Check all schedules, tables, and notes. Documentation is often the most reliable source.",
-                max_tokens=1500
+                system_prompt=f"You are reviewing all text and documentation about {element_type}s. Look everywhere, not just schedules.",
+                max_tokens=2000
             )
         
         if response:
-            return self._parse_simple_response(response, question_type, "FINAL ANSWER", current_answer)
+            return self._parse_pass3_response(response, element_type)
         
-        return {"documented_answer": current_answer, "documentation_found": False, "final_answer": current_answer}
+        return {"text_count": None, "schedule_count": None, "sources": [], "findings": []}
+    
+    def _build_consensus_result(
+        self,
+        pass1: Dict[str, Any],
+        pass2: Dict[str, Any],
+        pass3: Dict[str, Any],
+        element_type: str,
+        page_number: int
+    ) -> VisualIntelligenceResult:
+        """
+        Build consensus from triple verification
+        If all 3 agree = high confidence
+        """
+        
+        # Extract counts
+        counts = []
+        if pass1.get("count") is not None:
+            counts.append(pass1["count"])
+        if pass2.get("count") is not None:
+            counts.append(pass2["count"])
+        if pass3.get("text_count") is not None:
+            counts.append(pass3["text_count"])
+        
+        # Determine consensus count
+        if counts:
+            # Use mode (most common) or average if no mode
+            count_freq = Counter(counts)
+            mode_count = count_freq.most_common(1)[0][0]
+            consensus_count = mode_count
+        else:
+            consensus_count = 0
+        
+        # Calculate confidence based on agreement
+        confidence = self._calculate_consensus_confidence(
+            pass1, pass2, pass3, counts
+        )
+        
+        # Build verification notes
+        verification_notes = []
+        verification_notes.append(f"Pass 1 (Visual): {pass1.get('count', 0)} {element_type}s")
+        verification_notes.append(f"Pass 2 (Spatial): {pass2.get('count', 0)} {element_type}s")
+        
+        if pass3.get('schedule_count') is not None:
+            verification_notes.append(f"Pass 3 (Text): Schedule shows {pass3['schedule_count']} {element_type}s")
+        elif pass3.get('text_count') is not None:
+            verification_notes.append(f"Pass 3 (Text): Documentation indicates {pass3['text_count']} {element_type}s")
+        else:
+            verification_notes.append(f"Pass 3 (Text): No quantity found in text")
+        
+        # Add consensus note
+        if len(set(counts)) == 1 and len(counts) >= 2:
+            verification_notes.append("✅ PERFECT CONSENSUS achieved")
+        elif confidence >= 0.90:
+            verification_notes.append("✅ Strong agreement between passes")
+        else:
+            verification_notes.append("⚠️ Some variation between verification passes")
+        
+        # Build visual evidence
+        visual_evidence = []
+        if pass2.get("locations"):
+            visual_evidence.append(f"Found in {len(set(pass2.get('grid_references', [])))} grid locations")
+        if pass1.get("pages"):
+            visual_evidence.append(f"Appears on pages: {', '.join(map(str, pass1['pages']))}")
+        visual_evidence.extend(pass3.get("findings", [])[:3])  # Add top 3 text findings
+        
+        # Create result
+        result = VisualIntelligenceResult(
+            element_type=element_type,
+            count=consensus_count,
+            locations=pass2.get("locations", []),
+            confidence=confidence,
+            visual_evidence=visual_evidence,
+            pattern_matches=[],  # Not used in triple verification
+            grid_references=pass2.get("grid_references", []),
+            verification_notes=verification_notes,
+            page_number=page_number
+        )
+        
+        # Add metadata
+        result.analysis_metadata = {
+            "method": "triple_verification",
+            "pass1_count": pass1.get("count", 0),
+            "pass2_count": pass2.get("count", 0),
+            "pass3_count": pass3.get("text_count"),
+            "schedule_count": pass3.get("schedule_count"),
+            "consensus_achieved": len(set(counts)) == 1 and len(counts) >= 2
+        }
+        
+        return result
+    
+    def _calculate_consensus_confidence(
+        self,
+        pass1: Dict[str, Any],
+        pass2: Dict[str, Any],
+        pass3: Dict[str, Any],
+        counts: List[int]
+    ) -> float:
+        """Calculate confidence based on consensus between passes"""
+        
+        if not counts:
+            return 0.5
+        
+        # Perfect consensus
+        if len(set(counts)) == 1:
+            if len(counts) == 3:
+                return 0.99  # All 3 agree
+            elif len(counts) == 2:
+                return 0.95  # 2 agree (3rd had no data)
+        
+        # Near consensus (within 1)
+        if len(counts) >= 2:
+            count_range = max(counts) - min(counts)
+            if count_range <= 1:
+                return 0.90
+            elif count_range <= 2:
+                return 0.85
+        
+        # Check pass confidence levels
+        base_confidence = 0.70
+        
+        if pass1.get("confidence") == "HIGH":
+            base_confidence += 0.05
+        if pass2.get("locations") and len(pass2["locations"]) > 0:
+            base_confidence += 0.05
+        if pass3.get("schedule_count") is not None:
+            base_confidence += 0.10
+        
+        return min(base_confidence, 0.95)
     
     def _prepare_vision_content(
         self,
@@ -300,14 +408,15 @@ FINAL ANSWER: [your final answer after checking documentation]"""
         """Prepare content for vision API request"""
         content = []
         
-        # Add images with page markers
+        # Add note about number of images
+        if len(images) > 1:
+            content.append({
+                "type": "text",
+                "text": f"You are looking at {len(images)} pages of construction drawings."
+            })
+        
+        # Add images
         for i, image in enumerate(images):
-            if len(images) > 1:
-                content.append({
-                    "type": "text",
-                    "text": f"\n=== PAGE {i+1} of {len(images)} ===\n"
-                })
-            
             content.append({
                 "type": "image_url",
                 "image_url": {
@@ -316,7 +425,7 @@ FINAL ANSWER: [your final answer after checking documentation]"""
                 }
             })
         
-        # Add the prompt
+        # Add the main prompt
         content.append({
             "type": "text",
             "text": text_prompt
@@ -340,10 +449,10 @@ FINAL ANSWER: [your final answer after checking documentation]"""
                         {"role": "user", "content": content}
                     ],
                     max_tokens=max_tokens,
-                    temperature=0.1,  # Slight temperature for better reasoning
+                    temperature=0.0,
                     seed=self.deterministic_seed
                 ),
-                timeout=CONFIG.get("VISION_TIMEOUT", 60)
+                timeout=CONFIG["VISION_TIMEOUT"]
             )
             
             if response and response.choices:
@@ -356,280 +465,109 @@ FINAL ANSWER: [your final answer after checking documentation]"""
         
         return None
     
-    def _parse_pass1_response(self, response: str, question_type: str) -> Dict[str, Any]:
-        """Parse Pass 1 response based on question type"""
+    def _parse_pass1_response(self, response: str, element_type: str) -> Dict[str, Any]:
+        """Parse Pass 1 response"""
         result = {
-            "primary_answer": None,
+            "count": 0,
             "confidence": "MEDIUM",
-            "evidence": [],
-            "raw_response": response[:500] if response else ""
+            "pages": []
         }
         
-        if question_type == "counting":
-            # Look for count
-            count_match = re.search(r'COUNT:\s*(\d+)', response, re.IGNORECASE)
-            if count_match:
-                result["primary_answer"] = int(count_match.group(1))
-            else:
-                # Fallback patterns
-                number_patterns = [r'found\s+(\d+)', r'counted\s+(\d+)', r'total[:\s]+(\d+)']
-                for pattern in number_patterns:
-                    match = re.search(pattern, response, re.IGNORECASE)
-                    if match:
-                        result["primary_answer"] = int(match.group(1))
-                        break
-                        
-        elif question_type == "measurement":
-            # Look for measurement with units
-            measure_match = re.search(r'MEASUREMENT:\s*([0-9.,]+)\s*([a-zA-Z\'"]+)', response, re.IGNORECASE)
-            if measure_match:
-                result["primary_answer"] = f"{measure_match.group(1)} {measure_match.group(2)}"
-            else:
-                # Fallback for measurements in text
-                unit_patterns = [
-                    r'(\d+(?:\.\d+)?)\s*(feet|ft|inches|in|"|\′|meters?|m|mm|cm)',
-                    r'(\d+(?:\.\d+)?)\s*[\'"]?\s*(?:-|–)\s*(\d+(?:\.\d+)?)\s*[\'"]?'
-                ]
-                for pattern in unit_patterns:
-                    match = re.search(pattern, response, re.IGNORECASE)
-                    if match:
-                        result["primary_answer"] = match.group(0)
-                        break
-                        
-        elif question_type == "calculation":
-            # Extract relevant data
-            data_match = re.search(r'RELEVANT DATA:(.*?)(?:INITIAL CALCULATION:|CONFIDENCE:|$)', response, re.IGNORECASE | re.DOTALL)
-            if data_match:
-                result["primary_answer"] = data_match.group(1).strip()
-            
-            # Try to get initial calculation
-            calc_match = re.search(r'INITIAL CALCULATION:\s*(.+?)(?:\n|CONFIDENCE:|$)', response, re.IGNORECASE)
-            if calc_match:
-                result["initial_calc"] = calc_match.group(1).strip()
-                
-        else:  # General answer
-            answer_match = re.search(r'ANSWER:\s*(.+?)(?:EVIDENCE:|CONFIDENCE:|$)', response, re.IGNORECASE | re.DOTALL)
-            if answer_match:
-                result["primary_answer"] = answer_match.group(1).strip()
+        # Extract count
+        count_match = re.search(r'COUNT:\s*(\d+)', response, re.IGNORECASE)
+        if count_match:
+            result["count"] = int(count_match.group(1))
         
         # Extract confidence
         conf_match = re.search(r'CONFIDENCE:\s*(HIGH|MEDIUM|LOW)', response, re.IGNORECASE)
         if conf_match:
             result["confidence"] = conf_match.group(1).upper()
         
-        # Extract evidence/notes
-        evidence_patterns = [
-            r'VISUAL NOTES:\s*(.+?)(?:$|\n\n)',
-            r'EVIDENCE:\s*(.+?)(?:CONFIDENCE:|$)',
-            r'NOTES:\s*(.+?)(?:$|\n\n)'
-        ]
-        for pattern in evidence_patterns:
-            match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
-            if match:
-                result["evidence"].append(match.group(1).strip())
+        # Extract pages
+        pages_match = re.search(r'FOUND_ON_PAGES:.*?(\[.*?\]|[\d,\s]+)', response, re.IGNORECASE | re.DOTALL)
+        if pages_match:
+            pages_text = pages_match.group(1)
+            page_numbers = re.findall(r'\d+', pages_text)
+            result["pages"] = [int(p) for p in page_numbers]
         
         return result
     
-    def _parse_pass2_response(self, response: str, question_type: str, initial_answer: Any) -> Dict[str, Any]:
-        """Parse Pass 2 verification response"""
+    def _parse_pass2_response(self, response: str, element_type: str) -> Dict[str, Any]:
+        """Parse Pass 2 response with locations"""
         result = {
-            "verified_answer": initial_answer,
-            "verification_method": "visual",
-            "details": {}
+            "count": 0,
+            "locations": [],
+            "grid_references": []
         }
         
-        if question_type == "counting":
-            # Look for verified count
-            verified_match = re.search(r'VERIFIED COUNT:\s*(\d+)', response, re.IGNORECASE)
-            if verified_match:
-                result["verified_answer"] = int(verified_match.group(1))
-                result["verification_method"] = "tags_and_codes"
+        # Extract total count
+        count_match = re.search(r'TOTAL COUNT:\s*(\d+)', response, re.IGNORECASE)
+        if count_match:
+            result["count"] = int(count_match.group(1))
+        
+        # Extract locations
+        location_pattern = r'(\d+)\.\s*Grid\s*([A-Z]-?\d+)\s*[-–]\s*(.+?)(?=\n\d+\.|$)'
+        
+        for match in re.finditer(location_pattern, response, re.MULTILINE | re.DOTALL):
+            grid_ref = match.group(2)
+            description = match.group(3).strip()
             
-            # Extract unique elements
-            unique_match = re.search(r'UNIQUE ELEMENTS:(.*?)(?:VERIFICATION METHOD:|$)', response, re.IGNORECASE | re.DOTALL)
-            if unique_match:
-                elements = re.findall(r'\b([A-Z]+\d+)\b', unique_match.group(1))
-                result["details"]["unique_elements"] = elements
-                
-        elif question_type == "measurement":
-            # Look for verified measurement
-            verified_match = re.search(r'VERIFIED MEASUREMENT:\s*([0-9.,]+\s*[a-zA-Z\'"]+)', response, re.IGNORECASE)
-            if verified_match:
-                result["verified_answer"] = verified_match.group(1)
-                result["verification_method"] = "dimension_verification"
-                
-        elif question_type == "calculation":
-            # Extract verified data
-            data_section = re.search(r'VERIFIED DATA:(.*?)(?:CALCULATION CHECK:|$)', response, re.IGNORECASE | re.DOTALL)
-            if data_section:
-                result["details"]["verified_data"] = data_section.group(1).strip()
-                result["verified_answer"] = data_section.group(1).strip()
-                
-        else:
-            # General verification
-            verified_match = re.search(r'VERIFIED ANSWER:\s*(.+?)(?:SUPPORTING DETAILS:|CONFLICTS:|$)', response, re.IGNORECASE | re.DOTALL)
-            if verified_match:
-                result["verified_answer"] = verified_match.group(1).strip()
+            # Extract element tag if present
+            tag_match = re.search(r'\b([A-Z]+\d+)\b', description)
+            
+            location_info = {
+                "grid_ref": grid_ref,
+                "visual_details": description,
+                "element_tag": tag_match.group(1) if tag_match else None
+            }
+            
+            result["locations"].append(location_info)
+            result["grid_references"].append(grid_ref)
+        
+        # If no structured format, try to extract count
+        if result["count"] == 0 and element_type in response:
+            numbers = re.findall(r'\b(\d+)\s*' + element_type, response, re.IGNORECASE)
+            if numbers:
+                result["count"] = int(numbers[0])
         
         return result
     
-    def _parse_pass3_response(self, response: str, question_type: str, current_answer: Any) -> Dict[str, Any]:
-        """Parse Pass 3 documentation response"""
+    def _parse_pass3_response(self, response: str, element_type: str) -> Dict[str, Any]:
+        """Parse Pass 3 text review response"""
         result = {
-            "documented_answer": current_answer,
-            "documentation_found": False,
-            "final_answer": current_answer,
-            "documentation": {}
+            "text_count": None,
+            "schedule_count": None,
+            "sources": [],
+            "findings": []
         }
         
-        # Check if documentation found
-        schedules_match = re.search(r'SCHEDULES FOUND:\s*(YES|NO)', response, re.IGNORECASE)
-        if schedules_match and schedules_match.group(1).upper() == "YES":
-            result["documentation_found"] = True
+        # Extract text-based count
+        text_count_match = re.search(r'TEXT-BASED COUNT:\s*(\d+)', response, re.IGNORECASE)
+        if text_count_match:
+            result["text_count"] = int(text_count_match.group(1))
         
-        # Extract documented answer
-        doc_answer_match = re.search(r'DOCUMENTED ANSWER:\s*(.+?)(?:FINAL VERIFICATION:|$)', response, re.IGNORECASE | re.DOTALL)
-        if doc_answer_match:
-            doc_answer = doc_answer_match.group(1).strip()
-            if doc_answer and doc_answer.lower() not in ["n/a", "none", "not found"]:
-                result["documented_answer"] = doc_answer
-                result["documentation_found"] = True
+        # Extract schedule count
+        schedule_match = re.search(r'SCHEDULE_COUNT:\s*(\d+)', response, re.IGNORECASE)
+        if schedule_match:
+            result["schedule_count"] = int(schedule_match.group(1))
+        elif "no schedule" in response.lower():
+            result["schedule_count"] = None
         
-        # Extract final answer
-        final_match = re.search(r'Final answer to[^:]+:\s*(.+?)(?:$)', response, re.IGNORECASE | re.DOTALL)
-        if final_match:
-            result["final_answer"] = final_match.group(1).strip()
+        # Extract sources
+        sources_section = re.search(r'SOURCES:(.*?)(?:KEY FINDINGS:|SCHEDULE_COUNT:|$)', 
+                                   response, re.IGNORECASE | re.DOTALL)
+        if sources_section:
+            sources_text = sources_section.group(1)
+            sources = [s.strip() for s in sources_text.split('\n') if s.strip() and s.strip().startswith('-')]
+            result["sources"] = [s.lstrip('- ') for s in sources]
         
-        # Extract relevant notes
-        notes_match = re.search(r'RELEVANT NOTES:\s*(.+?)(?:SPECIFICATIONS:|DOCUMENTED ANSWER:|$)', response, re.IGNORECASE | re.DOTALL)
-        if notes_match:
-            result["documentation"]["notes"] = notes_match.group(1).strip()
-        
-        return result
-    
-    def _build_universal_consensus(
-        self,
-        pass1: Dict[str, Any],
-        pass2: Dict[str, Any],
-        pass3: Dict[str, Any],
-        element_type: str,
-        question_type: str,
-        page_number: int,
-        original_prompt: str
-    ) -> VisualIntelligenceResult:
-        """Build consensus from universal verification"""
-        
-        # Determine final answer with priority:
-        # 1. Documentation (if found and reliable)
-        # 2. Verified answer (Pass 2)
-        # 3. Initial answer (Pass 1)
-        
-        if pass3.get("documentation_found") and pass3.get("documented_answer"):
-            final_answer = pass3["documented_answer"]
-            confidence = 0.95
-            source = "documentation"
-        elif pass2.get("verified_answer") is not None:
-            final_answer = pass2["verified_answer"]
-            confidence = 0.90 if pass2.get("verification_method") != "visual" else 0.85
-            source = "verified_analysis"
-        else:
-            final_answer = pass1.get("primary_answer", "Unable to determine")
-            confidence = 0.80 if pass1.get("confidence") == "HIGH" else 0.70
-            source = "visual_analysis"
-        
-        # For counting questions, ensure we have a number
-        if question_type == "counting":
-            try:
-                count = int(final_answer) if final_answer else 0
-            except:
-                count = 0
-        else:
-            count = 0  # Not a counting question
-        
-        # Build verification notes based on question type
-        verification_notes = []
-        
-        if question_type == "counting":
-            verification_notes.append(f"Visual count: {pass1.get('primary_answer', 'Not found')}")
-            if pass2.get("details", {}).get("unique_elements"):
-                verification_notes.append(f"Unique elements found: {len(pass2['details']['unique_elements'])}")
-            verification_notes.append(f"Verified count: {pass2.get('verified_answer', 'Not verified')}")
-            if pass3.get("documentation_found"):
-                verification_notes.append(f"Documentation confirms: {pass3.get('documented_answer')}")
-                
-        elif question_type == "measurement":
-            verification_notes.append(f"Initial measurement: {pass1.get('primary_answer', 'Not found')}")
-            verification_notes.append(f"Verified: {pass2.get('verified_answer', 'Not verified')}")
-            if pass3.get("documentation", {}).get("notes"):
-                verification_notes.append("Documentation checked")
-                
-        elif question_type == "calculation":
-            verification_notes.append("Data extracted for calculation")
-            if pass1.get("initial_calc"):
-                verification_notes.append(f"Initial estimate: {pass1['initial_calc']}")
-            verification_notes.append("Verified data completeness")
-            
-        else:
-            verification_notes.append(f"Analysis complete for: {question_type}")
-            verification_notes.append(f"Confidence: {pass1.get('confidence', 'MEDIUM')}")
-            if pass3.get("documentation_found"):
-                verification_notes.append("Documentation supports answer")
-        
-        verification_notes.append(f"Final answer based on: {source}")
-        
-        # Build visual evidence
-        visual_evidence = []
-        visual_evidence.extend(pass1.get("evidence", []))
-        
-        if pass2.get("details", {}).get("unique_elements"):
-            elements = pass2["details"]["unique_elements"]
-            visual_evidence.append(f"Elements identified: {', '.join(elements[:10])}")
-            
-        if pass3.get("documentation", {}).get("notes"):
-            visual_evidence.append("Documentation verified")
-        
-        # Create locations for counting questions
-        locations = []
-        if question_type == "counting" and pass2.get("details", {}).get("unique_elements"):
-            for elem in pass2["details"]["unique_elements"][:50]:  # Limit to 50
-                locations.append({
-                    "element_tag": elem,
-                    "visual_details": f"{element_type} {elem}",
-                    "grid_ref": "See drawings"
-                })
-        
-        # Format the final answer for the response
-        if question_type == "counting":
-            formatted_answer = str(count)
-        else:
-            formatted_answer = str(final_answer)
-        
-        # Create result
-        result = VisualIntelligenceResult(
-            element_type=element_type,
-            count=count if question_type == "counting" else 0,
-            locations=locations,
-            confidence=confidence,
-            visual_evidence=visual_evidence,
-            pattern_matches=[],
-            grid_references=[],
-            verification_notes=verification_notes,
-            page_number=page_number
-        )
-        
-        # Add comprehensive metadata
-        result.analysis_metadata = {
-            "method": "universal_triple_verification",
-            "question_type": question_type,
-            "original_prompt": original_prompt,
-            "pass1_answer": pass1.get("primary_answer"),
-            "pass2_answer": pass2.get("verified_answer"),
-            "pass3_answer": pass3.get("final_answer"),
-            "final_answer": formatted_answer,
-            "answer_source": source,
-            "documentation_found": pass3.get("documentation_found", False),
-            "verification_method": pass2.get("verification_method", "none")
-        }
+        # Extract key findings
+        findings_section = re.search(r'KEY FINDINGS:(.*?)(?:SCHEDULE_COUNT:|$)', 
+                                    response, re.IGNORECASE | re.DOTALL)
+        if findings_section:
+            findings_text = findings_section.group(1)
+            findings = [f.strip() for f in findings_text.split('\n') if f.strip() and f.strip().startswith('-')]
+            result["findings"] = [f.lstrip('- ') for f in findings]
         
         return result
     
@@ -649,80 +587,59 @@ FINAL ANSWER: [your final answer after checking documentation]"""
     
     async def detect_element_focus(self, prompt: str) -> str:
         """
-        Detect what element the user is asking about
-        Works for any construction element
+        Intelligently detect what element the user is asking about
+        (Kept for compatibility with question_analyzer.py)
         """
         
         logger.info(f"🎯 Detecting element focus for: '{prompt}'")
         
-        # Quick check for common elements
-        prompt_lower = prompt.lower()
-        
-        # Common element keywords (not exhaustive, just helpers)
-        element_keywords = {
-            "window": ["window", "windows", "glazing", "fenestration"],
-            "door": ["door", "doors", "entrance", "exit", "opening"],
-            "outlet": ["outlet", "outlets", "receptacle", "plug", "power"],
-            "panel": ["panel", "panels", "breaker", "electrical panel", "load center"],
-            "light": ["light", "lights", "lighting", "fixture", "luminaire"],
-            "sprinkler": ["sprinkler", "sprinklers", "fire protection", "fire suppression"],
-            "column": ["column", "columns", "pillar", "structural support", "post"],
-            "beam": ["beam", "beams", "girder", "joist", "structural member"],
-            "wall": ["wall", "walls", "partition", "facade"],
-            "slab": ["slab", "concrete", "floor", "deck"],
-            "pipe": ["pipe", "pipes", "piping", "plumbing"],
-            "duct": ["duct", "ducts", "ductwork", "hvac", "air"],
-            "diffuser": ["diffuser", "diffusers", "grille", "air supply", "register"],
-            "fixture": ["fixture", "fixtures", "plumbing fixture", "bathroom fixture"]
-        }
-        
-        # Check for exact matches first
-        for element, keywords in element_keywords.items():
-            if any(keyword in prompt_lower for keyword in keywords):
-                return element
-        
-        # If no match, ask GPT to identify
-        detection_prompt = f"""What construction element or topic is this question about?
+        detection_prompt = f"""What construction element is this question about?
 
 Question: "{prompt}"
 
-If it's about a specific building element (like doors, windows, concrete, etc.), return just that element name.
-If it's about a calculation or general topic, return the main subject.
+Consider common terminology, abbreviations, and context.
+Return ONLY the element type in lowercase (e.g., door, outlet, window, panel, etc.)
 
-Examples:
-- "How many windows on page 3?" -> window
-- "What is the spacing between outlets?" -> outlet  
-- "How much concrete for the slab?" -> slab
-- "Calculate the electrical load" -> electrical
-
-ELEMENT/TOPIC:"""
+ELEMENT TYPE:"""
 
         try:
             self._ensure_semaphores_initialized()
             async with self.inference_semaphore:
                 response = await asyncio.wait_for(
                     self.client.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-4o",
                         messages=[
+                            {
+                                "role": "system",
+                                "content": "You understand construction terminology."
+                            },
                             {"role": "user", "content": detection_prompt}
                         ],
-                        max_tokens=20,
+                        max_tokens=50,
                         temperature=0.0
                     ),
-                    timeout=5.0
+                    timeout=10.0
                 )
             
             if response and response.choices:
                 detected = response.choices[0].message.content.strip().lower()
-                # Basic cleanup
-                detected = detected.replace(".", "").replace(",", "").strip()
+                
+                # Validate and map to known types
+                if detected in self.visual_patterns:
+                    return detected
+                
+                # Check variations
+                for variation, mapped in ELEMENT_VARIATIONS.items():
+                    if variation in detected or detected in variation:
+                        return mapped
+                
+                # Return if reasonable
                 if detected and len(detected.split()) <= 3:
                     return detected
                     
         except Exception as e:
             logger.debug(f"Element detection error: {e}")
         
-        # Default fallback
         return "element"
     
     async def detect_precise_geometries(
@@ -732,12 +649,14 @@ ELEMENT/TOPIC:"""
     ) -> List[ElementGeometry]:
         """
         Detect precise element geometries for highlighting
-        (Kept for compatibility)
+        (Kept for compatibility with semantic_highlighter.py)
         """
         
         if not visual_result.locations:
             return []
         
+        # For now, generate basic geometries
+        # This could be enhanced to use GPT-4V for precise detection
         geometries = []
         
         for i, location in enumerate(visual_result.locations):
@@ -760,13 +679,8 @@ ELEMENT/TOPIC:"""
             "window": {"width": 48, "height": 36},
             "outlet": {"radius": 15},
             "panel": {"width": 24, "height": 36},
-            "light": {"width": 48, "height": 24},
-            "fixture": {"width": 48, "height": 24},
+            "light fixture": {"width": 48, "height": 24},
             "sprinkler": {"radius": 10},
-            "column": {"width": 24, "height": 24},
-            "diffuser": {"width": 24, "height": 24},
-            "beam": {"width": 12, "height": 24},
-            "wall": {"width": 8, "height": 120},
-            "slab": {"width": 240, "height": 240}
+            "column": {"width": 24, "height": 24}
         }
         return dimensions.get(element_type, {"width": 50, "height": 50})
