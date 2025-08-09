@@ -92,7 +92,7 @@ class AppSettings:
         self.PDF_MAX_PAGES: int = int(os.getenv("PDF_MAX_PAGES", 200))  # Increased from 100
         self.PROCESSING_BATCH_SIZE: int = int(os.getenv("PROCESSING_BATCH_SIZE", 25))  # Updated: Increased from 10
         self.PDF_PNG_COMPRESSION: int = int(os.getenv("PDF_PNG_COMPRESSION", 6))
-        self.PDF_JPEG_QUALITY: int = int(os.getenv("PDF_JPEG_QUALITY", 99)) 
+        self.PDF_JPEG_QUALITY: int = int(os.getenv("PDF_JPEG_QUALITY", 99))  
         
         # === NEW PROCESSING SETTINGS FOR FIXES ===
         self.STATUS_UPDATE_LOCK_TIMEOUT: float = float(os.getenv("STATUS_UPDATE_LOCK_TIMEOUT", 5.0))
