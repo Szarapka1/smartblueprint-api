@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import time
 import numpy as np
 import traceback
+import weakref
 
 # Safe OpenCV import
 try:
@@ -119,6 +120,8 @@ class PDFService:
         # Memory management
         self.gc_frequency = 3  # Garbage collect every 3 pages
         self.processing_delay = 0.5  # Delay between batches
+        self.max_sessions_in_memory = 10  # Maximum sessions to keep in memory
+        self.session_timeout_seconds = 3600  # 1 hour
         
         # Grid detection patterns
         self.grid_patterns = {
@@ -152,9 +155,12 @@ class PDFService:
         self.enable_semantic_analysis = True  # Understand document relationships
         self.enable_progressive_enhancement = True  # Gradual quality improvements
         
-        # Living Document Features
+        # MEMORY LEAK FIX: Use bounded collections with automatic cleanup
         self.collaboration_sessions = {}  # Track active collaborators
-        self.performance_metrics = defaultdict(list)  # Track performance over time
+        self.performance_metrics = {}  # Changed from defaultdict to regular dict
+        self._last_cleanup_time = time.time()
+        self._cleanup_interval = 300  # Cleanup every 5 minutes
+        
         self.quality_thresholds = {
             'text_clarity': 0.8,
             'grid_confidence': 0.7,
@@ -172,7 +178,7 @@ class PDFService:
         logger.info(f"   🖼️ DPI: Storage={self.storage_dpi}, AI={self.ai_image_dpi}")
         logger.info(f"   📦 Batch size: {self.batch_size} pages")
         logger.info(f"   🔒 Thread safety: Enhanced with status locks")
-        logger.info(f"   💾 Memory management: Active")
+        logger.info(f"   💾 Memory management: Active with automatic cleanup")
         logger.info(f"   📡 SSE Events: Supported")
         logger.info(f"   🎯 Visual Grid Detection: {'Enabled' if OPENCV_AVAILABLE else 'Disabled (OpenCV not available)'}")
         logger.info(f"   📐 Universal Grid System: Enabled")
@@ -181,6 +187,53 @@ class PDFService:
         logger.info(f"   🔍 Anomaly Detection: Active")
         logger.info(f"   👥 Collaboration Ready: Yes")
         logger.info(f"   ♿ Accessibility Scoring: Enabled")
+
+    def _cleanup_old_data(self):
+        """Periodic cleanup of old session data to prevent memory leaks"""
+        current_time = time.time()
+        
+        # Skip if cleaned up recently
+        if current_time - self._last_cleanup_time < self._cleanup_interval:
+            return
+        
+        try:
+            # Clean old collaboration sessions
+            sessions_to_remove = []
+            for session_id, data in self.collaboration_sessions.items():
+                if current_time - data.get('last_activity', 0) > self.session_timeout_seconds:
+                    sessions_to_remove.append(session_id)
+            
+            for session_id in sessions_to_remove:
+                del self.collaboration_sessions[session_id]
+            
+            # Clean old performance metrics - keep only recent sessions
+            if len(self.performance_metrics) > self.max_sessions_in_memory:
+                # Sort by most recent activity (assuming last entry has latest timestamp)
+                sorted_sessions = sorted(
+                    self.performance_metrics.items(),
+                    key=lambda x: x[1][-1]['processing_time'] if x[1] else 0,
+                    reverse=True
+                )
+                # Keep only the most recent sessions
+                self.performance_metrics = dict(sorted_sessions[:self.max_sessions_in_memory])
+            
+            # Clean orphaned status locks
+            if len(self._status_update_locks) > self.max_sessions_in_memory * 2:
+                # Keep only locks that are currently locked
+                active_locks = {}
+                for session_id, lock in self._status_update_locks.items():
+                    if lock.locked():
+                        active_locks[session_id] = lock
+                self._status_update_locks = active_locks
+            
+            self._last_cleanup_time = current_time
+            
+            if sessions_to_remove or len(self.performance_metrics) > self.max_sessions_in_memory:
+                logger.info(f"🧹 Memory cleanup: Removed {len(sessions_to_remove)} old sessions, "
+                          f"{len(self.performance_metrics)} sessions in memory")
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
 
     def _get_status_lock(self, session_id: str) -> asyncio.Lock:
         """Get or create a status lock for a specific document"""
@@ -214,6 +267,9 @@ class PDFService:
             event_callback: Optional async callback for SSE events
             collaboration_session: Optional collaboration session ID for real-time features
         """
+        # Perform cleanup at the start of each processing
+        self._cleanup_old_data()
+        
         if not session_id or not isinstance(session_id, str):
             raise ValueError("Invalid session ID")
         
@@ -257,6 +313,10 @@ class PDFService:
                     
                     # Initialize metadata
                     metadata = self._initialize_metadata(session_id, doc, pages_to_process, total_pages, pdf_size_mb)
+                    
+                    # MEMORY LEAK FIX: Initialize performance metrics as list instead of using defaultdict
+                    if self.enable_performance_tracking:
+                        self.performance_metrics[session_id] = []
                     
                     # Process in batches
                     all_text_parts = []
@@ -366,9 +426,15 @@ class PDFService:
                 finally:
                     doc.close()
                     gc.collect()
+                    
+                    # MEMORY LEAK FIX: Clean up session-specific data
                     # Clean up status lock
                     if session_id in self._status_update_locks:
                         del self._status_update_locks[session_id]
+                    
+                    # Clean up old performance metrics if too many sessions
+                    if len(self.performance_metrics) > self.max_sessions_in_memory * 2:
+                        self._cleanup_old_data()
                     
             except Exception as e:
                 logger.error(f"❌ Processing failed: {e}", exc_info=True)
@@ -597,8 +663,8 @@ class PDFService:
                 if anomalies:
                     page_metadata['anomalies'] = anomalies
             
-            # Revolutionary: Track performance metrics
-            if self.enable_performance_tracking:
+            # Revolutionary: Track performance metrics with memory management
+            if self.enable_performance_tracking and session_id in self.performance_metrics:
                 page_processing_time = time.time() - page_start_time
                 self.performance_metrics[session_id].append({
                     'page': page_actual,
@@ -607,6 +673,9 @@ class PDFService:
                     'tables_found': tables_found,
                     'quality_score': page_metadata.get('quality_score', 0)
                 })
+                # MEMORY LEAK FIX: Limit metrics per session
+                if len(self.performance_metrics[session_id]) > 100:
+                    self.performance_metrics[session_id] = self.performance_metrics[session_id][-50:]
             
             # Revolutionary: Accessibility scoring
             if self.enable_accessibility_scoring:
@@ -783,7 +852,10 @@ class PDFService:
         """
         if not OPENCV_AVAILABLE:
             return None
-            
+        
+        pix = None
+        img_data = None
+        
         try:
             # Extract page as image for analysis
             mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better line detection
@@ -799,8 +871,8 @@ class PDFService:
             horizontal_lines = self._detect_horizontal_lines(gray)
             vertical_lines = self._detect_vertical_lines(gray)
             
-            # Clean up
-            pix = None
+            # MEMORY LEAK FIX: Properly clean up
+            gray = None
             
             if not horizontal_lines and not vertical_lines:
                 logger.info(f"No visual grid lines detected on page {page_num}")
@@ -824,6 +896,14 @@ class PDFService:
         except Exception as e:
             logger.error(f"Visual grid detection failed for page {page_num}: {e}")
             return None
+        finally:
+            # MEMORY LEAK FIX: Properly clean up pixmap and numpy array
+            if pix:
+                pix.clear_with()  # Proper cleanup method
+                pix = None
+            if img_data is not None:
+                del img_data
+            gc.collect()
 
     def _detect_horizontal_lines(self, image: np.ndarray) -> List[VisualGridLine]:
         """Detect horizontal grid lines"""
@@ -1418,11 +1498,15 @@ class PDFService:
     async def _generate_jpeg_image(self, page: fitz.Page, page_num: int, session_id: str,
                                   storage_service: StorageService, dpi: int, quality: int, suffix: str,
                                   resource_type: str, event_callback: Optional[Callable] = None):
-        """Generate and upload JPEG image with event emission"""
-        matrix = fitz.Matrix(dpi / 72, dpi / 72)
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        """Generate and upload JPEG image with event emission and proper cleanup"""
+        pix = None
+        img = None
+        output = None
         
         try:
+            matrix = fitz.Matrix(dpi / 72, dpi / 72)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            
             # Convert to PIL Image
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
@@ -1456,12 +1540,17 @@ class PDFService:
             })
             
         finally:
-            # Clean up
-            pix = None
-            if 'img' in locals():
+            # MEMORY LEAK FIX: Proper cleanup
+            if pix:
+                pix.clear_with()  # Proper cleanup method
+                pix = None
+            if img:
                 img.close()
-            if 'output' in locals():
+                img = None
+            if output:
                 output.close()
+                output = None
+            gc.collect()
 
     def _analyze_page_content(self, text: str, page_num: int) -> Dict[str, Any]:
         """Analyze page content with enhanced pattern matching"""
@@ -1994,9 +2083,12 @@ class PDFService:
 
     def get_processing_stats(self) -> Dict[str, Any]:
         """Get service statistics"""
+        # Cleanup before reporting stats
+        self._cleanup_old_data()
+        
         return {
             "service": "PDFService",
-            "version": "7.0.0-REVOLUTIONARY-LIVING-DOCUMENT",
+            "version": "7.0.0-REVOLUTIONARY-LIVING-DOCUMENT-LEAK-FIXED",
             "mode": "production_grade_with_universal_grid_detection_and_ai_enhancements",
             "capabilities": {
                 "max_pages": self.max_pages,
@@ -2012,8 +2104,17 @@ class PDFService:
                 "ai_optimized": True,
                 "thread_safe": True,
                 "memory_managed": True,
+                "memory_leak_fixed": True,
                 "sse_events": True,
                 "status_locking": True
+            },
+            "memory_management": {
+                "max_sessions_in_memory": self.max_sessions_in_memory,
+                "session_timeout_seconds": self.session_timeout_seconds,
+                "cleanup_interval_seconds": self._cleanup_interval,
+                "active_sessions": len(self.performance_metrics),
+                "active_collaboration_sessions": len(self.collaboration_sessions),
+                "active_status_locks": len(self._status_update_locks)
             },
             "revolutionary_features": {
                 "ai_coordinate_annotations": self.enable_ai_annotations,
@@ -2156,8 +2257,15 @@ class PDFService:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit with cleanup"""
+        # Force final cleanup
+        self._cleanup_old_data()
+        
+        # Clear all remaining data
+        self.performance_metrics.clear()
+        self.collaboration_sessions.clear()
+        self._status_update_locks.clear()
+        
         # Force garbage collection
         gc.collect()
-        # Clear any remaining status locks
-        self._status_update_locks.clear()
+        
         logger.info("✅ PDF service cleaned up")

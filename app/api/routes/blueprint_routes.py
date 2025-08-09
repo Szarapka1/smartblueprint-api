@@ -1426,7 +1426,7 @@ async def clear_document(
 ):
     """
     Clear a document and all associated data.
-    Requires confirmation parameter to prevent accidental deletioghfn.
+    Requires confirmation parameter to prevent accidental deletion.
     """
     if not confirm:
         raise HTTPException(
@@ -1491,6 +1491,146 @@ async def clear_document(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to clear document: {str(e)}"
+        )
+
+@blueprint_router.post(
+    "/admin/cleanup-memory",
+    summary="Manual memory cleanup",
+    description="Emergency memory cleanup endpoint for admin use"
+)
+async def cleanup_memory(request: Request):
+    """Manual memory cleanup endpoint for emergency memory management"""
+    try:
+        cleanup_stats = {
+            "before": {},
+            "after": {},
+            "cleaned": {}
+        }
+        
+        # Get PDF service from request state
+        pdf_service = getattr(request.app.state, 'pdf_service', None)
+        
+        if pdf_service:
+            # Get before stats
+            if hasattr(pdf_service, 'performance_metrics'):
+                cleanup_stats["before"]["performance_metrics"] = len(pdf_service.performance_metrics)
+            if hasattr(pdf_service, 'collaboration_sessions'):
+                cleanup_stats["before"]["collaboration_sessions"] = len(pdf_service.collaboration_sessions)
+            if hasattr(pdf_service, '_status_update_locks'):
+                cleanup_stats["before"]["status_locks"] = len(pdf_service._status_update_locks)
+            
+            # Call the cleanup method if available (new code)
+            if hasattr(pdf_service, '_cleanup_old_data'):
+                pdf_service._cleanup_old_data()
+            
+            # Force clear everything for immediate relief
+            if hasattr(pdf_service, 'performance_metrics'):
+                pdf_service.performance_metrics.clear()
+            if hasattr(pdf_service, 'collaboration_sessions'):
+                pdf_service.collaboration_sessions.clear()
+            if hasattr(pdf_service, '_status_update_locks'):
+                pdf_service._status_update_locks.clear()
+            
+            # Get after stats
+            if hasattr(pdf_service, 'performance_metrics'):
+                cleanup_stats["after"]["performance_metrics"] = len(pdf_service.performance_metrics)
+            if hasattr(pdf_service, 'collaboration_sessions'):
+                cleanup_stats["after"]["collaboration_sessions"] = len(pdf_service.collaboration_sessions)
+            if hasattr(pdf_service, '_status_update_locks'):
+                cleanup_stats["after"]["status_locks"] = len(pdf_service._status_update_locks)
+            
+            # Calculate cleaned
+            for key in cleanup_stats["before"]:
+                cleanup_stats["cleaned"][key] = cleanup_stats["before"][key] - cleanup_stats["after"].get(key, 0)
+        
+        # Force garbage collection multiple times
+        import gc
+        import psutil
+        
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        
+        # Get memory info
+        process = psutil.Process()
+        memory_info = {
+            "memory_usage_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+            "memory_percent": round(process.memory_percent(), 2)
+        }
+        
+        logger.info(f"🧹 Manual memory cleanup completed: {cleanup_stats}")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message": "Memory cleanup completed",
+                "cleanup_stats": cleanup_stats,
+                "memory_info": memory_info,
+                "timestamp": datetime.utcnow().isoformat() + 'Z'
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Memory cleanup failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": str(e)
+            }
+        )
+
+@blueprint_router.get(
+    "/admin/memory-status",
+    summary="Get memory status",
+    description="Get current memory usage and session stats"
+)
+async def memory_status(request: Request):
+    """Get current memory usage and session stats"""
+    try:
+        import psutil
+        process = psutil.Process()
+        
+        # Get PDF service
+        pdf_service = getattr(request.app.state, 'pdf_service', None)
+        
+        stats = {
+            "memory": {
+                "usage_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+                "usage_percent": round(process.memory_percent(), 2),
+                "available_mb": round(psutil.virtual_memory().available / 1024 / 1024, 2),
+                "total_mb": round(psutil.virtual_memory().total / 1024 / 1024, 2)
+            },
+            "sessions": {
+                "performance_metrics": 0,
+                "collaboration_sessions": 0,
+                "status_locks": 0
+            },
+            "settings": {
+                "pdf_ai_dpi": settings.PDF_AI_DPI,
+                "pdf_high_resolution": settings.PDF_HIGH_RESOLUTION,
+                "max_file_size_mb": settings.MAX_FILE_SIZE_MB,
+                "max_pages": settings.PDF_MAX_PAGES
+            }
+        }
+        
+        # Get session counts if pdf_service available
+        if pdf_service:
+            stats["sessions"]["performance_metrics"] = len(getattr(pdf_service, 'performance_metrics', {}))
+            stats["sessions"]["collaboration_sessions"] = len(getattr(pdf_service, 'collaboration_sessions', {}))
+            stats["sessions"]["status_locks"] = len(getattr(pdf_service, '_status_update_locks', {}))
+        
+        return JSONResponse(status_code=200, content=stats)
+        
+    except Exception as e:
+        logger.error(f"Failed to get memory status: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": str(e)
+            }
         )
 
 # ===== HELPER FUNCTIONS =====
