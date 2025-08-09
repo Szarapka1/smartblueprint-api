@@ -22,10 +22,11 @@ logger = logging.getLogger(__name__)
 
 class VisionIntelligence:
     """
-    Quad Verification Visual Intelligence using GPT-4 Vision
+    Penta Verification Visual Intelligence using GPT-4 Vision
     
-    Philosophy: GPT-4V already knows construction. Just ask it clearly 4 times:
-    1. Visual count
+    Philosophy: GPT-4V already knows construction. Ask it 5 different ways:
+    0. Pure GPT-4V - User prompt only (baseline)
+    1. Visual count with guidance
     2. Visual + spatial verification
     3. Text review across entire document
     4. Cross-reference & deduplication check
@@ -73,18 +74,19 @@ class VisionIntelligence:
         comprehensive_data: Optional[Dict[str, Any]] = None
     ) -> VisualIntelligenceResult:
         """
-        Core visual analysis method - Quad Verification Approach
+        Core visual analysis method - Penta Verification Approach
         
-        Pass 1: Direct visual count
+        Pass 0: Pure GPT-4V with user prompt only (baseline)
+        Pass 1: Direct visual count with guidance
         Pass 2: Visual + spatial verification  
         Pass 3: Text review across entire document
         Pass 4: Cross-reference & deduplication
         
-        If all 4 agree = near 100% confidence
+        If all 5 agree = near 100% confidence
         """
         
         element_type = question_analysis.get("element_focus", "element")
-        logger.info(f"🧠 Starting Quad Verification for {element_type}s")
+        logger.info(f"🧠 Starting Penta Verification for {element_type}s")
         logger.info(f"📄 Analyzing {len(images)} images for: {prompt}")
         
         # Extract text context if available
@@ -95,6 +97,12 @@ class VisionIntelligence:
         try:
             # Ensure semaphores are initialized
             self._ensure_semaphores_initialized()
+            
+            # PASS 0: Pure GPT-4V - User prompt only
+            logger.info("🎯 PASS 0: Pure GPT-4V Analysis (User Prompt Only)")
+            pass0_result = await self._pass0_pure_vision(
+                element_type, images, prompt
+            )
             
             # PASS 1: Direct Visual Count
             logger.info("👁️ PASS 1: Direct Visual Count")
@@ -122,11 +130,11 @@ class VisionIntelligence:
             
             # Build consensus result
             final_result = self._build_consensus_result(
-                pass1_result, pass2_result, pass3_result, pass4_result,
+                pass0_result, pass1_result, pass2_result, pass3_result, pass4_result,
                 element_type, page_number
             )
             
-            logger.info(f"✅ Quad verification complete: {final_result.count} {element_type}(s) " +
+            logger.info(f"✅ Penta verification complete: {final_result.count} {element_type}(s) " +
                        f"with {int(final_result.confidence * 100)}% confidence")
             
             return final_result
@@ -134,6 +142,99 @@ class VisionIntelligence:
         except Exception as e:
             logger.error(f"Visual Intelligence error: {e}", exc_info=True)
             return self._create_error_result(element_type, page_number, str(e))
+    
+    async def _pass0_pure_vision(
+        self,
+        element_type: str,
+        images: List[Dict[str, Any]],
+        original_prompt: str
+    ) -> Dict[str, Any]:
+        """
+        Pass 0: Pure GPT-4V with ONLY the user's original prompt
+        No guidance, no structure - just let GPT-4V use its inherent understanding
+        """
+        
+        # Use ONLY the original user prompt - nothing else
+        prompt = original_prompt
+
+        content = self._prepare_vision_content_minimal(images, prompt)
+        
+        async with self.vision_semaphore:
+            response = await self._make_vision_request(
+                content,
+                system_prompt="You are looking at construction drawings.",  # Minimal system prompt
+                max_tokens=1000
+            )
+        
+        if response:
+            return self._parse_pass0_response(response, element_type)
+        
+        return {"count": 0, "raw_response": "", "confidence": "LOW"}
+    
+    def _prepare_vision_content_minimal(
+        self,
+        images: List[Dict[str, Any]],
+        text_prompt: str
+    ) -> List[Dict[str, Any]]:
+        """Prepare minimal content for pure vision request"""
+        content = []
+        
+        # Add images
+        for image in images:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": image["url"],
+                    "detail": "high"
+                }
+            })
+        
+        # Add the prompt
+        content.append({
+            "type": "text",
+            "text": text_prompt
+        })
+        
+        return content
+    
+    def _parse_pass0_response(self, response: str, element_type: str) -> Dict[str, Any]:
+        """Parse Pass 0 pure response - extract whatever count GPT naturally provides"""
+        result = {
+            "count": 0,
+            "raw_response": response,
+            "confidence": "MEDIUM",
+            "natural_count": None
+        }
+        
+        # Try to extract any number that appears to be a count
+        # Look for patterns like "33 windows", "I count 33", "There are 33", etc.
+        count_patterns = [
+            r'(\d+)\s+' + element_type + r's?\b',
+            r'count(?:ed)?\s+(\d+)\b',
+            r'(?:there\s+are|I\s+see|found|total(?:s)?)\s+(\d+)\b',
+            r'(\d+)\s+total\b',
+            r'exactly\s+(\d+)\b',
+            r'(\d+)\s+(?:unique|different|individual)\s+' + element_type
+        ]
+        
+        for pattern in count_patterns:
+            match = re.search(pattern, response, re.IGNORECASE)
+            if match:
+                result["count"] = int(match.group(1))
+                result["natural_count"] = int(match.group(1))
+                break
+        
+        # If we found a count, confidence is higher
+        if result["count"] > 0:
+            # Check if response seems confident
+            if any(word in response.lower() for word in ['exactly', 'definitely', 'clearly', 'precisely']):
+                result["confidence"] = "HIGH"
+            elif any(word in response.lower() for word in ['approximately', 'about', 'around', 'roughly']):
+                result["confidence"] = "MEDIUM"
+            else:
+                result["confidence"] = "MEDIUM"
+        
+        return result
     
     async def _pass1_visual_count(
         self,
@@ -560,6 +661,11 @@ Original question: {original_prompt}"""
         
         # Build verification notes
         verification_notes = []
+        
+        # Add Pass 0 if it found something
+        if pass0.get("count", 0) > 0:
+            verification_notes.append(f"Pass 0 (Pure GPT-4V): {pass0.get('count', 0)} {element_type}s")
+        
         verification_notes.append(f"Pass 1 (Visual): {pass1.get('count', 0)} {element_type}s")
         verification_notes.append(f"Pass 2 (Spatial): {pass2.get('count', 0)} {element_type}s")
         
@@ -584,6 +690,11 @@ Original question: {original_prompt}"""
         
         # Build visual evidence
         visual_evidence = []
+        
+        # Add Pass 0 insight if it was close
+        if pass0.get("count", 0) > 0:
+            visual_evidence.append(f"Pure GPT-4V detected {pass0['count']} {element_type}s")
+        
         if pass2.get("locations"):
             visual_evidence.append(f"Found in {len(set(pass2.get('grid_references', [])))} grid locations")
         if pass1.get("pages"):
@@ -625,6 +736,7 @@ Original question: {original_prompt}"""
     
     def _calculate_consensus_confidence_with_pass4(
         self,
+        pass0: Dict[str, Any],
         pass1: Dict[str, Any],
         pass2: Dict[str, Any],
         pass3: Dict[str, Any],
@@ -633,22 +745,29 @@ Original question: {original_prompt}"""
         count_sources: List[Tuple[str, int]],
         consensus_count: int
     ) -> float:
-        """Calculate confidence based on consensus between all 4 passes"""
+        """Calculate confidence based on consensus between all 5 passes"""
         
         if not counts:
             return 0.5
         
+        # Special weight if Pass 0 (pure GPT) agrees with final consensus
+        pass0_agrees = (pass0.get("count") == consensus_count and pass0.get("count", 0) > 0)
+        
         # If Pass 4 verified with high confidence and it matches consensus
         if (pass4.get("verified_count") == consensus_count and 
             pass4.get("confidence") == "HIGH"):
-            return 0.99  # Highest confidence - verified deduplication matches
+            if pass0_agrees:
+                return 0.995  # Highest - both pure and verified agree
+            return 0.99  # Very high - verified deduplication matches
         
-        # Check for perfect consensus across visual passes
+        # Check for perfect consensus across all passes
         unique_counts = set(counts)
         if len(unique_counts) == 1:
-            if len(counts) >= 4:
-                return 0.98  # All 4 data points agree
-            elif len(counts) == 3:
+            if len(counts) >= 5:
+                return 0.99  # All 5 data points agree
+            elif len(counts) >= 4:
+                return 0.97  # 4 agree
+            elif len(counts) >= 3:
                 return 0.95  # 3 agree
             elif len(counts) == 2:
                 return 0.92  # 2 agree
@@ -671,6 +790,8 @@ Original question: {original_prompt}"""
         confidence_adjustment = 0.0
         
         # Pass quality bonuses
+        if pass0.get("confidence") == "HIGH" and pass0.get("count", 0) > 0:
+            confidence_adjustment += 0.04  # Pure GPT confidence bonus
         if pass1.get("confidence") == "HIGH":
             confidence_adjustment += 0.03
         if pass2.get("locations") and len(pass2["locations"]) > 0:
@@ -714,7 +835,7 @@ Original question: {original_prompt}"""
         pass3: Dict[str, Any],
         counts: List[int]
     ) -> float:
-        """Calculate confidence based on consensus between passes (kept for compatibility)"""
+        """Calculate confidence based on consensus between passes (kept for compatibility - not used in penta verification)"""
         
         if not counts:
             return 0.5
