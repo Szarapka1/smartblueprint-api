@@ -1511,8 +1511,8 @@ class PDFService:
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
             # Resize if needed for AI images
-            if suffix == "_ai" and max(img.size) > self.ai_max_dimension:
-                img.thumbnail((self.ai_max_dimension, self.ai_max_dimension), Image.Resampling.LANCZOS)
+            #if suffix == "_ai" and max(img.size) > self.ai_max_dimension:
+            #    img.thumbnail((self.ai_max_dimension, self.ai_max_dimension), Image.Resampling.LANCZOS)
             
             # Save as JPEG
             output = io.BytesIO()
