@@ -2029,7 +2029,7 @@ async def periodic_cleanup():
                 ]
                 for task_id in completed_tasks:
                     processing_tasks.pop(task_id, None)
-                
+                 
                 if completed_tasks:
                     logger.info(f"Cleaned up {len(completed_tasks)} completed tasks")
             

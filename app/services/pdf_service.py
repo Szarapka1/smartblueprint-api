@@ -2268,4 +2268,4 @@ class PDFService:
         # Force garbage collection
         gc.collect()
         
-        logger.info("✅ PDF service cleaned up")
+        logger.info("✅ PDF service cleaned up") 
